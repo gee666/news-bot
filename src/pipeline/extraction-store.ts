@@ -2,11 +2,11 @@ import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import { reconcileStory } from './revisions.js';
 
-export const EXTRACTION_VERSION = 'events-v5';
+export const EXTRACTION_VERSION = 'events-v6';
 const spanSchema = z.object({ start: z.number().int().nonnegative(), end: z.number().int().positive() }).strict();
-export const spansSchema = z.array(spanSchema).max(100);
+export const spansSchema = z.array(spanSchema);
 export type Span = z.infer<typeof spanSchema>;
-export const eventsSchema = z.array(z.object({ parts: spansSchema.min(1), context: spansSchema }).strict()).max(100);
+export const eventsSchema = z.array(z.object({ parts: spansSchema.min(1), context: spansSchema }).strict());
 export type ExtractedEvent = z.infer<typeof eventsSchema>[number];
 export function eventSpans(event: ExtractedEvent): Span[] { return [...event.context, ...event.parts].sort((a, b) => a.start - b.start); }
 export function eventText(text: string, event: ExtractedEvent): string { return eventSpans(event).map(span => text.slice(span.start, span.end)).join('\n\n'); }

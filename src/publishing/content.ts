@@ -7,7 +7,7 @@ import { fetchedRelevanceCte } from './source-relevance.js';
 import { publicUrl } from '../pipeline/research-fetch.js';
 import { sourceAuthorityRanks, generationReviewSchema, publicationSnapshotSchema, publicationSourceSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
 
-const generationMetadataSchema = z.object({ review: generationReviewSchema.optional(), sourceUrls: z.array(z.string()).optional() });
+const generationMetadataSchema = z.object({ review: generationReviewSchema.optional() });
 
 export interface StoryContent {
   id: string; headline: string; summary: string | null; translated_excerpt: string | null;
@@ -123,8 +123,7 @@ export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: Stor
   [story.id, story.headline, story.summary, receiptId ?? null]);
   const parsed = generationMetadataSchema.safeParse(receipt.rows[0]?.result);
   const metadata = parsed.success ? parsed.data : undefined;
-  const selected = inventory.filter(source => metadata?.sourceUrls?.includes(source.url));
-  const sources = mergeSources(selected.length ? selected : inventory);
+  const sources = mergeSources(inventory);
   for (const source of sources) delete source.labels;
   return publicationSnapshotSchema.parse({ headline: story.headline, score: story.interest_score,
     details: story.researched ? story.summary : story.translated_excerpt, detailsKind: story.researched ? 'summary' : 'excerpt', sources,

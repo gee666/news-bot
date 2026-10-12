@@ -8,11 +8,10 @@ import { matchBatch } from './matching.js';
 import { finishBatchStories } from './stories.js';
 import { Vectors } from './vectors.js';
 import { recordProcessingDiagnostic } from './processing-diagnostics.js';
-import { retryDecision, stage, Waiting } from './state.js';
+import { retryDecision, Waiting } from './state.js';
 import { reconcileEdits } from './revisions.js';
 import { consolidateStories } from './consolidation.js';
-import { associateSourceLinks } from './source-links.js';
-import { completeBatchItems, existingItemFailures, itemWork } from './item-failures.js';
+import { completeBatchItems } from './item-failures.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 
 const batchSchema = z.object({ id: z.uuid(), cutoff_at: z.date(), settings_snapshot: settingsSchema,
@@ -28,7 +27,8 @@ async function processBatchSlice(recoverOnly: boolean, batchId?: string,
     : await db.query(`SELECT * FROM processing_batches b WHERE completed_at IS NULL
       AND (next_retry_at IS NULL OR next_retry_at<=now())
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='run_now_batch:'||b.id::text)
-      ORDER BY cutoff_at DESC,started_at DESC,b.id LIMIT 1`);
+      ORDER BY EXISTS(SELECT 1 FROM batch_items i WHERE i.batch_id=b.id
+        AND i.status IN ('pending','processing')) DESC,cutoff_at DESC,started_at DESC,b.id LIMIT 1`);
   let batch = selected.rows.length ? batchSchema.parse(selected.rows[0]) : undefined;
   if (batch && (batch.completed_at || (batch.next_retry_at && batch.next_retry_at>new Date()))) return;
   if (!batch) {
@@ -52,10 +52,10 @@ async function processBatchSlice(recoverOnly: boolean, batchId?: string,
     try {
       const processingBatchId = batch.id;
       // Saved extraction must reach matching even while another revision waits on links.
-      await matchBatch(batch.id, settings, judgments, vectors);
-      await extractBatch(batch.id, settings, judgments, async revisionId => {
+      await matchBatch(batch.id, settings, vectors);
+      await extractBatch(batch.id, settings, async revisionId => {
         const mentions = await db.query<{ id: string }>('SELECT id FROM story_mentions WHERE revision_id=$1', [revisionId]);
-        await matchBatch(processingBatchId, settings, judgments, vectors, mentions.rows.map(mention => mention.id));
+        await matchBatch(processingBatchId, settings, vectors, mentions.rows.map(mention => mention.id));
         await reconcileEdits(processingBatchId, settings, [revisionId]);
         await completeBatchItems(processingBatchId, undefined, revisionId);
         if (!batchId) {
@@ -63,16 +63,9 @@ async function processBatchSlice(recoverOnly: boolean, batchId?: string,
           await finishBatchStories(processingBatchId, settings, judgments, vectors, onReady, stories.rows.map(story => story.story_id));
         }
       });
-      await matchBatch(batch.id, settings, judgments, vectors);
+      await matchBatch(batch.id, settings, vectors);
       await reconcileEdits(batch.id, settings);
-      await consolidateStories(settings, { judgments, vectors, context: { id: batch.id, batchId: batch.id, attempt: 1 } });
-      const failed = await existingItemFailures(batch.id);
-      await associateSourceLinks(settings, { judgments, inputBatchId: batch.id,
-        messageWork: (message, run) => itemWork(processingBatchId, message.revision_id, failed, async () => {
-          await stage(processingBatchId, { revisionId: message.revision_id }, `source_links:item:${message.processing_key}`,
-            settings, z.boolean(), async context => { await run(context); return true; });
-        }),
-      });
+      await consolidateStories(settings, batch.id);
       await finishBatchStories(batch.id, settings, judgments, vectors, onReady);
       await completeBatchItems(batch.id);
     } finally { await Promise.all([judgments.close(), vectors.close()]); }

@@ -117,8 +117,8 @@ describe('private browser API', () => {
     expect(response.status).toBe(200);
     const body = await response.text();
     expect(body).toContain('current_generation_missing'); expect(body).toContain('"occurrences":1');
-    expect(body).toContain('"operation":null'); expect(body).toContain('"failure_phase":"story_refresh"');
-    expect(body).not.toContain('"dispatches"'); expect(body).toContain('"status":"unresolved"');
+    expect(body).toContain('"operation":null'); expect(body).not.toContain('"failure_phase"');
+    expect(body).not.toContain('"dispatches"'); expect(body).not.toContain('"aggregateSelections"');
     expect(body).not.toContain(secret);
     expect(services.start).not.toHaveBeenCalled(); expect(services.save).not.toHaveBeenCalled();
   });

@@ -7,13 +7,12 @@ import { requestScheduledIntake, drainScheduledIntake } from './scheduled-intake
 import { Judgments } from './judgments.js';
 import { cleanup } from './retention.js';
 import { refreshDigest } from './stories.js';
-import { OperationalDeferred, operationalWork, saveOperational, type DigestPhase } from './operational.js';
+import { OperationalDeferred, operationalWork, saveOperational } from './operational.js';
 import { recordProcessingDiagnostic } from './processing-diagnostics.js';
 import { reembedPending } from './vectors.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 import { withLease } from './lease.js';
-import { consolidateStories } from './consolidation.js';
-import { associateSourceLinks, SOURCE_MESSAGES_PER_PASS } from './source-links.js';
+import { associateSourceLinks } from './source-links.js';
 import { runNow, type RunNowJob, type RunNowOutcome } from './run-now.js';
 
 export interface Pipeline {
@@ -63,14 +62,12 @@ export async function createPipeline(): Promise<Pipeline> {
   const digest = async (manual = false) => {
     await withLease('news-bot-digest-refresh', async () => {
       const settings = await getSettings();
-      let phase: DigestPhase = 'consolidation';
-      await operationalWork('pipeline_digest', settings, manual, async attempt => {
+
+      await operationalWork('pipeline_digest', settings, manual, async () => {
         const judgments = new Judgments(settings);
         try {
-          let deferredSelections = 0;
           let partial = false;
-          const runPhase = async <T>(name: DigestPhase, work: () => Promise<T>): Promise<T | undefined> => {
-            phase = name;
+          const refresh = async <T>(work: () => Promise<T>): Promise<T | undefined> => {
             let result: T | undefined;
             try {
               const held = await withLease('news-bot-pipeline', () => withProcessingSlice(async () => { result = await work(); }));
@@ -81,26 +78,18 @@ export async function createPipeline(): Promise<Pipeline> {
             }
             return result;
           };
-          const context = { id: 'pipeline_digest', batchId: null, attempt };
-          const intake = await db.query(`SELECT 1 FROM batch_items b JOIN processing_batches p ON p.id=b.batch_id
-            WHERE p.completed_at IS NULL AND b.status IN ('pending','processing') LIMIT 1`);
-          // Historical link enrichment must not consume the dispatch budget needed by new intake.
-          if (manual || !intake.rows.length) {
-            const comparisons = await runPhase('consolidation', () => consolidateStories(settings, { judgments, context }));
-            deferredSelections += comparisons?.deferred ?? 0;
-            const links = await runPhase('source_links', () => associateSourceLinks(settings, { judgments, context }));
-            deferredSelections += links?.deferred ?? 0;
-            if (links && links.messages >= SOURCE_MESSAGES_PER_PASS) partial = true;
-          }
-          const report = await runPhase('story_refresh', () => refreshDigest(settings, judgments));
+          const report = await refresh(async () => {
+            const report = await refreshDigest(settings, judgments);
+            await associateSourceLinks(settings);
+            return report;
+          });
           // Ready-event selection and final delivery already check each story's exact freshness.
           // Unrelated retained history must not hold publication or the processor lease.
-          phase = 'publication';
           await publishDigest(settings);
           if (partial) throw new OperationalDeferred('Partial digest sweep. Saved work will resume after the checkpoint.');
-          return report ? { ...report,deferredSelections } : undefined;
+          return report;
         } finally { await judgments.close(); }
-      }, () => phase);
+      });
     });
   };
   const runCleanup = async () => { await withLease('news-bot-pipeline', async () => cleanup(await getSettings())); };
@@ -117,8 +106,7 @@ export async function createPipeline(): Promise<Pipeline> {
           (key='pipeline_digest' AND (value->>'phase'='running' OR (value->>'next')::timestamptz<=now()))
           OR (key LIKE 'pipeline_failed_story:%' AND (value->>'next')::timestamptz<=now())
           OR key LIKE 'digest_refresh:%'
-          OR (key LIKE 'consolidation_deferred:%' AND value->>'status'='unresolved' AND (value->>'next')::timestamptz<=now())
-          OR (key LIKE 'source_link_deferred:%' AND value->>'status'='unresolved' AND (value->>'next')::timestamptz<=now()) LIMIT 1`);
+          LIMIT 1`);
         if (due.rows.length) await digest();
       });
     } finally { recovering = false; }
@@ -180,11 +168,7 @@ export async function createPipeline(): Promise<Pipeline> {
       const stages = await db.query(`SELECT id,batch_id,revision_id,story_id,stage,status,attempts,retry_epoch,retry_epoch_start,next_retry_at,waiting_reason,error_code,outcome_unknown
         FROM stage_state WHERE status IN ('running','waiting','failed') ORDER BY updated_at DESC LIMIT 100`);
       const operations = await db.query("SELECT key,value,updated_at FROM operational_state WHERE key LIKE 'pipeline_%' AND NOT starts_with(key,'pipeline_error:')");
-      const selections = await db.query(`SELECT key,value->>'status' AS status,value->>'phase' AS phase,
-        value->>'storyId' AS story_id,value->>'leftId' AS left_id,value->>'rightId' AS right_id,updated_at
-        FROM operational_state WHERE key LIKE 'consolidation_deferred:%' OR key LIKE 'source_link_deferred:%'
-        ORDER BY updated_at DESC LIMIT 100`);
-      return { running, batches: batches.rows, stages: stages.rows, operations: operations.rows, aggregateSelections: selections.rows };
+      return { running, batches: batches.rows, stages: stages.rows, operations: operations.rows };
     },
   };
 }

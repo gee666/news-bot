@@ -8,7 +8,8 @@ import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 
 const mocks = vi.hoisted(() => ({ empty: vi.fn(), collection: vi.fn(), stories: vi.fn(), clock: 0 }));
 vi.mock('./generation-model.js', () => ({ generationClient: async () => ({}), recordGenerationFailure: vi.fn(), requireInferenceApproval: vi.fn() }));
-vi.mock('./extraction-fallback.js', () => ({ extractWithGenerator: mocks.empty }));
+vi.mock('./extraction-model.js', () => ({ extractEvents: mocks.empty }));
+vi.mock('./grouping-model.js', () => ({ GROUPING_VERSION: 'grouping-v1', groupReport: async () => [] }));
 vi.mock('./collection.js', () => ({ collectBatch: mocks.collection }));
 vi.mock('./stories.js', () => ({ finishBatchStories: mocks.stories }));
 vi.mock('../models/jev.js', async original => ({ ...await original<typeof import('../models/jev.js')>(), JevClient: class {
@@ -35,7 +36,7 @@ const schema = `processing_retry_${randomUUID().replaceAll('-', '')}`;
 let admin: pg.Pool;
 let database: typeof import('../db.js');
 let settings: AppSettings;
-let judgments: import('./judgments.js').Judgments;
+
 let vectors: import('./vectors.js').Vectors;
 async function one(sql: string, args: unknown[] = []): Promise<string> {
   const id = (await database.db.query<{ id: string }>(sql, args)).rows[0]?.id;
@@ -62,7 +63,7 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     vi.stubEnv('DATABASE_URL', scoped.toString()); vi.stubEnv('EMBEDDING_DIMENSIONS', '3');
     database = await import('../db.js'); await database.migrate();
     const store = await import('../settings.js'); settings = await store.saveSettings({ embeddingDimensions: 3 });
-    judgments = new (await import('./judgments.js')).Judgments(settings);
+
     vectors = new (await import('./vectors.js')).Vectors(await store.getActiveEmbeddingConfig(), settings);
   });
   beforeEach(async () => {
@@ -71,25 +72,33 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     await database.db.query('DELETE FROM operational_state');
     mocks.collection.mockResolvedValue(undefined);
     mocks.stories.mockResolvedValue({ completedStories: 0, failedStories: 0, skippedStories: 0 });
-    mocks.empty.mockResolvedValue({ events: [], resolution: 'confirmed_empty' });
+    mocks.empty.mockImplementation(async (text: string) => {
+      if (text.includes('Broken')) throw new ModelRequestError(failureMetadata(new RequestFault('transient'), 'extract', 'pi', 1, 0));
+      return text.includes('Empty') ? [] : [{ parts: [{ start: 0, end: text.length }], context: [] }];
+    });
     mocks.clock=0;
   });
   afterAll(async () => {
-    await judgments?.close(); await vectors?.close(); await database?.db.end();
+    await vectors?.close(); await database?.db.end();
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.restoreAllMocks(); vi.unstubAllEnvs();
   });
-  it('tunes only the former matching default, preserving custom and manual limits', async () => {
-    const automatic=await batch('queued'); const customized=await batch('queued'); const manual=await batch('queued');
-    await database.db.query("UPDATE app_settings SET value=jsonb_set(value,'{matchCandidateLimit}','20')");
-    await database.db.query("UPDATE processing_batches SET settings_snapshot=jsonb_set(settings_snapshot,'{matchCandidateLimit}','20') WHERE id=ANY($1)",[[automatic,manual]]);
-    await database.db.query("UPDATE processing_batches SET settings_snapshot=jsonb_set(settings_snapshot,'{matchCandidateLimit}','9') WHERE id=$1",[customized]);
-    await database.db.query('UPDATE processing_batches SET manual_operation_id=$2 WHERE id=$1',[manual,randomUUID()]);
-    await database.db.query(await readFile(new URL('../../migrations/192_recent_intake.sql',import.meta.url),'utf8'));
-    expect((await database.db.query("SELECT value->>'matchCandidateLimit' AS n FROM app_settings")).rows).toEqual([{n:'5'}]);
-    for(const [id,n] of [[automatic,'5'],[customized,'9'],[manual,'20']]) {
-      expect((await database.db.query("SELECT settings_snapshot->>'matchCandidateLimit' AS n FROM processing_batches WHERE id=$1",[id])).rows).toEqual([{n}]);
-    }
+  it('migrates retired settings and unfinished stages without deleting successful extraction or audits', async () => {
+    const automatic=await batch('waiting'); const revision=await item(automatic,'Empty old recap.');
+    await (await import('./extraction-store.js')).applyExtraction(automatic,revision,'Empty old recap.',[]);
+    await database.db.query("UPDATE app_settings SET value=value||'{\"matchCandidateLimit\":5,\"headlineBatchSize\":10}'::jsonb");
+    await database.db.query("UPDATE processing_batches SET settings_snapshot=settings_snapshot||'{\"matchCandidateLimit\":5,\"headlineBatchSize\":10}'::jsonb");
+    await database.db.query(`INSERT INTO stage_state(batch_id,revision_id,stage,status,output)
+      VALUES($1,$2,'extract:events-v5','completed','[]'),($1,$2,'source_links:item:old','waiting',NULL)`, [automatic,revision]);
+    const sql=await readFile(new URL('../../migrations/193_simple_association.sql',import.meta.url),'utf8');
+    await database.db.query(sql);
+    expect((await database.db.query("SELECT value ? 'matchCandidateLimit' AS retired FROM app_settings")).rows).toEqual([{retired:false}]);
+    expect((await database.db.query("SELECT settings_snapshot ? 'headlineBatchSize' AS retired FROM processing_batches")).rows).toEqual([{retired:false}]);
+    expect((await database.db.query('SELECT status FROM stage_state WHERE batch_id=$1 ORDER BY stage',[automatic])).rows)
+      .toEqual([{status:'completed'},{status:'skipped'}]);
+    await (await import('./batches.js')).processBatch(false,true,automatic);
+    expect(mocks.empty).not.toHaveBeenCalled();
+    expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[automatic])).rows).toEqual([{status:'completed'}]);
   });
   it('processes newest due intake before a large old backlog without letting a future retry block it', async () => {
     const old = await batch('queued'); await item(old,'Old release.');
@@ -101,6 +110,18 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1', [revision])).rows[0]?.story_id).toBeTruthy();
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[old])).rows).toEqual([{status:'queued'}]);
     expect((await database.db.query('SELECT count(*)::int AS n FROM stage_state WHERE batch_id=$1',[old])).rows).toEqual([{n:0}]);
+  });
+  it('does not let reopened association-only batches starve unfinished news', async () => {
+    const news=await batch('queued'); const revision=await item(news,'Recent real release.');
+    await database.db.query("UPDATE processing_batches SET cutoff_at=now()-interval '1 hour' WHERE id=$1",[news]);
+    const enrichment=await batch('waiting'); const empty=await item(enrichment,'Empty source-only recap.');
+    await (await import('./extraction-store.js')).applyExtraction(enrichment,empty,'Empty source-only recap.',[]);
+    await (await import('./batches.js')).processBatch(false,true);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows[0]?.story_id).toBeTruthy();
+    expect((await database.db.query('SELECT count(*)::int AS n FROM stage_state WHERE batch_id=$1',[enrichment])).rows).toEqual([{n:0}]);
+    await (await import('./batches.js')).processBatch(false,true);
+    expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[enrichment])).rows).toEqual([{status:'completed'}]);
+    expect(mocks.empty).toHaveBeenCalledOnce();
   });
   it('matches committed mentions before extraction waits on unfinished links', async () => {
     const batchId = await batch(); const revision = await item(batchId,'Recent extracted release.');
@@ -114,29 +135,29 @@ describe.skipIf(!url)('automatic processing and restart', () => {
   it('does not embed or rematch assigned mentions and retires their obsolete waits', async () => {
     const batchId = await batch(); const revision = await item(batchId,'Assigned release.');
     await (await import('./extraction-store.js')).applyExtraction(batchId,revision,'Assigned release.',[{start:0,end:17}]);
-    const {matchBatch}=await import('./matching.js'); await matchBatch(batchId,settings,judgments,vectors);
+    const {matchBatch}=await import('./matching.js'); await matchBatch(batchId,settings,vectors);
     const mention=(await database.db.query<{id:string}>('SELECT id FROM story_mentions WHERE revision_id=$1',[revision])).rows[0];
     if(!mention) throw new Error('Missing mention');
     await database.db.query("UPDATE stage_state SET status='waiting',next_retry_at=now()+interval '1 hour' WHERE batch_id=$1",[batchId]);
     const save=vi.spyOn(vectors,'save');
-    await matchBatch(batchId,settings,judgments,vectors);
+    await matchBatch(batchId,settings,vectors);
     expect(save).not.toHaveBeenCalled(); save.mockRestore();
     expect((await database.db.query('SELECT DISTINCT status FROM stage_state WHERE batch_id=$1',[batchId])).rows).toEqual([{status:'skipped'}]);
   });
   it('never reruns confirmed_empty after a checkpoint between extraction commit and links', async () => {
     vi.stubEnv('PROCESSING_SLICE_MS', '1000');
     vi.spyOn(performance, 'now').mockImplementation(() => mocks.clock);
-    mocks.empty.mockImplementation(async () => { mocks.clock=1001; return { events: [], resolution: 'confirmed_empty' }; });
+    mocks.empty.mockImplementation(async () => { mocks.clock=1001; return []; });
     const batchId = await batch(); const revision = await item(batchId, 'Empty recap.\nNothing current.');
     const { extractBatch } = await import('./extraction.js');
-    await expect(withProcessingSlice(() => extractBatch(batchId,settings,judgments))).rejects.toBeInstanceOf(ProcessingYield);
+    await expect(withProcessingSlice(() => extractBatch(batchId,settings))).rejects.toBeInstanceOf(ProcessingYield);
     expect(mocks.empty).toHaveBeenCalledOnce();
     // Older deployments can have only the successful stage receipt.
     await database.db.query("UPDATE item_revisions SET metadata=metadata-'pipelineExtraction'-'pipelineExtractionVersion' WHERE id=$1", [revision]);
-    await withProcessingSlice(() => extractBatch(batchId,settings,judgments));
+    await withProcessingSlice(() => extractBatch(batchId,settings));
     expect(mocks.empty).toHaveBeenCalledOnce();
     expect((await database.db.query('SELECT status,attempts,output FROM stage_state WHERE batch_id=$1 AND stage=$2',
-      [batchId,'extract:events-v5'])).rows).toEqual([{ status: 'completed', attempts: 0, output: [] }]);
+      [batchId,'extract:events-v6'])).rows).toEqual([{ status: 'completed', attempts: 0, output: [] }]);
     expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1 AND revision_id=$2', [batchId,revision])).rows)
       .toEqual([{ status: 'rejected' }]);
     vi.restoreAllMocks(); vi.stubEnv('PROCESSING_SLICE_MS', '120000');
@@ -146,9 +167,9 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     const good = await item(batchId, 'Gamma released a security fix.');
     const { extractBatch } = await import('./extraction.js');
     const { matchBatch } = await import('./matching.js');
-    await extractBatch(batchId,settings,judgments,async revision => {
+    await extractBatch(batchId,settings,async revision => {
       const mentions = await database.db.query<{ id: string }>('SELECT id FROM story_mentions WHERE revision_id=$1', [revision]);
-      await matchBatch(batchId,settings,judgments,vectors,mentions.rows.map(row => row.id));
+      await matchBatch(batchId,settings,vectors,mentions.rows.map(row => row.id));
     });
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1', [good])).rows[0]?.story_id).toBeTruthy();
     expect((await database.db.query("SELECT status FROM stage_state WHERE batch_id=$1 AND error_code='transient'", [batchId])).rows)
@@ -188,7 +209,7 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     }
     const mention = (await database.db.query<{ id: string }>('SELECT id FROM story_mentions WHERE revision_id=$1', [first])).rows[0];
     if (!mention) throw new Error('Missing mention');
-    await (await import('./matching.js')).matchBatch(batchId,settings,judgments,vectors,[mention.id]);
+    await (await import('./matching.js')).matchBatch(batchId,settings,vectors,[mention.id]);
     const { completeBatchItems } = await import('./item-failures.js');
     await completeBatchItems(batchId,undefined,first);
     expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1 AND revision_id=$2', [batchId,first])).rows)
@@ -228,11 +249,11 @@ describe.skipIf(!url)('automatic processing and restart', () => {
   it('duplicate collection snapshots share an exhausted revision retry budget', async () => {
     const first=await batch(); const revision=await item(first,'Broken original input.');
     const { extractBatch }=await import('./extraction.js');
-    await extractBatch(first,settings,judgments);
+    await extractBatch(first,settings);
     await database.db.query("UPDATE stage_state SET status='failed',attempts=$2,next_retry_at=NULL WHERE batch_id=$1",[first,settings.requestMaxAttempts]);
     const second=await batch();
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[second,revision]);
-    await extractBatch(second,settings,judgments);
+    await extractBatch(second,settings);
     expect((await database.db.query('SELECT status,attempts,next_retry_at FROM stage_state WHERE batch_id=$1',[second])).rows)
       .toEqual([{status:'failed',attempts:settings.requestMaxAttempts,next_retry_at:null}]);
     expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1',[second])).rows).toEqual([{status:'failed'}]);
@@ -242,7 +263,7 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     const revision=await item(batchId,text);
     await (await import('./extraction-store.js')).applyExtraction(batchId,revision,text,
       [{start:0,end:17},{start:18,end:text.length}]);
-    await (await import('./matching.js')).matchBatch(batchId,settings,judgments,vectors);
+    await (await import('./matching.js')).matchBatch(batchId,settings,vectors);
     const mentions=await database.db.query<{story_id:string|null}>('SELECT story_id FROM story_mentions WHERE revision_id=$1 ORDER BY ordinal',[revision]);
     expect(mentions.rows[0]?.story_id).toBeNull(); expect(mentions.rows[1]?.story_id).toBeTruthy();
   });

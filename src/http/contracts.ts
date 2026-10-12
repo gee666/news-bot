@@ -33,12 +33,7 @@ export const publicStatusSchema = z.object({
     source_counts: z.object({ total: count, completed: count, failed: count, pending: count }).optional(),
     source_failures: z.array(z.object({ sourceId: z.uuid(), code: text.nullable() })).optional() })),
   digestRecovery: z.object({ phase: z.enum(['running','waiting','failed','completed']),
-    failure_phase: z.enum(['consolidation','source_links','story_refresh','publication']).nullable(),
     code: text.nullable(), next_retry_at: timestamp.nullable() }).nullable().optional(),
-
-  aggregateSelections: z.array(z.object({ key: text,status: z.enum(['unresolved','resolved']),
-    phase: z.enum(['role','relevance','confirmation']).nullable(),story_id: z.uuid().nullable(),
-    left_id: z.uuid().nullable(),right_id: z.uuid().nullable(),updated_at: timestamp })).optional(),
 
   waits: z.array(z.object({ batch_id: z.uuid(), batch_status: batchStatus,
     batch_completed_at: timestamp.nullable(), batch_error_code: text.nullable(),

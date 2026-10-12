@@ -25,8 +25,6 @@ describe('public processing status', () => {
     expect(parsed.waits[0]?.batch_status).toBe('completed');
     expect(parsed.waits[0]?.status).toBe('failed');
     expect(parsed.batches[0]?.source_counts?.failed).toBe(1);
-    expect(parsed.digestRecovery?.failure_phase).toBe('consolidation');
-    expect(parsed.aggregateSelections?.[0]?.phase).toBe('confirmation');
     expect(parsed.publicationAdmissionDenials).toEqual([{ publicationId: id, snapshotId: id, operation: 'edit',
       reason: 'source_quality_changed', lastSeenAt: date, occurrences: 2 }]);
     expect(JSON.stringify(parsed)).not.toContain('SECRET');

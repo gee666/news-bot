@@ -11,7 +11,6 @@ const localCodes = new Map([
   ['Missing representative', 'missing_representative'], ['Story has no mentions', 'missing_mentions'],
   ['Generation result has no matching input', 'generation_input_missing'],
   ['Evidence result failed reference validation', 'evidence_reference_invalid'],
-  ['Missing source confirmation', 'source_confirmation_missing'],
   ['Unknown evidence handle', 'evidence_handle_unknown'],
   ['Verified citations are incomplete', 'citations_incomplete'],
   ['Cannot complete citations for unsupported text', 'citations_unsupported'],
@@ -37,8 +36,8 @@ const pipelineFiles = `batches state stories story-postconditions story-failures
   evidence-brief-identity evidence-brief-framing evidence-brief-completeness evidence-brief-verification
   evidence-brief-event-constraints evidence-brief-commercial-terms evidence-brief-measures evidence-brief-quotes
   evidence-brief-disposition evidence-verification-wire research research-fetch research-page research-search
-  research-queries research-priority source-links source-links-confirmation source-links-queue
-  collection extraction extraction-store extraction-fallback extraction-boundaries matching revisions vectors event-integrity-error
+  research-queries research-priority source-links grouping-model
+  collection extraction extraction-store extraction-model extraction-boundaries matching historical-input revisions vectors event-integrity-error
   embedding-preparation consolidation consolidation-input consolidation-store operational
   privacy crawler-client processing-slice lease index retention`.split(/\s+/u);
 const modelFiles = 'pi pi-runtime pi-failure errors jev embedding http inference structured structured-diagnostics provider-diagnostics'.split(' ');

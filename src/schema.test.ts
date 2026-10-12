@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { migrate } from './db.js';
@@ -24,6 +25,36 @@ describe.skipIf(!databaseUrl)('PostgreSQL schema integration', () => {
       await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
       await admin.end();
     }
+  });
+
+  it('shortens only default automatic Pi deadlines, preserving custom and historical budgets', async () => {
+    await pool.query(`INSERT INTO app_settings(id,value) VALUES(1,'{"piTimeoutMs":1200000}')
+      ON CONFLICT(id) DO UPDATE SET value=EXCLUDED.value`);
+    const fixtures=[
+      {timeout:1_200_000,manual:null,completed:false,expected:300_000},
+      {timeout:900_000,manual:null,completed:false,expected:900_000},
+      {timeout:1_200_000,manual:randomUUID(),completed:false,expected:1_200_000},
+      {timeout:1_200_000,manual:null,completed:true,expected:1_200_000},
+    ];
+    const ids:string[]=[];
+    for(const fixture of fixtures) {
+      const row=(await pool.query<{id:string}>(`INSERT INTO processing_batches(cutoff_at,settings_snapshot,
+        profile_version,model_version,manual_operation_id,completed_at,status)
+        VALUES(now(),$1,1,1,$2,CASE WHEN $3 THEN now() END,CASE WHEN $3 THEN 'completed' ELSE 'queued' END) RETURNING id`,
+      [JSON.stringify({piTimeoutMs:fixture.timeout}),fixture.manual,fixture.completed])).rows[0];
+      if(!row) throw new Error('Missing deadline fixture');
+      ids.push(row.id);
+    }
+    const sql=await readFile(new URL('../migrations/194_pi_request_deadline.sql',import.meta.url),'utf8');
+    await pool.query(sql);
+    expect((await pool.query<{deadline:number}>("SELECT (value->>'piTimeoutMs')::int AS deadline FROM app_settings")).rows).toEqual([{deadline:300_000}]);
+    for(const [index,fixture] of fixtures.entries()) {
+      expect((await pool.query<{deadline:number}>("SELECT (settings_snapshot->>'piTimeoutMs')::int AS deadline FROM processing_batches WHERE id=$1",[ids[index]])).rows)
+        .toEqual([{deadline:fixture.expected}]);
+    }
+    await pool.query("UPDATE app_settings SET value=jsonb_set(value,'{piTimeoutMs}','900000')");
+    await pool.query(sql);
+    expect((await pool.query<{deadline:number}>("SELECT (value->>'piTimeoutMs')::int AS deadline FROM app_settings")).rows).toEqual([{deadline:900_000}]);
   });
 
   it('enforces durable history boundaries and preserves published snapshots', async () => {

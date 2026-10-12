@@ -4,6 +4,20 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AppSettings } from '../settings.js';
 
 const model = vi.hoisted(() => ({ calls: [] as string[] }));
+vi.mock('./extraction-model.js', () => ({ extractEvents: async (text: string) => {
+  model.calls.push('extraction');
+  return text.startsWith('Promotion:') ? [] : [{ parts: [{ start: 0, end: text.length }], context: [] }];
+} }));
+vi.mock('./generation-model.js', () => ({ generationClient: async () => ({
+  generate: async (request: { prompt: string }) => {
+    const { z } = await import('zod');
+    const { modelResult } = await import('./generation.test-helpers.js');
+    const input = z.object({ links: z.array(z.object({ id:z.string() })), targets:z.array(z.object({id:z.string()})) }).parse(JSON.parse(request.prompt));
+    return modelResult({ associations: input.targets.flatMap(target=>input.links.map(link=>({linkId:link.id,targetId:target.id,classification:'relevant'}))) });
+  },
+}), recordGenerationFailure: vi.fn(), requireInferenceApproval: vi.fn() }));
+vi.mock('./grouping-model.js', () => ({ GROUPING_VERSION: 'grouping-v1', groupReport: async (incoming: { text: string }, candidates: Array<{id:string;text:string}>) =>
+  candidates.filter(candidate=>candidate.text===incoming.text).map(candidate=>({storyId:candidate.id,relation:'same'})) }));
 vi.mock('../telegram/batch.js', () => ({ collectTelegramBatch: vi.fn().mockResolvedValue(0) }));
 vi.mock('../models/jev.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../models/jev.js')>();
@@ -85,8 +99,8 @@ describe.skipIf(!databaseUrl)('pipeline with PostgreSQL and deterministic model 
     await item(id, 'Acme released a new compiler today.');
     await item(id, 'Beta released a new processor today.');
     await processBatch(true);
-    expect(model.calls.slice(0, 2)).toEqual(['news_eligibility', 'story_count']);
-    expect(model.calls.filter(call => call === 'story_count')).toHaveLength(2);
+    expect(model.calls[0]).toBe('extraction');
+    expect(model.calls.filter(call => call === 'extraction')).toHaveLength(2);
     expect(model.calls.filter(call => call === 'interest')).toHaveLength(2);
     expect(model.calls.indexOf('news_eligibility')).toBeLessThan(model.calls.indexOf('interest'));
     const stories = await database.db.query('SELECT status,headline,interest_score,summary,model_version FROM stories');
@@ -103,7 +117,7 @@ describe.skipIf(!databaseUrl)('pipeline with PostgreSQL and deterministic model 
   it('persists an interrupted unknown outcome before retrying after restart', async () => {
     const id = await batch();
     const revision = await item(id, 'Gamma released a security fix.');
-    await database.db.query(`INSERT INTO stage_state(batch_id,revision_id,stage,status,attempts) VALUES($1,$2,'count','running',1)`, [id, revision]);
+    await database.db.query(`INSERT INTO stage_state(batch_id,revision_id,stage,status,attempts) VALUES($1,$2,'extract:events-v6','running',1)`, [id, revision]);
     const count = model.calls.length;
     await processBatch(false, true);
     expect(model.calls).toHaveLength(count);

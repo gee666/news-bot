@@ -133,7 +133,7 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
     expect(await (await import('../pipeline/generation-freshness.js')).generationIsCurrent(f.storyId, settings)).toBe(true);
     expect(await delivery.sendPrepared(f.pub, new BotApi(), settings)).toBe('9');
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
-    expect(vi.mocked(BotApi.prototype.send).mock.calls[0]?.[1].text).toContain('⚠️ Не прошло проверку: Версия не подтверждена источником');
+    expect(vi.mocked(BotApi.prototype.send).mock.calls[0]?.[1].text).toContain('Заметки проверяющего: Версия не подтверждена источником');
     expect((await publication(f.id)).status).toBe('published');
   });
   it.each(['input', 'model'] as const)('does not let a newer wrong-%s receipt invalidate unchanged output', async mismatch => {

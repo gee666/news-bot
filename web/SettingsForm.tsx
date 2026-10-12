@@ -64,7 +64,7 @@ export function SettingsForm({ settings, change, test, testDisabled, group }: Pr
           <datalist id="timezones"><option value="Europe/Berlin">Berlin, CEST in summer and CET in winter</option><option value="Etc/GMT-2">UTC+02:00, fixed, no daylight saving</option><option value="UTC" /></datalist></label>
         {numeric('retentionDays', 'History retention in days', 1, 365)}</div>
       <p>Recommended collection: 0 5,9,13,17,21 * * * in Europe/Berlin, at 05:00, 09:00, 13:00, 17:00 and 21:00 local time. Berlin follows daylight saving, not a fixed CEST offset.</p>
-      <p>Accepted current stories enter a durable queue and wait for digest selection after consolidation and refresh. The default digest cron is 0 */3 * * *, every three hours in the saved timezone. Maintenance checks every five seconds only to resume previously authorized delivery, reconciliation and edits. Collect & publish now can publish within its cap without waiting for the digest.</p>
+      <p>Accepted current stories enter a durable queue and wait for digest selection after story refresh. The default digest cron is 0 */3 * * *, every three hours in the saved timezone. Maintenance checks every five seconds only to resume previously authorized delivery, reconciliation and edits. Collect & publish now can publish within its cap without waiting for the digest.</p>
       <p>{settings.timezone === 'Etc/GMT-2' ? 'UTC+02:00, fixed offset without daylight saving.' : `Timezone: ${settings.timezone}.`}
         {' '}New schedules apply between batches. Published posts and their saved sources survive history cleanup.</p>
       <label className="checkbox"><input type="checkbox" checked={settings.publishingEnabled}
@@ -77,8 +77,6 @@ export function SettingsForm({ settings, change, test, testDisabled, group }: Pr
       {numeric('piTimeoutMs', 'Pi deadline in milliseconds', 1000, 86400000)}
       {numeric('connectionTimeoutMs', 'Connection deadline in milliseconds', 100, 60000)}
       {numeric('collectionWindowHours', 'Collection window in hours', 1, 48)}
-      {numeric('matchCandidateLimit', 'Match candidate limit', 1, 100)}
-      {numeric('headlineBatchSize', 'Headlines per request', 1, 10)}
       {numeric('requestMaxAttempts', 'Request attempt limit', 1, 20)}
       {numeric('retryBaseMs', 'Retry base delay in milliseconds', 1000, 3600000)}
       {numeric('retryMaxMs', 'Retry maximum delay in milliseconds', 1000, 86400000)}

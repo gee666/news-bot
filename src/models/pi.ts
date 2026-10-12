@@ -61,7 +61,7 @@ export class PiGenerator {
   get supportsNativeSchema(): boolean { return this.config.nativeSchema ?? true; }
 
   generate(request: PiRequest, context: RequestContext): Promise<PiResult> {
-    const timeoutMs = this.config.timeoutMs ?? 1_200_000;
+    const timeoutMs = this.config.timeoutMs ?? 300_000;
     return infer("pi", timeoutMs, context, this.config.recordFailure, async (dispatch) => {
       if (!request.systemPrompt.trim() || !request.prompt.trim()) {
         throw new RequestFault("invalid_request", { outcome: "not_submitted" });

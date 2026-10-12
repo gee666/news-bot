@@ -88,11 +88,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
     const row = (await database.db.query('SELECT chosen_excerpt,status,content_version,interest_stale FROM stories WHERE id=$1', [storyId])).rows[0];
     expect(row).toMatchObject({ chosen_excerpt: detailed, status: 'completed', content_version: 2, interest_stale: false });
     const stages = (await database.db.query<{ stage: string }>('SELECT stage FROM stage_state WHERE story_id=$1', [storyId])).rows.map(row => row.stage);
-    expect(stages.some(stage => stage.startsWith('representative:representative-v3:event-group-integrity-v1:v1:p1:m1:'))).toBe(true);
-    expect(stages).toContain('interest:representative-v3:event-group-integrity-v1:v2:p1:m1');
-    expect(stages).toContain('story_embedding:representative-v3:event-group-integrity-v1:v2:p1:m1');
-    expect(stages.some(stage => stage.startsWith(`research:${generationVersion}:representative-v3:event-group-integrity-v1:v2:p1:m1:`))).toBe(true);
-    expect(stages.some(stage => stage.startsWith('headlines:'))).toBe(false);
+    expect(stages).toEqual(['representative:v1:p1:m1']);
     expect(mocks.generated).toBe(1);
     expect(await generationIsCurrent(storyId, settings)).toBe(true);
     expect((await database.db.query('SELECT embedding::text AS vector FROM embeddings WHERE story_id=$1', [storyId])).rows).toEqual([{ vector: '[1,2,3]' }]);
@@ -102,7 +98,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
   it('does not let completed stage receipts bypass expired generation on a resumed batch', async () => {
     const receipts = await database.db.query(`SELECT stage FROM stage_state WHERE batch_id=$1 AND story_id=$2
       AND status='completed' AND stage LIKE 'research:%'`, [batchId, storyId]);
-    expect(receipts.rows).toHaveLength(1);
+    expect(receipts.rows).toHaveLength(0);
     const expired = await database.db.query("UPDATE judgments SET expires_at=now()-interval '1 second' WHERE story_id=$1 AND prompt_version=$2",
       [storyId, generationVersion]);
     expect(expired.rowCount).toBeGreaterThan(0);
@@ -131,7 +127,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
       const receipts = (await database.db.query<{ id: string; stage: string; attempts: number }>(`SELECT id,stage,attempts
         FROM stage_state WHERE batch_id=$1 AND story_id=$2 AND status='completed'
           AND (stage LIKE 'interest:%' OR stage LIKE 'news-eligibility-v3:%')`, [batchId, storyId])).rows;
-      expect(receipts).toHaveLength(2);
+      expect(receipts).toHaveLength(0);
       const cache = (await database.db.query("SELECT * FROM model_cache WHERE kind='judgment' ORDER BY id")).rows;
       const judged = mocks.judged;
       if (mutation.startsWith('expired')) {
@@ -170,7 +166,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
     const { Judgments } = await import('./judgments.js');
     const { Vectors } = await import('./vectors.js');
     const { getActiveEmbeddingConfig } = await import('../settings.js');
-    const { withProcessingSlice, ProcessingYield } = await import('./processing-slice.js');
+    const { withProcessingSlice } = await import('./processing-slice.js');
     const source = await one('SELECT id FROM sources LIMIT 1');
     const peer = await one("INSERT INTO stories(chosen_excerpt) VALUES('Independent laboratory released a public dataset.') RETURNING id");
     const item = await one("INSERT INTO source_items(source_id,external_id) VALUES($1,'independent') RETURNING id", [source]);
@@ -197,7 +193,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
       const judgeSpy = vi.spyOn(judgments, 'judge').mockImplementation(async (...args) => {
         const result = await original(...args); if (args[0] === 'interest') clock = 1001; return result;
       });
-      await expect(withProcessingSlice(async () => { await finishBatchStories(batchId, settings, judgments, vectors); })).rejects.toBeInstanceOf(ProcessingYield);
+      await withProcessingSlice(async () => { await finishBatchStories(batchId, settings, judgments, vectors); });
       judgeSpy.mockRestore(); clockSpy.mockRestore(); vi.stubEnv('PROCESSING_SLICE_MS', originalSlice);
       await database.db.query("UPDATE stories SET interest_stale=true WHERE id=$1", [storyId]);
       const judged = mocks.judged;
@@ -207,25 +203,6 @@ describe.skipIf(!url)('current editorial generation integration', () => {
         .toEqual([{ status: 'completed', interest_stale: false }]);
       expect((await database.db.query('SELECT * FROM stage_state WHERE story_id=$1 ORDER BY id', [peer])).rows).toEqual(peerReceipts);
     } finally { await judgments.close(); await vectors.close(); }
-  });
-  it('does not erase a future provider wait while repairing stale ranking', async () => {
-    const { finishBatchStories } = await import('./stories.js');
-    const { Judgments } = await import('./judgments.js');
-    const { Vectors } = await import('./vectors.js');
-    const { getActiveEmbeddingConfig } = await import('../settings.js');
-    const receipt = (await database.db.query<{ id: string }>("SELECT id FROM stage_state WHERE story_id=$1 AND stage LIKE 'interest:%' ORDER BY updated_at DESC LIMIT 1", [storyId])).rows[0];
-    if (!receipt) throw new Error('Missing rank receipt');
-    await database.db.query("UPDATE stage_state SET status='waiting',next_retry_at=now()+interval '1 hour',error_code='transient' WHERE id=$1", [receipt.id]);
-    await database.db.query("UPDATE stories SET interest_stale=true WHERE id=$1", [storyId]);
-    const saved = (await database.db.query('SELECT * FROM stage_state WHERE id=$1', [receipt.id])).rows;
-    const judged = mocks.judged;
-    const judgments = new Judgments(settings); const vectors = new Vectors(await getActiveEmbeddingConfig(), settings);
-    try { expect((await finishBatchStories(batchId, settings, judgments, vectors)).skippedStories).toBeGreaterThan(0); }
-    finally { await judgments.close(); await vectors.close(); }
-    expect((await database.db.query('SELECT * FROM stage_state WHERE id=$1', [receipt.id])).rows).toEqual(saved);
-    expect(mocks.judged).toBe(judged);
-    await database.db.query("UPDATE stage_state SET status='completed',next_retry_at=NULL,error_code=NULL WHERE id=$1", [receipt.id]);
-    await database.db.query("UPDATE stories SET status='completed' WHERE id=$1", [storyId]);
   });
   it('keeps expired, wrong-model and output-mismatched displays non-current until refresh repairs them', async () => {
     const { generationIsCurrent } = await import('./generation-freshness.js');

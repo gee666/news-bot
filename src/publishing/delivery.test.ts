@@ -69,7 +69,7 @@ describe('durable publication delivery', () => {
       review: { supported: false, reason: 'Версия не подтверждена источником' } } };
     expect(await sendPrepared(failed, api, defaultSettings)).toBe('9');
     expect(send).toHaveBeenCalledOnce();
-    expect(send.mock.calls[0]?.[1].text).toContain('⚠️ Не прошло проверку: Версия не подтверждена источником');
+    expect(send.mock.calls[0]?.[1].text).toContain('Заметки проверяющего: Версия не подтверждена источником');
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes("status='published'"))).toBe(true);
   });
 

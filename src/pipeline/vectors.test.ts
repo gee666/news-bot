@@ -32,7 +32,6 @@ import { defaultSettings } from '../settings.js';
 import { Vectors } from './vectors.js';
 import { EMBEDDING_INPUT_VERSION } from './embedding-preparation.js';
 import { matchBatch } from './matching.js';
-import { Judgments } from './judgments.js';
 
 const context: StageContext = { id: 'operation', attempt: 1, batchId: null, revisionId: null, storyId: null };
 const config: ActiveEmbeddingConfig = {
@@ -106,9 +105,8 @@ describe('versioned embedding persistence', () => {
     mocks.stages.set('embed:mention', [9, 9, 9]);
     mocks.stages.set('embed:v1-config:mention', [2, 0, 0]);
     const vectors = new Vectors(config, defaultSettings);
-    const judgments = new Judgments(defaultSettings);
-    try { await matchBatch('batch', defaultSettings, judgments, vectors); }
-    finally { await judgments.close(); await vectors.close(); }
+    try { await matchBatch('batch', defaultSettings, vectors); }
+    finally { await vectors.close(); }
     expect(mocks.embed).toHaveBeenCalledTimes(1);
     expect(mocks.stages.get('embed:v2-config:mention')).toEqual([1, 0, 0]);
     expect(mocks.stages.get('embed:v1-config:mention')).toEqual([2, 0, 0]);

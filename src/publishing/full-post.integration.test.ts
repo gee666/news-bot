@@ -110,7 +110,8 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     expect(edit).toHaveBeenCalledOnce();
     const message = edit.mock.calls[0]?.[2];
     expect(message?.plainText.length).toBeLessThanOrEqual(4096);
-    expect(message?.plainText).toContain('😀'); expect(message?.plainText).toMatch(/…$/u);
+    expect(message?.plainText).toContain('😀');
+    expect(message?.plainText).toContain('…\n\nЗаметки проверяющего: Существенных ошибок не найдено');
     expect((await row(id)).content).toEqual({ ...newContent, details: summary });
     expect((await row(id)).pending_snapshot_id).toBeNull();
     expect((await database.db.query('SELECT status,error_code FROM request_attempts')).rows).toEqual([{ status: 'succeeded', error_code: null }]);

@@ -4,11 +4,10 @@ import { interestScore } from '../models/jev.js';
 import { enqueueReadyStory, ownManualStories } from '../publishing/ready.js';
 import { getActiveEmbeddingConfig, type AppSettings } from '../settings.js';
 import { researchStory } from './generation.js';
-import { GENERATION_VERSION } from './generation-store.js';
 import { generationIsCurrent } from './generation-freshness.js';
 import { choice, type Judgments } from './judgments.js';
-import { hash, stage, StoryCompletionError, type StageContext } from './state.js';
-import { invalidateStoryReceipt, storyPostconditions } from './story-postconditions.js';
+import { hash, StoryCompletionError, type StageContext } from './state.js';
+import { storyPostconditions } from './story-postconditions.js';
 import { Vectors } from './vectors.js';
 import { assessEligibility, currentDecision } from './eligibility.js';
 import { jevTemplates } from '../models/templates.js';
@@ -16,14 +15,10 @@ import { blockedStoriesCte } from './item-failures.js';
 import { eventInput } from './consolidation-input.js';
 import { StoryIntegrityError } from './event-integrity-error.js';
 import { checkProcessingSlice } from './processing-slice.js';
-import { countStoryOutcome, prepareStoryFailureUpdates, storyFailureFingerprint, storyWork, type StoryWorkReport } from './story-failures.js';
+import { countStoryOutcome, prepareStoryFailureUpdates, storyWork, type StoryWorkReport } from './story-failures.js';
 
 interface StoryWork { id: string; content_version: number }
 interface Candidate extends StoryWork { status: string; interest_stale: boolean; profile_version: number | null; model_version: number | null }
-export function storyStageName(story: StoryWork, task: string, settings: AppSettings): string {
-  const generation = task === 'research' ? `:${GENERATION_VERSION}` : '';
-  return `${task}${generation}:${jevTemplates.representative.version}:${jevTemplates.event_group_integrity.version}:v${story.content_version}:p${settings.profileVersion}:m${settings.modelVersion}`;
-}
 async function needsRefresh(story: Candidate, settings: AppSettings): Promise<boolean> {
   if (story.status !== 'completed' || story.interest_stale || story.profile_version !== settings.profileVersion
     || story.model_version !== settings.modelVersion) return true;
@@ -145,33 +140,12 @@ async function finishStory(story: StoryWork, settings: AppSettings, judgments: J
   batchId: string | null): Promise<boolean> {
   const id = story.id;
   await db.query("UPDATE stories SET status='processing' WHERE id=$1", [id]);
-  const run = async <T>(task: string, validator: z.ZodType<T>, work: (context: StageContext) => Promise<T>): Promise<T> => {
-    // Evidence changes must also invalidate completed generation stages in a resumed batch.
-    const suffix = task === 'representative' ? `:${(await eventInput(id))?.fingerprint ?? 'empty'}`
-      : task === 'research' ? `:${await storyFailureFingerprint(id, settings)}` : '';
-    const name = storyStageName(story, task, settings) + suffix;
-    if (batchId && (task === jevTemplates.news_eligibility.version || task === 'interest')) {
-      const checks = await storyPostconditions(id, settings);
-      if (!(task === 'interest' ? checks.rankingCurrent : checks.eligibilityCurrent)) {
-        await invalidateStoryReceipt(batchId, id, name);
-      }
-    }
-    return batchId ? stage(batchId, { storyId: id }, name, settings, validator, work) : work(digestContext(id));
-  };
-  await run('representative', z.string(), context => selectRepresentative(id, judgments, context));
-  const selected = await db.query<StoryWork>('SELECT id,content_version FROM stories WHERE id=$1', [id]);
-  const current = selected.rows[0];
-  if (!current) throw new Error('Story disappeared during refresh');
-  story = current;
-  if (!await run(jevTemplates.news_eligibility.version, z.boolean(), context => assessEligibility(id, settings, judgments, context))) return false;
-  await run('interest', z.number(), context => rankStory(id, settings, judgments, context));
-  await run('story_embedding', z.boolean(), context => refreshEmbedding(id, vectors, context));
-  if (batchId && !await generationIsCurrent(id, settings)) {
-    // A stage receipt cannot make expired or mismatched generation output current.
-    await db.query(`DELETE FROM stage_state WHERE batch_id=$1 AND story_id=$2 AND status='completed'
-      AND stage LIKE 'research:%'`, [batchId, id]);
-  }
-  await run('research', z.boolean(), async () => { await researchStory(id, settings); return true; });
+  const context: StageContext = { id, attempt: 1, batchId, storyId: id, revisionId: null };
+  await selectRepresentative(id, judgments, context);
+  if (!await assessEligibility(id, settings, judgments, context)) return false;
+  await rankStory(id, settings, judgments, context);
+  await refreshEmbedding(id, vectors, context);
+  await researchStory(id, settings);
   const checks = { ...await storyPostconditions(id, settings), generationCurrent: await generationIsCurrent(id, settings) };
   if (Object.values(checks).some(value => !value)) throw new StoryCompletionError(id, checks);
   await completeStories([id], settings, batchId);
@@ -194,7 +168,6 @@ async function completeStories(ids: string[], settings: AppSettings, batchId: st
     for (const row of completed.rows) await enqueueReadyStory(client, row.id, settings, batchId);
   });
 }
-const digestContext = (id: string): StageContext => ({ id, attempt: 1, batchId: null, revisionId: null, storyId: id });
 async function pinRefresh(ids: string[]): Promise<void> {
   await transaction(async client => {
     for (const id of ids) {

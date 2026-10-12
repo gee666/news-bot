@@ -25,10 +25,3 @@ export async function storyPostconditions(id: string, settings: AppSettings): Pr
   return rows.rows[0] ?? { representativePresent: false, headlinePresent: false, unblocked: false,
     eligibilityCurrent: false, rankingCurrent: false };
 }
-
-/** Invalidate only a completed receipt. Keep attempts, output and any provider wait intact. */
-export async function invalidateStoryReceipt(batchId: string, storyId: string, name: string): Promise<void> {
-  await db.query(`UPDATE stage_state SET status='pending',updated_at=now()
-    WHERE batch_id=$1 AND story_id=$2 AND stage=$3 AND status='completed'
-      AND (next_retry_at IS NULL OR next_retry_at<=now())`, [batchId, storyId, name]);
-}

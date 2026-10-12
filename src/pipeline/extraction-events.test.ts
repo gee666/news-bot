@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { selectedEvents, sourceUnits, selectionFeedback, type EventSelection } from './extraction-boundaries.js';
 import { eventText, eventSpans } from './extraction-store.js';
-import { extractWithGenerator } from './extraction-fallback.js';
+import { extractEvents } from './extraction-model.js';
 import { modelResult } from './generation.test-helpers.js';
 const range = (first: string, last = first, excerpt: string | null = null) => ({ first, last, excerpt });
 
@@ -68,9 +68,14 @@ describe('multi-span news mentions', () => {
       { parts: [range('u0')], context: [] }, { parts: [range('u0')], context: [] },
     ], omitted: [] })).toBeNull();
   });
-  it('never commits empty extraction after positive count, even if all units were marked non-news', async () => {
-    const generator = { generate: vi.fn().mockResolvedValue(modelResult({ events: [], omitted: [{ id: 'u0', last: null, excerpt: null, reason: 'non_news' }] })) };
-    await expect(extractWithGenerator('Expected release of Security B.', generator, { operationId: 'positive-count' }, vi.fn())).rejects.toThrow();
+  it('independently reviews omissions and can restore a missing event', async () => {
+    const empty = { events: [], omitted: [{ id: 'u0', last: null, excerpt: null, reason: 'non_news' }] };
+    const restored = { events: [{ parts: [range('u0')], context: [] }], omitted: [] };
+    const generator = { generate: vi.fn().mockResolvedValueOnce(modelResult(empty)).mockResolvedValueOnce(modelResult(restored)) };
+    const text = 'Expected release of Security B.';
+    const events = await extractEvents(text, generator, { operationId: 'extract' }, vi.fn(), 'Technology news');
+    expect(events.map(event => eventText(text,event))).toEqual([text]);
     expect(generator.generate).toHaveBeenCalledTimes(2);
+    expect(generator.generate.mock.calls[1]?.[0].systemPrompt).toContain('Check every omission');
   });
 });

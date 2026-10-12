@@ -9,7 +9,7 @@ export const testSettings: Settings = {
   researchThreshold: 5, minimumPublicationScore: 1, collectionCron: '0 */3 * * *', digestCron: '0 9,21 * * *',
   cleanupCron: '0 4 * * *', timezone: 'UTC', retentionDays: 14, publishingEnabled: false,
   jevTimeoutMs: 1200000, embeddingTimeoutMs: 600000, piTimeoutMs: 1200000, connectionTimeoutMs: 10000,
-  prefixCacheEnabled: true, collectionWindowHours: 48, matchCandidateLimit: 20, headlineBatchSize: 10,
+  prefixCacheEnabled: true, collectionWindowHours: 48,
   researchMaxPages: 5, researchMaxSearches: 2, requestMaxAttempts: 5, retryBaseMs: 30000, retryMaxMs: 3600000,
 };
 export const testUsage: Usage = {

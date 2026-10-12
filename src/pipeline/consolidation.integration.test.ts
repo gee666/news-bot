@@ -1,14 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { z } from 'zod';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import type { AppSettings } from '../settings.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const schema = `consolidation_${randomUUID().replaceAll('-', '')}`;
 let admin: pg.Pool;
 let database: typeof import('../db.js');
-let settings: AppSettings;
 let configId: string;
 let input: typeof import('./consolidation-input.js').eventInput;
 let merge: typeof import('./consolidation-store.js').mergeStories;
@@ -55,7 +52,7 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
     database = await import('../db.js');
     await database.migrate();
     const configuration = await import('../settings.js');
-    settings = await configuration.saveSettings({ embeddingDimensions: 3, matchCandidateLimit: 20 });
+    await configuration.saveSettings({ embeddingDimensions: 3 });
     configId = (await configuration.getActiveEmbeddingConfig()).id;
     ({ eventInput: input } = await import('./consolidation-input.js'));
     ({ mergeStories: merge } = await import('./consolidation-store.js'));
@@ -225,8 +222,7 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
     await database.db.query(`UPDATE item_links SET url='https://abliteration.ai/' WHERE revision_id IN(
       SELECT revision_id FROM story_mentions WHERE story_id=$1)`, [hosted]);
     const left = await current(artifact), right = await current(hosted);
-    const { eventDecisionInput } = await import('./consolidation-input.js');
-    expect(eventDecisionInput(left, right).reportGroups).toEqual(expect.arrayContaining([
+    expect([left.reports,right.reports]).toEqual(expect.arrayContaining([
       expect.arrayContaining([expect.objectContaining({ links: [artifactUrl] })]),
       expect.arrayContaining([expect.objectContaining({ links: ['https://abliteration.ai/'] })]),
     ]));
@@ -234,97 +230,5 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
       SELECT id FROM story_mentions WHERE story_id=$1)`, [hosted]);
     expect((await current(hosted)).fingerprint).not.toBe(right.fingerprint);
     expect(await merge(left, right, 'update')).toBeNull();
-  });
-  it('retrieves by every current mention, not chosen excerpt or stale vector; guards edited input', async () => {
-    const target = await story('Astra Ultrafast $500 announcement', [1, 0, 0]);
-    await database.db.query("UPDATE stories SET chosen_excerpt='Unrelated display excerpt' WHERE id=$1", [target]);
-    const seed = await story('Astra acceleration preview', [1, 0, 0]);
-    const { consolidationCandidates } = await import('./consolidation.js');
-    expect(await consolidationCandidates(seed, configId, settings)).toContain(target);
-    const before = await current(target);
-    await database.db.query("UPDATE story_mentions SET text='Corrected to a different product' WHERE story_id=$1", [target]);
-    expect(await merge(await current(seed), before, 'same')).toBeNull();
-    const { candidates } = await import('./matching.js');
-    const { Vectors } = await import('./vectors.js');
-    const { getActiveEmbeddingConfig } = await import('../settings.js');
-    const vectors = new Vectors(await getActiveEmbeddingConfig(), settings);
-    try {
-      const mention = (await database.db.query<{ id: string; revision_id: string; story_id: string; text: string }>(
-        'SELECT id,revision_id,story_id,text FROM story_mentions WHERE story_id=$1', [seed])).rows[0];
-      if (!mention) throw new Error('Missing seed');
-      const retrieved = await candidates(mention, [1, 0, 0], vectors, settings, randomUUID());
-      expect(retrieved.find(row => row.id === target)?.text).toBe('Corrected to a different product');
-      expect(retrieved.length).toBeLessThanOrEqual(settings.matchCandidateLimit);
-    } finally { await vectors.close(); }
-  });
-  it('ranks the best current mention exactly and excludes retired revisions from similarity', async () => {
-    await database.db.query("UPDATE stories SET status='rejected'");
-    const seed = await story('Query for the product episode', [1, 0, 0]);
-    const group = await story('First display report focuses on another facet', [0, 1, 0]);
-    const specific = await story('Second current report identifies the matching facet', [1, 0, 0]);
-    await database.db.query('UPDATE story_mentions SET story_id=$1 WHERE story_id=$2', [group, specific]);
-    const distractor = await story('Retired matching claim', [1, 0, 0]);
-    const itemId = await one(`SELECT r.item_id AS id FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id WHERE m.story_id=$1`, [distractor]);
-    const revision = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
-      VALUES($1,2,$2,'Unrelated corrected claim','Unrelated corrected claim') RETURNING id`, [itemId, randomUUID()]);
-    await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [itemId, revision]);
-    const mention = await one(`INSERT INTO story_mentions(revision_id,story_id,text,ordinal) VALUES($1,$2,'Unrelated corrected claim',0) RETURNING id`, [revision, distractor]);
-    await database.db.query(`INSERT INTO embeddings(config_id,mention_id,input_hash,embedding) VALUES($1,$2,'corrected','[0,0,1]'::vector)`, [configId, mention]);
-    const { consolidationCandidates } = await import('./consolidation.js');
-    expect(await consolidationCandidates(seed, configId, { ...settings, matchCandidateLimit: 1 })).toEqual([group]);
-    expect((await current(group)).text).toContain('Second current report');
-    expect((await current(distractor)).text).not.toContain('Retired matching');
-  });
-  it('keeps a hosted API separate from repeated coverage of a downloadable derivative', async () => {
-    await database.db.query("UPDATE stories SET status='rejected'");
-    const artifact = await story('GLM-5.3 uncensored released', [1, 0, 0]);
-    const recap = await story('GLM-5.3 uncensored released', [1, 0, 0]);
-    const hosted = await story('GLM-5.3 uncensored released', [1, 0, 0]);
-    const artifactUrl = 'https://huggingface.co/Infatoshi/GLM-5.3-UNCENSORED-EXL3-3.0bpw';
-    for (const id of [artifact, recap, hosted]) await database.db.query(`UPDATE item_links SET url=$2 WHERE revision_id IN(
-      SELECT revision_id FROM story_mentions WHERE story_id=$1)`, [id, id === hosted ? 'https://abliteration.ai/' : artifactUrl]);
-    const { consolidateStories } = await import('./consolidation.js');
-    const { Vectors } = await import('./vectors.js');
-    const { getActiveEmbeddingConfig } = await import('../settings.js');
-    const vectors = new Vectors(await getActiveEmbeddingConfig(), settings);
-    const judge = vi.fn(async (_template: string, state: unknown) => {
-      const parsed = z.object({ reportGroups: z.array(z.array(z.object({ links: z.array(z.string()) }))) }).parse(state);
-      const hasArtifact = parsed.reportGroups.flat().some(report => report.links.includes(artifactUrl));
-      const hasHosting = parsed.reportGroups.flat().some(report => report.links.includes('https://abliteration.ai/'));
-      return { type: 'choice' as const, choice: hasArtifact && !hasHosting ? 'same' : 'different', probabilities: {}, confidence: 1 };
-    });
-    try {
-      expect((await consolidateStories(settings, { judgments: { judge }, vectors })).merged).toBe(1);
-      expect((await current(hosted)).reports).toHaveLength(1);
-      const artifactGroup = await input(artifact) ?? await current(recap);
-      expect(artifactGroup.reports).toHaveLength(2);
-      expect((await consolidateStories(settings, { judgments: { judge }, vectors })).merged).toBe(0);
-    } finally { await vectors.close(); }
-  });
-  it('rechecks combined inputs and leaves unrelated conference products separate', async () => {
-    await database.db.query("UPDATE stories SET status='rejected'");
-    const rumor = await story('Astra eightfold inference preview', [1, 0, 0]);
-    const release = await story('Astra Ultrafast eightfold inference released', [1, 0, 0]);
-    const unrelated = await story('ChatGPT Space team workspace at the same DevDay', [1, 0, 0]);
-    const plan = await story('New higher-limit tier preview at DevDay', [1, 0, 0]);
-    const { consolidateStories } = await import('./consolidation.js');
-    const { Vectors } = await import('./vectors.js');
-    const { getActiveEmbeddingConfig } = await import('../settings.js');
-    const vectors = new Vectors(await getActiveEmbeddingConfig(), settings);
-    const judge = vi.fn(async (_template: string, state: unknown) => {
-      const parsed = z.object({ mention: z.string(), candidate: z.string() }).parse(state);
-      // Recorded live behavior: the terse tier preview is resolved only by the combined release + speed evidence.
-      const sameAstra = parsed.mention.includes('Astra') && parsed.candidate.includes('Astra');
-      const resolvedPlan = parsed.mention.includes('higher-limit') && parsed.candidate.includes('preview') && parsed.candidate.includes('released');
-      const choice = sameAstra || resolvedPlan ? 'same' : 'different';
-      return { type: 'choice' as const, choice, probabilities: {}, confidence: 1 };
-    });
-    try {
-      expect((await consolidateStories(settings, { judgments: { judge }, vectors })).merged).toBe(2);
-      expect((await consolidateStories(settings, { judgments: { judge }, vectors })).merged).toBe(0);
-      expect(await input(unrelated)).not.toBeNull();
-      const groups = (await database.db.query('SELECT DISTINCT story_id FROM story_mentions WHERE story_id=ANY($1::uuid[])', [[rumor, release, plan]])).rows;
-      expect(groups).toHaveLength(1);
-    } finally { await vectors.close(); }
   });
 });

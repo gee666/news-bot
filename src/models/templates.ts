@@ -23,24 +23,6 @@ export const jevTemplates = {
       criteria: counts,
     } },
   },
-  extraction_admission: {
-    version: "extraction-admission-v2",
-    questions: { admission: {
-      type: "choice", instructions: untrusted +
-        "Independently check whether message.text supports any current news candidate allowed by interestProfile when an extractor proposes none. The earlier count is not provided and is not a quota. Require BOTH a supplied reportable development and eligibility under that same profile. Identifying a product or technology alone is not a development. An evergreen project description, protocol explanation, tutorial, general advice, ongoing capability or unsupported reaction is not an announcement just because it names software or AI. Do not infer a release, new finding or outcome from a GitHub URL, unseen chart/image, linked page or neighboring message. Apply profile exclusions for instruction, advertising and other excluded material, but do not confuse low personal interest with exclusion. Preserve a genuine development inside a mostly excluded message. Brief reports, attributed rumors, previews, named-product recaps, product discoveries with an actual reported introduction, and substantive findings or adoption changes can be extractable without a date, statistics or a named company, provided the text states the development. A title reporting an expected launch can be enough; do not demand a full article or independent verification. Lack of verification or coverage elsewhere is NOT grounds to discard news. Preserve uncertainty and let later matching deduplicate reports. Ask what happened, changed, was found or is expected, and whether the supplied text supports it without inventing facts. Return not_extractable only when every supplied candidate is non-news or excluded by the profile.",
-      criteria: { extractable: "At least one supplied, reportable development is eligible under interestProfile, even if brief, low-interest, uncertain or mixed with an advertisement.",
-        not_extractable: "Only evergreen/explanatory material, excluded content, navigation or insufficient context is supplied; no eligible development can be reported without guessing." },
-    } },
-  },
-  split_validation: {
-    version: "split-validation-v2",
-    questions: { valid: {
-      type: "noul", instructions: untrusted +
-        "Accept proposedSpans only if EACH contiguous excerpt states exactly one complete, independently reportable concrete event from message.text: identify what happened and its subject. All independently reportable events must be covered without invented facts or attribution. Preserve rumors and uncertainty. Blank paragraphs and bullet points are formatting, NOT event boundaries. A release and its adjacent features, comparisons, pricing and availability belong together, not separate stories. Reject heading-only, introductory, feature-only, navigation, pure-promotion or context-dependent fragments. Reject a whole-message span containing two independent events. Reject both splitting one event into fragments and merging different events. A predicted count is only a hint and cannot justify a bad split. Detached supplementary detail with ambiguous attachment may be omitted rather than invented as another event.",
-      criteria: { true: "Every excerpt is one complete, grounded event; no event is fragmented, mixed, invented or missing.",
-        false: "Any excerpt is a heading or detail fragment, any event is split or mixed with another, or concrete news is missing or fabricated." },
-    } },
-  },
   source_link_role: {
     version: "source-link-role-v1",
     questions: { role: {
@@ -59,15 +41,6 @@ export const jevTemplates = {
       criteria: { relevant: "A product, vendor or same-event context match makes this source useful for this story.",
         irrelevant: "Different named product/vendor/event, generic-topic overlap only, unrelated advertising or navigation. A shared category word is insufficient.",
         uncertain: "The supplied context is genuinely ambiguous; no established subject mismatch. Not for two differently named products sharing only a generic word." },
-    } },
-  },
-  extraction_event_role: {
-    version: "extraction-event-role-v1",
-    questions: { role: {
-      type: "choice", instructions: untrusted +
-        "Decide whether candidate is an independently reportable development in the supplied WHOLE source, not whether its isolated words sound like news. sourceText is context, not additional candidate facts. Keep concrete announcements, attributed rumors, previews and explicit recaps of named releases. A retrospective release recap can be news. Reject a candidate that only repeats an older event as a comparison, historical precedent or explanation for the source's main new development. Continuing status such as a rival having kept access restricted is background unless the source reports a fresh change to that rival. A previous-month incident introduced to explain today's risks is background, not a new incident. Do not require external verification, use today's date to invent recency, or reject genuine secondary announcements solely because they differ from the article title.",
-      criteria: { current: "The source reports this development as news, including an explicit release recap, preview or rumor.",
-        background: "Only historical/comparative/evergreen context or non-news, with no independently reported development here." },
     } },
   },
   event_group_integrity: {

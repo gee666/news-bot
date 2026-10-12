@@ -93,7 +93,7 @@ describe('workspace', () => {
     const panel = element(container, '#panel-settings', HTMLDivElement);
     expect(panel.textContent).toContain('05:00, 09:00, 13:00, 17:00 and 21:00');
     expect(panel.textContent).toContain('Europe/Berlin');
-    expect(panel.textContent).toContain('wait for digest selection after consolidation and refresh');
+    expect(panel.textContent).toContain('wait for digest selection after story refresh');
     expect(panel.textContent).toContain('0 */3 * * *, every three hours');
     expect(panel.textContent).toContain('only to resume previously authorized delivery');
     expect(panel.textContent).toContain('Digest publishing cron');

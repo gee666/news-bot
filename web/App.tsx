@@ -114,7 +114,7 @@ export function App() {
   };
   const run = (kind: OperationKind, options?: RunNowOptions) => {
     if (access.mutationsBlocked) return;
-    if (kind === 'digest' && !window.confirm('Refresh and publish a digest now, without waiting for the schedule? This can use models, select ready stories and edit messages after consolidation and refresh succeed. It does not replay unpublished history.')) return;
+    if (kind === 'digest' && !window.confirm('Refresh and publish a digest now, without waiting for the schedule? This can use models, select ready stories and edit messages after story refresh succeeds. It does not replay unpublished history.')) return;
     if (kind === 'run_now' && !window.confirm(`Run a bounded collect, process and publish job? Up to ${options?.publicationLimit ?? 5} new Telegram posts can be sent. Existing posts may also be updated. Saved settings apply.`)) return;
     void mutationAction(async () => {
       const operation = await request('/operations', operationSchema, { kind, ...(kind === 'run_now' ? { options } : {}) });

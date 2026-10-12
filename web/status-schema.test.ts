@@ -21,8 +21,6 @@ it('uses the public status contract without dropping recovery or coverage diagno
   const parsed = statusSchema.parse(response);
   expect(parsed.batches[0]?.source_counts?.failed).toBe(1);
   expect(parsed.batches[0]?.source_failures?.[0]?.code).toBe('publisher_article_failed');
-  expect(parsed.digestRecovery?.failure_phase).toBe('publication');
-  expect(parsed.aggregateSelections?.[0]?.phase).toBe('confirmation');
   expect(parsed.publicationAdmissionDenials?.[0]?.occurrences).toBe(4);
   expect(JSON.stringify(parsed)).not.toContain('SECRET');
 });

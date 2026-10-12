@@ -56,6 +56,7 @@ describe('settings validation', () => {
     expect(defaultSettings.digestCron).toBe('0 */3 * * *');
     expect(defaultSettings.piModel).toBe('gpt-6-luna');
     expect(defaultSettings.jevTimeoutMs).toBe(1_200_000);
+    expect(defaultSettings.piTimeoutMs).toBe(300_000);
   });
 
   it.each([

@@ -1,20 +1,11 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { selectRepresentative, storyStageName } from './stories.js';
-import { defaultSettings } from '../settings.js';
-import { GENERATION_VERSION } from './generation-store.js';
-import { jevTemplates } from '../models/templates.js';
+import { selectRepresentative } from './stories.js';
 const mocks = vi.hoisted(() => ({ query: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: async (run: (client: { query: typeof mocks.query }) => Promise<unknown>) => run({ query: mocks.query }) }));
 const context = { id: 'story', attempt: 1, batchId: null, revisionId: null, storyId: 'story' };
 const rows = (texts: string[]) => texts.map((text, index) => ({ id: `${index}`, revision_id: `r${index}`, text,
   source_url: `https://example.org/${index}`, links: [] }));
 beforeEach(() => { mocks.query.mockReset().mockResolvedValue({ rows: [] }); });
-it('versions all downstream stages with the event integrity input contract', () => {
-  const story = { id: 'story', content_version: 3 };
-  const suffix = `${jevTemplates.representative.version}:${jevTemplates.event_group_integrity.version}:v3:p1:m1`;
-  for (const task of ['representative', 'interest', 'story_embedding']) expect(storyStageName(story, task, defaultSettings)).toBe(`${task}:${suffix}`);
-  expect(storyStageName(story, 'research', defaultSettings)).toBe(`research:${GENERATION_VERSION}:${suffix}`);
-});
 it('checks the whole group before selecting and invalidates display and rank when selection changes', async () => {
   const mentions = rows(['API launched.', 'Acme launched an API for routing, with confidence scores.']);
   mocks.query.mockResolvedValueOnce({ rows: mentions }).mockResolvedValueOnce({ rows: [] })

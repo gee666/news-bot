@@ -168,7 +168,7 @@ describe('automatic recovery fairness', () => {
     vi.stubEnv('PROCESSING_SLICE_MS', '1000'); mocks.alwaysDue = true;
     vi.mocked(associateSourceLinks).mockImplementation(async () => {
       for (let index = 0; index < 50; index++) { checkProcessingSlice(); await delay(500); }
-      return { messages: 50, excluded: 0, compared: 50, associated: 0, deferred: 0 };
+      return;
     });
     await start();
     await vi.advanceTimersByTimeAsync(31_001);

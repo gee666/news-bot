@@ -41,13 +41,13 @@ async function enqueue(id: string, batchId: string | null) {
   await database.transaction(client => ready.enqueueReadyStory(client, id, settings, batchId));
 }
 async function deferPair(leftId: string, rightId: string) {
-  const { eventInput,eventDecisionInput } = await import('../pipeline/consolidation-input.js');
+  const { eventInput } = await import('../pipeline/consolidation-input.js');
   const { hash } = await import('../pipeline/state.js');
   const left = await eventInput(leftId); const right = await eventInput(rightId);
   if (!left || !right) throw new Error('Missing deferred pair fixture');
   const key = `consolidation_deferred:${randomUUID()}`;
   await store.saveState(key, { leftId, rightId, leftFingerprint: left.fingerprint, rightFingerprint: right.fingerprint,
-    inputHash: hash(eventDecisionInput(left,right)), intake: [], status: 'unresolved', originBatchId: null, originStageId: 'fixture', attempts: 1 });
+    inputHash: hash([left,right]), intake: [], status: 'unresolved', originBatchId: null, originStageId: 'fixture', attempts: 1 });
   return key;
 }
 const drain = async () => (await import('./digest.js')).publishDigest(settings);
@@ -150,7 +150,7 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
     expect((await database.db.query('SELECT status,reason FROM story_publication_ready')).rows)
       .toEqual([{ status: 'prepared', reason: null }, { status: 'prepared', reason: null }]);
     expect((await store.state(key))).toMatchObject({ status: 'unresolved' });
-    await (await import('../pipeline/consolidation-deferrals.js')).resolveConsolidationPair(key);
+    await store.saveState(key, { status: 'resolved' });
     await maintain(); await drain();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2);
     expect((await database.db.query('SELECT id FROM publications')).rows).toHaveLength(2);

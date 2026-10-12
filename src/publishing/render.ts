@@ -53,21 +53,24 @@ function sourceSections(snapshot: PublicationSnapshot, compact: boolean): { text
 function stripTrailingCitationMarkers(text: string): string {
   return text.replace(/\s+\[\d+(?:\s*,\s*\d+)*\](?=\s*(?:\n\s*\n|$))/gu, '');
 }
-function header(snapshot: PublicationSnapshot, headline: string): string {
-  return `${headline}\nИнтерес: ${snapshot.score}/10 · ${'▰'.repeat(snapshot.score)}${'▱'.repeat(10 - snapshot.score)}`;
+function interestBar(score: number): string {
+  return '•'.repeat(score) + '◦'.repeat(10 - score);
 }
-function reviewWarning(snapshot: PublicationSnapshot): string {
-  return snapshot.review && !snapshot.review.supported
-    ? `\n\n⚠️ Не прошло проверку: ${snapshot.review.reason.replace(/\s+/gu, ' ').slice(0, 240)}` : '';
+function header(snapshot: PublicationSnapshot, headline: string): string {
+  return `${interestBar(snapshot.score)}\n${headline}`;
+}
+function reviewNotes(snapshot: PublicationSnapshot): string {
+  const reason = snapshot.review?.reason.replace(/\s+/gu, ' ').trim().slice(0, 240);
+  return reason ? `\n\nЗаметки проверяющего: ${reason}` : '';
 }
 
-/** Telegram's visible-text budget, including the review warning and source links. */
+/** Telegram's visible-text budget, including reviewer notes and source links. */
 export function publicationDetailsBudget(content: unknown): number {
   const snapshot = publicationSnapshotSchema.parse(content);
   if (sourceEntityCount(snapshot) > 100) return 0;
   const headline = stripTrailingCitationMarkers(snapshot.headline);
   return Math.max(0, MESSAGE_LIMIT - header(snapshot, headline).length - 2
-    - reviewWarning(snapshot).length - sourceSections(snapshot, true).plainText.length);
+    - reviewNotes(snapshot).length - sourceSections(snapshot, true).plainText.length);
 }
 export function render(content: unknown): RenderedMessage {
   const parsed = publicationSnapshotSchema.safeParse(content);
@@ -75,23 +78,23 @@ export function render(content: unknown): RenderedMessage {
   const snapshot = parsed.data;
   if (sourceEntityCount(snapshot) > 100) throw new PublicationRenderError('publication_entity_limit');
   const headline = stripTrailingCitationMarkers(snapshot.headline).slice(0, 180);
-  const warning = reviewWarning(snapshot);
+  const notes = reviewNotes(snapshot);
   let details = stripTrailingCitationMarkers(snapshot.details ?? '');
-  let body = header(snapshot, headline) + (details ? `\n\n${details}` : '') + warning;
+  let body = header(snapshot, headline) + (details ? `\n\n${details}` : '') + notes;
   let sections = sourceSections(snapshot, false);
   if ((body + sections.plainText).length > MESSAGE_LIMIT) {
     sections = sourceSections(snapshot, true);
-    const budget = Math.max(0, MESSAGE_LIMIT - header(snapshot, headline).length - 2 - warning.length - sections.plainText.length);
+    const budget = Math.max(0, MESSAGE_LIMIT - header(snapshot, headline).length - 2 - notes.length - sections.plainText.length);
     if (details.length > budget) {
       details = details.slice(0, Math.max(0, budget - 1)).replace(/[\uD800-\uDBFF]$/u, '').trimEnd() + (budget ? '…' : '');
-      body = header(snapshot, headline) + (details ? `\n\n${details}` : '') + warning;
+      body = header(snapshot, headline) + (details ? `\n\n${details}` : '') + notes;
     }
   }
   const plainText = body + sections.plainText;
   if (plainText.length > MESSAGE_LIMIT) throw new PublicationRenderError('publication_message_too_long');
-  let text = `<b>${escapeHtml(headline)}</b>\n${escapeHtml(header(snapshot, headline).slice(headline.length + 1))}`;
+  let text = `${interestBar(snapshot.score)}\n<b>${escapeHtml(headline)}</b>`;
   if (details) text += `\n\n${escapeHtml(details)}`;
-  text += escapeHtml(warning) + sections.text;
+  text += escapeHtml(notes) + sections.text;
   const links = sections.links.map(link => ({ ...link, offset: body.length + link.offset }));
   return { text, plainText, links, parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: [] } };
 }

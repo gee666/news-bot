@@ -13,15 +13,3 @@ it('keeps news eligibility separate from personal interest scoring and versioned
   expect(Object.isFrozen(jevTemplates.news_eligibility.questions.eligible.criteria)).toBe(true);
   expect(Object.isFrozen(jevTemplates.news_eligibility.questions.eligible)).toBe(true);
 });
-
-it('versions the stricter event-level split contract for cached judgments', () => {
-  const template = jevTemplates.split_validation;
-  expect(template.version).toBe('split-validation-v2');
-  expect(template.questions.valid.instructions).toContain('EACH contiguous excerpt');
-  expect(template.questions.valid.instructions).toContain('NOT event boundaries');
-  expect(template.questions.valid.instructions).toContain('feature-only');
-  expect(template.questions.valid.instructions).toContain('two independent events');
-  expect(Object.isFrozen(template.questions)).toBe(true);
-  expect(Object.isFrozen(template.questions.valid.criteria)).toBe(true);
-  expect(Object.isFrozen(template.questions.valid)).toBe(true);
-});

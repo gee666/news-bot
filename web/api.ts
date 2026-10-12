@@ -12,7 +12,7 @@ export const settingsSchema = z.object({
   collectionCron: text.min(1), digestCron: text.min(1), cleanupCron: text.min(1), timezone: text.min(1), retentionDays: integer(1, 365),
   publishingEnabled: z.boolean(), jevTimeoutMs: integer(1200000, 86400000), embeddingTimeoutMs: integer(1000, 86400000), piTimeoutMs: integer(1000, 86400000),
   connectionTimeoutMs: integer(100, 60000), prefixCacheEnabled: z.boolean(), collectionWindowHours: integer(1, 48),
-  matchCandidateLimit: integer(1, 100), headlineBatchSize: integer(1, 10), researchMaxPages: integer(1, 20), researchMaxSearches: integer(0, 10),
+  researchMaxPages: integer(1, 20), researchMaxSearches: integer(0, 10),
   requestMaxAttempts: integer(1, 20), retryBaseMs: integer(1000, 3600000), retryMaxMs: integer(1000, 86400000),
 });
 export type Settings = z.infer<typeof settingsSchema>;

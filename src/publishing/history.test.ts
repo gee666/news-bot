@@ -90,6 +90,6 @@ describe.skipIf(!databaseUrl)('snapshot rendering after PostgreSQL history delet
     expect(message.text).toContain('доступ ограничен');
     expect(message.text).not.toContain('advert.org');
     expect(message.text.indexOf('author.org')).toBeLessThan(message.text.indexOf('t.me/'));
-    expect(message.text).toContain('Интерес: 8/10');
+    expect(message.text).toContain('••••••••◦◦');
   });
 });

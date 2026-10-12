@@ -48,7 +48,7 @@ describe("isolated Pi generation", () => {
     const stream = vi.spyOn(runtime, "streamSimple").mockImplementation((_model, context, options) => {
       expect(options?.maxRetries).toBe(0);
       expect(options?.transport).toBe("sse");
-      expect(options?.timeoutMs).toBe(1_200_000);
+      expect(options?.timeoutMs).toBe(300_000);
       const messages = context.messages;
       expect(messages.filter((message) => message.role === "user")).toHaveLength(1);
       userCounts++;

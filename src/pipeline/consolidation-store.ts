@@ -1,29 +1,29 @@
 import { db, transaction } from '../db.js';
-import { eventInput, type EventInput } from './consolidation-input.js';
+import { eventInput, type EventInput, type HistoricalEventRef } from './consolidation-input.js';
 import { hash } from './state.js';
-import { mergeHasIntake, type ConsolidationIntake } from './consolidation-intake.js';
+import { historicalEventInput } from './historical-input.js';
 
 export type EventRelation = 'same' | 'update';
 export interface MergeResult { canonicalId: string; mergedId: string }
 
-/** A merge needs actual unconsumed intake as well as unchanged classifier inputs. */
+/** Preserve canonical publications while merging unchanged classifier inputs. */
 export async function mergeStories(left: EventInput, right: EventInput, relation: EventRelation,
-  intake?: readonly ConsolidationIntake[]): Promise<MergeResult | null> {
+  history: { left?:HistoricalEventRef; right?:HistoricalEventRef } = {}): Promise<MergeResult | null> {
   if (left.id === right.id) return null;
   return transaction(async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
     // Collector edits must not change current_revision_id between fingerprint check and commit.
     await client.query(`SELECT i.id FROM source_items i WHERE EXISTS(SELECT 1 FROM item_revisions r
       JOIN story_mentions m ON m.revision_id=r.id WHERE r.item_id=i.id AND m.story_id=ANY($1::uuid[]))
-      ORDER BY i.id FOR SHARE`, [[left.id, right.id]]);
+      OR i.id IN(SELECT item_id FROM item_revisions WHERE id=ANY($2::uuid[]))
+      ORDER BY i.id FOR SHARE`, [[left.id, right.id], [history.left?.revisionId,history.right?.revisionId].filter(id=>id!==undefined)]);
     const locked = await client.query<{ id: string }>(`SELECT id FROM stories WHERE id=ANY($1::uuid[])
-      AND status<>'rejected' AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=stories.id)
-      ORDER BY id FOR UPDATE`, [[left.id, right.id]]);
+      AND (status<>'rejected' OR id=ANY($2::uuid[])) AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=stories.id)
+      ORDER BY id FOR UPDATE`, [[left.id, right.id], [...(history.left ? [left.id] : []),...(history.right ? [right.id] : [])]]);
     if (locked.rows.length !== 2) return null;
-    const currentLeft = await eventInput(left.id, client);
-    const currentRight = await eventInput(right.id, client);
-    if (currentLeft?.fingerprint !== left.fingerprint || currentRight?.fingerprint !== right.fingerprint
-      || !await mergeHasIntake([left.id, right.id], intake, client.query.bind(client))) return null;
+    const currentLeft = history.left ? await historicalEventInput(left.id,history.left,client) : await eventInput(left.id, client);
+    const currentRight = history.right ? await historicalEventInput(right.id,history.right,client) : await eventInput(right.id, client);
+    if (currentLeft?.fingerprint !== left.fingerprint || currentRight?.fingerprint !== right.fingerprint) return null;
     const order = await client.query<{ id: string }>(`SELECT s.id FROM stories s
       LEFT JOIN LATERAL (SELECT min(published_at) AS first_publication FROM publications
         WHERE story_id=s.id AND message_id IS NOT NULL AND published_at IS NOT NULL) p ON true
@@ -60,7 +60,7 @@ export async function mergeStories(left: EventInput, right: EventInput, relation
     const combined = await eventInput(canonicalId, client);
     await client.query(`UPDATE stories SET status='processing',content_version=content_version+1,
       meaningful_hash=$2,headline=NULL,summary=NULL,translated_excerpt=NULL,researched=false,interest_stale=true,updated_at=now()
-      WHERE id=$1`, [canonicalId, hash(combined?.fingerprint)]);
+      WHERE id=$1`, [canonicalId, hash(combined?.fingerprint ?? [left.fingerprint,right.fingerprint])]);
     await client.query(`UPDATE stories SET status='rejected',interest_stale=true,updated_at=now() WHERE id=$1`, [mergedId]);
     await client.query('DELETE FROM embeddings WHERE story_id=ANY($1::uuid[])', [[canonicalId, mergedId]]);
     await client.query('DELETE FROM operational_state WHERE key=$1', [`digest_refresh:${mergedId}`]);

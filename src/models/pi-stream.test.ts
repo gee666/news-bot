@@ -225,14 +225,15 @@ describe("Pi SSE failure handling without live inference", () => {
     expect(record).toHaveBeenCalledOnce();
   });
 
-  it('aborts a stalled SDK stream through the caller signal and releases the serial limiter for queued work', async () => {
+  it.each(['caller','deadline'] as const)('aborts a stalled SDK stream through %s and releases the serial limiter for queued work', async mode => {
     const fetch = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(new ReadableStream<Uint8Array>(), { status: 200 }))
       .mockResolvedValueOnce(completedResponse('Queued work completed.'));
     const record = vi.fn().mockResolvedValue(undefined);
-    const client = await generator(record, 1_200_000);
-    const stalled = client.generate(request, { operationId: 'synthetic-optional-review', signal: AbortSignal.timeout(100) });
-    const rejected = expect(stalled).rejects.toMatchObject({ metadata: { kind: 'cancelled', outcome: 'unknown' } });
+    const client = await generator(record, mode==='deadline' ? 100 : 1_200_000);
+    const stalled = client.generate(request, { operationId: 'synthetic-stalled-call',
+      ...(mode==='caller' ? {signal:AbortSignal.timeout(100)} : {}) });
+    const rejected = expect(stalled).rejects.toMatchObject({ metadata: { kind: mode==='caller' ? 'cancelled' : 'timeout', outcome: 'unknown' } });
     const queued = client.generate(request, { operationId: 'synthetic-next-model' });
     await rejected;
     expect((await queued).text).toBe('Queued work completed.');

@@ -11,13 +11,14 @@ describe('full publication rendering', () => {
   it('shows details, score and sources together with no buttons or marker', () => {
     const message = render(snapshot);
     expect(message.text).toContain(escapeHtml(snapshot.headline));
-    expect(message.text).toContain('Интерес: 8/10 · ▰▰▰▰▰▰▰▰▱▱');
+    expect(message.text.startsWith('••••••••◦◦\n<b>')).toBe(true);
+    expect(message.text).not.toMatch(/Интерес|\/10|[▰▱]/u);
     expect(message.text).toContain(escapeHtml(snapshot.details));
     expect(message.text).toContain('href="https://t.me/c/123/23"');
     expect(message.text).toContain('доступ ограничен');
     expect(message.reply_markup.inline_keyboard).toEqual([]);
     expect(message.link_preview_options.is_disabled).toBe(true);
-    expect(message.plainText).toBe(snapshot.headline + '\nИнтерес: 8/10 · ▰▰▰▰▰▰▰▰▱▱\n\n' + snapshot.details + '\n\nВторичные источники\nКанал <1> · №23 · доступ ограничен');
+    expect(message.plainText).toBe('••••••••◦◦\n' + snapshot.headline + '\n\n' + snapshot.details + '\n\nВторичные источники\nКанал <1> · №23 · доступ ограничен');
     expect(message.plainText.slice(message.links[0]!.offset,message.links[0]!.offset+message.links[0]!.length)).toBe('Канал <1> · №23 · доступ ограничен');
   });
   it('groups primary and secondary sources without conflating fetch and relevance', () => {
@@ -98,14 +99,22 @@ describe('full publication rendering', () => {
     expect(render({ ...snapshot, details: '😀'.repeat(Math.floor(budget/2)+1) }).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
     expect(() => render({ ...snapshot, sources: Array.from({ length: SOURCE_LIMIT+1 }, () => snapshot.sources[0]!) })).toThrow('publication_entity_limit');
   });
-  it('renders a failed review as one escaped Russian warning, retaining links and offsets', () => {
-    const message = render({ ...snapshot, review: { supported: false, reason: 'Версия <2> не подтверждена\nисточником' } });
-    expect(message.plainText).toContain('⚠️ Не прошло проверку: Версия <2> не подтверждена источником');
+  it.each([false, true])('renders reviewer notes with supported=%s, retaining links and offsets', supported => {
+    const message = render({ ...snapshot, review: { supported, reason: 'Версия <2> не подтверждена\nисточником' } });
+    expect(message.plainText).toContain('Заметки проверяющего: Версия <2> не подтверждена источником');
     expect(message.text).toContain('Версия &lt;2&gt; не подтверждена источником');
     expect(message.links[0]?.url).toBe(snapshot.sources[0]?.url);
     const link = message.links[0]!;
     expect(message.plainText.slice(link.offset, link.offset + link.length)).toBe('Канал <1> · №23 · доступ ограничен');
-    expect(render({ ...snapshot, review: { supported: true, reason: 'Ошибок нет' } }).text).not.toContain('⚠️');
+    const content = { ...snapshot, review: { supported, reason: 'Замечание '.repeat(50) } };
+    const budget = publicationDetailsBudget(content);
+    expect(render({ ...content, details: 'x'.repeat(budget) }).plainText.length).toBe(MESSAGE_LIMIT);
+  });
+  it('omits reviewer notes when no review is present', () => {
+    expect(render(snapshot).text).not.toContain('Заметки проверяющего:');
+  });
+  it.each([1, 6, 10])('puts a ten-symbol bar for score %s before the title', score => {
+    expect(render({ ...snapshot, score }).plainText.split('\n')[0]).toBe('•'.repeat(score) + '◦'.repeat(10 - score));
   });
   it('deduplicates URLs while preserving every origin label and primary-first order', () => {
     const origin = snapshot.sources[0]!;

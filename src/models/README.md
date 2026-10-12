@@ -18,7 +18,7 @@ interface RequestContext {
 
 There are no immediate automatic retries. The processing loop resumes eligible failed work at `nextRetryAt`; authentication, model, input/context and invalid-output failures need correction. Transport/server and timeout errors stop at the client's `requestMaxAttempts`, default five. Pipeline and settings-page clients receive the saved setting; UI restart recovery uses it too. Throttling has increasing delays without a daily quota or attempt cap. Timeouts and recognized interrupted Pi streams with unknown outcomes wait at least five minutes before a later retry. Deadline duration starts after acquiring the shared `inferenceLimiter`, not while waiting locally. The same gate covers generation and settings-page test calls from every client instance.
 
-HTTP clients use a 10-second connection deadline and separate total/idle request deadlines. JEV defaults to 20 minutes and rejects settings below its documented minimum. Ollama defaults to 10 minutes. Pi defaults to 20 minutes. Close replaced HTTP clients with `close()`.
+HTTP clients use a 10-second connection deadline and separate total/idle request deadlines. JEV defaults to 20 minutes and rejects settings below its documented minimum. Ollama defaults to 10 minutes. Pi defaults to five minutes, configurable through `piTimeoutMs`. Migration 194 shortens only the former twenty-minute default for automatic work; custom deadlines and manual batch snapshots remain unchanged. Close replaced HTTP clients with `close()`.
 
 ## Exports
 
@@ -90,14 +90,13 @@ new EmbeddingClient(config: EmbeddingConfig)
 
 Both configs take `baseUrl`, `recordFailure`, optional `model`, `timeoutMs`, `connectTimeoutMs`, `requestMaxAttempts`. JEV also requires `apiKey` and accepts `prefixCache`, `onMetrics`. Embeddings accept `dimensions`, default 4096.
 
-JEV template names and state fields:
+JEV template names and state fields. The pipeline uses JEV for coherence, representative selection, eligibility and interest. Extraction uses Pi with exact source coordinates and a review. Grouping and link assessment use the shared identity/relevance instructions in one Pi call across all candidates; they no longer dispatch pair-by-pair JEV judgments.
 
 | Template | State | Answer |
 | --- | --- | --- |
 | story_count | message.text | count: choice none, 1 through 20, more |
-| split_validation | message.text, proposedSpans | valid: noul probability |
 | link_relevance | story, link, anchor, surroundingText | relevance: relevant, irrelevant, uncertain |
-| duplicate | mention, candidate | relation: same, update, different |
+| duplicate | mention, candidate | relation: same, different |
 | interest | story, interestProfile | interest: score index 0 through 9 |
 | representative | story, left, right | best: left or right |
 

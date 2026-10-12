@@ -63,8 +63,6 @@ it('retains source coverage, digest holds and scoped recovery fields through the
   const status = publicStatusSchema.parse(await held.services.status());
   expect(status.batches[0]?.source_counts?.failed).toBe(1);
   expect(status.batches[0]?.source_failures).toEqual([{ sourceId: id, code: 'publisher_article_failed' }]);
-  expect(status.digestRecovery?.failure_phase).toBe('source_links');
-  expect(status.aggregateSelections?.[0]?.status).toBe('unresolved');
   expect(JSON.stringify(status)).not.toContain('SECRET');
   expect(query.mock.calls.every(([value]) => String(value).trimStart().startsWith('SELECT'))).toBe(true);
   await held.operations.stop();

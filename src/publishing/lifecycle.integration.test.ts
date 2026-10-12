@@ -177,7 +177,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     } else {
       expect(edit).toHaveBeenCalledTimes(2);
       expect(edit.mock.calls[1]?.[2].plainText.length).toBeLessThanOrEqual(4096);
-      expect(edit.mock.calls[1]?.[2].plainText).toMatch(/…$/u);
+      expect(edit.mock.calls[1]?.[2].plainText).toContain('…\n\nЗаметки проверяющего: Существенных ошибок не найдено');
       expect((await row(id)).content).toEqual({ ...current, details: summary });
       expect((await row(id)).pending_snapshot_id).toBeNull(); expect((await row(id)).snapshot_id).toBe(next);
     }

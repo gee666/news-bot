@@ -115,8 +115,7 @@ describe.skipIf(!url)('bounded manual orchestration with PostgreSQL', () => {
     await (await import('./run-now.js')).runNow(current, async () => {}, new AbortController().signal);
     expect(current.runNow?.inputs).toBe(1);
     const actual = await vi.importActual<typeof import('./extraction.js')>('./extraction.js');
-    const { Judgments } = await import('./judgments.js');
-    await actual.extractBatch(original.batch, settings, new Judgments(settings));
+    await actual.extractBatch(original.batch, settings);
     expect((await database.db.query('SELECT id FROM stage_state WHERE batch_id=$1', [original.batch])).rows).toHaveLength(0);
     expect((await database.db.query('SELECT revision_id FROM batch_items WHERE batch_id=$1', [original.batch])).rows).toHaveLength(0);
     expect((await database.db.query('SELECT revision_id FROM batch_items WHERE batch_id=$1', [current.batchId])).rows)

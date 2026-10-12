@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { StatusPanel } from './StatusPanel';
 import { statusSchema } from './api';
-import { mount, element, click } from './test-dom';
+import { mount, element } from './test-dom';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const otherId = '22222222-2222-4222-8222-222222222222';
@@ -48,13 +48,10 @@ it('shows incomplete source coverage, historical denials and recovery progress w
   expect(diagnostics.textContent).toContain('Operation: edit · Observations: 3');
   expect(diagnostics.textContent).toContain('Operation: not recorded · Observations: 1');
   expect(diagnostics.textContent).toContain(`Publication ${id}`); expect(diagnostics.textContent).toContain(`Snapshot ${otherId}`);
-  expect(diagnostics.textContent).toContain('Recorded phase: waiting'); expect(diagnostics.textContent).toContain('Failure phase: source links');
+  expect(diagnostics.textContent).toContain('Recorded phase: waiting');
   expect(diagnostics.textContent).toContain('invalid_output'); expect(diagnostics.textContent).toContain('Recorded retry');
-  expect(diagnostics.textContent).toContain('2 unresolved records'); expect(diagnostics.textContent).toContain('Source link confirmation');
-  expect(diagnostics.textContent).toContain(`Left story ${id}`); expect(diagnostics.textContent).toContain(`Right story ${otherId}`);
   expect(diagnostics.querySelector('time')?.getAttribute('dateTime')).toBe(date);
   expect(diagnostics.querySelectorAll('button, input, select, a[href]')).toHaveLength(0);
-  await click(element(diagnostics, 'details summary', HTMLElement));
   expect(run).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled(); expect(container.textContent).not.toContain('SECRET');
 });
 it('renders explicit empty diagnostic sections without inventing active blocks', async () => {
@@ -62,7 +59,6 @@ it('renders explicit empty diagnostic sections without inventing active blocks',
     aggregateSelections: [], publicationAdmissionDenials: [] });
   expect(container.textContent).toContain('No recorded admission denials');
   expect(container.textContent).toContain('No recorded digest recovery state');
-  expect(container.textContent).toContain('No unresolved selection records');
 });
 it('keeps older status responses readable when optional diagnostics are absent', async () => {
   const { container } = await renderStatus(base);

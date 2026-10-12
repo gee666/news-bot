@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppSettings } from '../settings.js';
+vi.mock('./grouping-model.js', () => ({ GROUPING_VERSION: 'grouping-v1', groupReport: async () => [] }));
 const mocks = vi.hoisted(() => ({ generated: [] as Array<{ id: string; modelVersion: number }>, clock: 0, overrun: false }));
 vi.mock('./collection.js', () => ({ collectBatch: async () => {} }));
 vi.mock('../models/jev.js', async original => ({ ...await original<typeof import('../models/jev.js')>(), JevClient: class {

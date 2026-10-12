@@ -17,7 +17,7 @@ export function sourceUnits(text: string): SourceUnit[] {
 function selectionSchemaWithIds(id: z.ZodType<string>) {
   const range = z.object({ first: id, last: id, excerpt: z.string().min(1).nullable() }).strict();
   return z.object({
-    events: z.array(z.object({ parts: z.array(range).min(1).max(100), context: z.array(range).max(100) }).strict()).max(100),
+    events: z.array(z.object({ parts: z.array(range).min(1), context: z.array(range) }).strict()),
     omitted: z.array(z.object({ id, last: id.nullable(), excerpt: z.string().min(1).nullable(),
       reason: z.enum(['heading', 'non_news', 'profile_excluded']) }).strict()),
   }).strict();
@@ -118,7 +118,7 @@ function selectionFailure(text: string, units: SourceUnit[], selection: EventSel
 export function selectionFeedback(text: string, units: SourceUnit[], selection: EventSelection): string {
   const failure = selectionFailure(text, units, selection);
   return failure?.feedback ?? (selection.events.length ? ''
-    : 'empty_candidate: Structurally complete no-news proposal; independent extractability confirmation is required.');
+    : 'Empty proposal. Review every omission against the whole source.');
 }
 export function selectionValidationCodes(text: string, units: SourceUnit[], selection: EventSelection): ValidationCode[] {
   const failure = selectionFailure(text, units, selection);
