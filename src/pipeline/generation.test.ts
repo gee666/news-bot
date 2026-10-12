@@ -21,8 +21,10 @@ vi.mock('./research.js', async original => ({
 }));
 const draft = { headline: 'Acme выпустила версию 2.0', summary: 'Исправлена ошибка безопасности.',
   source_urls: ['https://example.org/release'] };
-const passed = { supported: true, reason: 'Существенных ошибок не найдено' };
-const failed = { supported: false, reason: 'Версия не подтверждена источниками' };
+const passed = { remarks: [] };
+const failed = { remarks: ['Версия не подтверждена источниками'] };
+const savedPassed = { supported: true, reason: '' };
+const savedFailed = { supported: false, reason: 'Версия не подтверждена источниками' };
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.input.mockResolvedValue(storyInput());
@@ -48,8 +50,17 @@ it('writes and reviews once, keeping all source material and links', async () =>
   expect(mocks.generate.mock.calls[1]?.[1].operationId).toBe(`research:${storyId}:review`);
   expect(saveGenerations).toHaveBeenCalledWith([input], [expect.objectContaining({
     id: storyId, headline: draft.headline, summary: draft.summary, sourceUrls: draft.source_urls,
-    review: passed, evidenceSignature: 'evidence-signature',
+    review: savedPassed, evidenceSignature: 'evidence-signature',
   })], defaultSettings);
+});
+
+it('requests only actual remarks and saves an empty reason when there are none', async () => {
+  mocks.generate.mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(passed));
+  await researchStory(storyId,defaultSettings);
+  const schema=mocks.generate.mock.calls[1]?.[0].responseSchema.schema;
+  expect(schema).toHaveProperty('required',['remarks']);
+  expect(schema).toHaveProperty(['properties','remarks','type'],'array');
+  expect(saveGenerations).toHaveBeenCalledWith(expect.anything(),[expect.objectContaining({review:savedPassed})],defaultSettings);
 });
 
 it('omits unsupported URI format from the native schema without dropping other constraints', async () => {
@@ -76,11 +87,11 @@ it.each(['ftp://example.org/release', 'javascript:alert(1)', 'not-a-url'])('stil
 it('saves a still-unsupported rewrite after exactly one rewrite and re-review', async () => {
   mocks.generate.mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(failed))
     .mockResolvedValueOnce(modelResult({ ...draft, summary: 'Acme сообщила об обновлении.' }))
-    .mockResolvedValueOnce(modelResult({ ...failed, reason: 'Версия не подтверждена\nисточниками' }));
+    .mockResolvedValueOnce(modelResult({ remarks: ['Версия не подтверждена\nисточниками'] }));
   await researchStory(storyId, defaultSettings);
   expect(mocks.generate).toHaveBeenCalledTimes(4);
   expect(saveGenerations).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({
-    summary: 'Acme сообщила об обновлении.', review: failed,
+    summary: 'Acme сообщила об обновлении.', review: savedFailed,
   })], defaultSettings);
 });
 

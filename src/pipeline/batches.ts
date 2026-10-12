@@ -11,7 +11,7 @@ import { recordProcessingDiagnostic } from './processing-diagnostics.js';
 import { retryDecision, Waiting } from './state.js';
 import { reconcileEdits } from './revisions.js';
 import { consolidateStories } from './consolidation.js';
-import { completeBatchItems } from './item-failures.js';
+import { completeBatchItems, expireUnassignedMentions } from './item-failures.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 
 const batchSchema = z.object({ id: z.uuid(), cutoff_at: z.date(), settings_snapshot: settingsSchema,
@@ -23,12 +23,16 @@ export function processBatch(_manual: boolean, recoverOnly = false, batchId?: st
 
 async function processBatchSlice(recoverOnly: boolean, batchId?: string,
   onReady?: (id: string) => Promise<void>): Promise<void> {
+  if(!batchId) await expireUnassignedMentions(await getSettings());
   const selected = batchId ? await db.query('SELECT * FROM processing_batches WHERE id=$1', [batchId])
     : await db.query(`SELECT * FROM processing_batches b WHERE completed_at IS NULL
       AND (next_retry_at IS NULL OR next_retry_at<=now())
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='run_now_batch:'||b.id::text)
-      ORDER BY EXISTS(SELECT 1 FROM batch_items i WHERE i.batch_id=b.id
-        AND i.status IN ('pending','processing')) DESC,cutoff_at DESC,started_at DESC,b.id LIMIT 1`);
+      ORDER BY EXISTS(SELECT 1 FROM batch_items bi JOIN story_mentions m ON m.revision_id=bi.revision_id
+        JOIN source_items i ON i.current_revision_id=m.revision_id WHERE bi.batch_id=b.id AND bi.status<>'rejected'
+          AND m.story_id IS NULL AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window') DESC,
+        EXISTS(SELECT 1 FROM batch_items i WHERE i.batch_id=b.id
+          AND i.status IN ('pending','processing')) DESC,cutoff_at DESC,started_at DESC,b.id LIMIT 1`);
   let batch = selected.rows.length ? batchSchema.parse(selected.rows[0]) : undefined;
   if (batch && (batch.completed_at || (batch.next_retry_at && batch.next_retry_at>new Date()))) return;
   if (!batch) {

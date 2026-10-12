@@ -2,10 +2,12 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../settings.js';
 import { Judgments } from './judgments.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
-const mocks = vi.hoisted(() => ({ query: vi.fn(), judge: vi.fn(), privacy: vi.fn(), failure: vi.fn() }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), judge: vi.fn(), privacy: vi.fn(), failure: vi.fn(), pi:vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('../models/jev.js', () => ({ JevClient: class { judge = mocks.judge; async close() {} } }));
 vi.mock('./privacy.js', () => ({ approveRemoteInput: mocks.privacy }));
+vi.mock('./pi-judgment.js',()=>({piJudgment:mocks.pi}));
+import { ModelRequestError, RequestFault, failureMetadata } from '../models/errors.js';
 vi.mock('./state.js', async original => ({ ...await original<typeof import('./state.js')>(), recordFailure: mocks.failure }));
 const answer = { type: 'choice', choice: 'left', probabilities: { left: 1 }, confidence: 1 };
 const context = { id: 'representative-stage', attempt: 1, batchId: null, revisionId: null, storyId: null };
@@ -17,6 +19,30 @@ beforeEach(() => {
   mocks.query.mockResolvedValue({ rows: [] });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+
+it('routes JEV context limits to Pi and caches the actual provider without repeating the failed request',async ()=>{
+  const cache=new Map<string,{value:unknown;model_key:string}>();
+  mocks.query.mockImplementation(async (sql:string,args:unknown[]=[])=>{
+    if(sql.startsWith('SELECT value')) {const row=cache.get(String(args[0]));return {rows:row?[row]:[]};}
+    if(sql.startsWith('INSERT INTO model_cache')) cache.set(String(args[0]),{value:JSON.parse(String(args[3])),model_key:String(args[1])});
+    return {rows:[]};
+  });
+  const error=new ModelRequestError(failureMetadata(new RequestFault('context_limit'),context.id,'jev',1,0));
+  mocks.judge.mockRejectedValue(error); mocks.pi.mockResolvedValue(answer);
+  const judgments=new Judgments(defaultSettings); const state={left:'A'.repeat(100000),right:'B'};
+  expect(await judgments.judge('representative',state,context)).toEqual(answer);
+  expect(await judgments.judge('representative',state,context)).toEqual(answer);
+  expect(mocks.judge).toHaveBeenCalledOnce(); expect(mocks.pi).toHaveBeenCalledOnce();
+  expect(mocks.pi).toHaveBeenCalledWith('representative',state,defaultSettings,context);
+  expect([...cache.values()][0]?.model_key).toBe(`${defaultSettings.piProvider}/${defaultSettings.piModel}`);
+});
+
+it('does not disguise unrelated JEV failures as context fallback',async ()=>{
+  const error=new ModelRequestError(failureMetadata(new RequestFault('transient'),context.id,'jev',1,0));
+  mocks.judge.mockRejectedValue(error);
+  await expect(new Judgments(defaultSettings).judge('interest',{story:'A'},context)).rejects.toBe(error);
+  expect(mocks.pi).not.toHaveBeenCalled();
+});
 
 it('reuses a cached judgment and journals its receipt after the slice expires', async () => {
   mocks.query.mockResolvedValueOnce({ rows: [{ value: answer }] });

@@ -12,8 +12,8 @@ export const sourceAuthorityKindSchema = z.enum(['primary', 'journalism', 'disco
 export type SourceAuthorityKind = z.infer<typeof sourceAuthorityKindSchema>;
 export const sourceAuthorityRanks: Readonly<Record<SourceAuthorityKind, number>> = { primary: 0, journalism: 1, discovery: 2 };
 export const generationReviewSchema = z.object({
-  supported: z.boolean(), reason: z.string().trim().min(1).regex(/[А-Яа-яЁё]/u),
-}).strict();
+  supported: z.boolean(), reason: z.union([z.literal(''), z.string().trim().min(1).regex(/[А-Яа-яЁё]/u)]),
+}).strict().refine(review => review.supported || review.reason.length > 0);
 export type GenerationReview = z.infer<typeof generationReviewSchema>;
 
 export const publicationSourceSchema = z.object({

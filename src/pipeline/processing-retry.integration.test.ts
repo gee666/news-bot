@@ -123,6 +123,14 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[enrichment])).rows).toEqual([{status:'completed'}]);
     expect(mocks.empty).toHaveBeenCalledOnce();
   });
+  it('groups saved orphan reports before starting newer raw extraction', async () => {
+    const orphan=await batch('queued'); const revision=await item(orphan,'Saved report.');
+    await (await import('./extraction-store.js')).applyExtraction(orphan,revision,'Saved report.',[{start:0,end:13}]);
+    const raw=await batch('queued'); await item(raw,'Newer raw report.');
+    await (await import('./batches.js')).processBatch(false,true);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows[0]?.story_id).toBeTruthy();
+    expect((await database.db.query('SELECT count(*)::int AS n FROM stage_state WHERE batch_id=$1',[raw])).rows).toEqual([{n:0}]);
+  });
   it('matches committed mentions before extraction waits on unfinished links', async () => {
     const batchId = await batch(); const revision = await item(batchId,'Recent extracted release.');
     await (await import('./extraction-store.js')).applyExtraction(batchId,revision,'Recent extracted release.',[{start:0,end:25}]);

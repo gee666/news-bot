@@ -102,7 +102,7 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
   const result = await db.query<Mention>(`SELECT m.id,m.revision_id,m.text,m.story_id FROM story_mentions m
     JOIN batch_items b ON b.revision_id=m.revision_id JOIN item_revisions r ON r.id=m.revision_id
     JOIN source_items i ON i.current_revision_id=r.id WHERE b.batch_id=$1 AND b.status<>'rejected'
-    AND m.story_id IS NULL
+    AND m.story_id IS NULL AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window'
     AND ($2::uuid[] IS NULL OR m.id=ANY($2)) ORDER BY i.collected_at DESC,m.created_at,m.id`, [batchId, selectedIds]);
   for (const mention of result.rows) {
     try {
@@ -181,7 +181,8 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
       SELECT r.id,r.item_id,encode(sha256(convert_to(r.original_text,'UTF8')),'hex'),
         ARRAY(SELECT DISTINCT l.url FROM item_links l WHERE l.revision_id=r.id ORDER BY l.url)
       FROM item_revisions r WHERE r.id=$1 AND NOT EXISTS(
-        SELECT 1 FROM story_mentions m WHERE m.revision_id=r.id AND m.story_id IS NULL)
+        SELECT 1 FROM story_mentions m WHERE m.revision_id=r.id AND m.story_id IS NULL
+          AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window')
       ON CONFLICT(revision_id) DO NOTHING`, [mention.revision_id]);
     if (!matched || relation === 'update') await client.query(`INSERT INTO embeddings(config_id,story_id,input_hash,embedding)
       VALUES($1,$2,$3,$4::vector) ON CONFLICT(config_id,story_id) DO UPDATE SET input_hash=EXCLUDED.input_hash,embedding=EXCLUDED.embedding`,

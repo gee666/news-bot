@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { db, transaction } from '../db.js';
 import { ProcessingYield } from './processing-slice.js';
+import type { AppSettings } from '../settings.js';
 
 // Failed input cannot withhold a story that still has a usable current report.
 export const blockedStoriesCte = `blocked_stories(id) AS (
@@ -13,6 +14,27 @@ export const blockedStoriesCte = `blocked_stories(id) AS (
     JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=s.id
       AND NOT (r.metadata @> '{"pipelineFailure":true}'::jsonb))
 )`;
+
+/** Retain the original extraction and text, but give obsolete orphan reports an explicit terminal disposition. */
+export async function expireUnassignedMentions(settings:AppSettings):Promise<void> {
+  await transaction(async client => {
+    await client.query(`UPDATE story_mentions m SET metadata=m.metadata||'{"disposition":"outside_collection_window"}'::jsonb
+      FROM item_revisions r JOIN source_items i ON i.current_revision_id=r.id
+      WHERE m.revision_id=r.id AND m.story_id IS NULL
+        AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window'
+        AND greatest(i.collected_at,r.created_at)<now()-$1*interval '1 hour'
+        AND NOT EXISTS(SELECT 1 FROM batch_items b JOIN processing_batches p ON p.id=b.batch_id
+          WHERE b.revision_id=r.id AND p.manual_operation_id IS NOT NULL AND p.completed_at IS NULL)`,[settings.collectionWindowHours]);
+    await client.query(`UPDATE batch_items b SET status='rejected',disposition_reason='outside_collection_window'
+      WHERE status IN ('pending','processing') AND EXISTS(SELECT 1 FROM story_mentions m
+        WHERE m.revision_id=b.revision_id AND m.metadata->>'disposition'='outside_collection_window')
+      AND NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=b.revision_id
+        AND (m.story_id IS NOT NULL OR m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window'))`);
+    await client.query(`UPDATE stage_state s SET status='skipped',next_retry_at=NULL,updated_at=now()
+      WHERE status IN ('pending','running','waiting','failed') AND EXISTS(SELECT 1 FROM batch_items b
+        WHERE b.batch_id=s.batch_id AND b.revision_id=s.revision_id AND b.disposition_reason='outside_collection_window')`);
+  });
+}
 
 export async function existingItemFailures(batchId: string): Promise<Set<string>> {
   const rows = await db.query<{ revision_id: string }>(`SELECT DISTINCT s.revision_id FROM stage_state s
@@ -50,7 +72,8 @@ export async function completeBatchItems(batchId: string, client?: PoolClient, r
       AND EXISTS(SELECT 1 FROM stage_state s WHERE s.batch_id=b.batch_id AND s.revision_id=b.revision_id
         AND s.stage LIKE 'links:%' AND s.status='completed')
       AND (EXISTS(SELECT 1 FROM stage_state s WHERE s.batch_id=b.batch_id AND s.revision_id=b.revision_id AND s.status='failed')
-        OR NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=b.revision_id AND m.story_id IS NULL))
+        OR NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=b.revision_id AND m.story_id IS NULL
+          AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window'))
       AND NOT EXISTS(SELECT 1 FROM stage_state s WHERE s.batch_id=b.batch_id AND s.revision_id=b.revision_id
         AND s.status IN ('pending','running','waiting'))`, [batchId, revisionId ?? null]);
     // A callback acknowledges only its revision, never the enclosing batch or untouched siblings.

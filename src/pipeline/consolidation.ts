@@ -16,7 +16,8 @@ export async function consolidateStories(settings: AppSettings, batchId: string)
     FROM batch_items b JOIN item_revisions r ON r.id=b.revision_id JOIN source_items i ON i.current_revision_id=r.id
     WHERE b.batch_id=$1 AND b.status<>'failed' AND NOT EXISTS(
       SELECT 1 FROM consolidation_intake done WHERE done.revision_id=r.id)
-    AND NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=r.id AND m.story_id IS NULL)
+    AND NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=r.id AND m.story_id IS NULL
+      AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window')
     ORDER BY b.created_at,r.id`, [batchId]);
   const failed = await existingItemFailures(batchId);
   for (const revision of rows.rows) await itemWork(batchId, revision.revision_id, failed, async () => {

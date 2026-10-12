@@ -248,6 +248,16 @@ describe.skipIf(!url)('current editorial generation integration', () => {
       await expect(refreshDigest(settings, judgments, ['not-an-id'])).rejects.toThrow();
     } finally { await judgments.close(); }
   });
+  it('accepts a current Pi fallback ranking receipt without weakening freshness',async ()=>{
+    const {refreshDigest}=await import('./stories.js'); const {Judgments}=await import('./judgments.js');
+    const judgments=new Judgments(settings);
+    try {await refreshDigest(settings,judgments,[storyId]);} finally {await judgments.close();}
+    await database.db.query("UPDATE judgments SET model_key=$2 WHERE story_id=$1 AND stage='interest'",[storyId,`${settings.piProvider}/${settings.piModel}`]);
+    const {storyPostconditions}=await import('./story-postconditions.js');
+    expect((await storyPostconditions(storyId,settings)).rankingCurrent).toBe(true);
+    await database.db.query("UPDATE judgments SET model_key='unrelated/model' WHERE story_id=$1 AND stage='interest'",[storyId]);
+    expect((await storyPostconditions(storyId,settings)).rankingCurrent).toBe(false);
+  });
   it('automatically regenerates a hardcoded notice on ordinary digest refresh', async () => {
     const { loadStory, saveGenerations } = await import('./generation-store.js');
     const { generationIsCurrent } = await import('./generation-freshness.js');

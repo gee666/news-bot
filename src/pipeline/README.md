@@ -1,11 +1,13 @@
 # Processing
 
-1. Collect source revisions into durable batches. Process due batches with unfinished items first, newest first within that set. Reopened association-only batches use remaining turns instead of starving pending news.
+1. Collect source revisions into durable batches. Group saved unassigned reports first, then process other unfinished items, newest first within each set. Reopened association-only batches use remaining turns instead of starving pending news.
 2. Pi extracts exact source passages and independently reviews the partition. Local validation checks coordinates, overlap and complete source coverage. Save successful extraction once, including empty results.
 3. Pi compares each report with all retained story groups in one call. Duplicate reports attach to the existing story. Meaningful facts or changed certainty refresh it. Merge transactions preserve the earliest publication, evidence and canonical aliases.
 4. Pi classifies an item's links together. A source-only recap can support several stories without creating a post. Its assessment runs again when the story catalogue changes. The existing `source_link_processing` row records only the currently applied catalogue; superseded retry stages are skipped, including after a catalogue reversion. Research reads and assesses linked documents; a link decision is not proof of authority.
-5. Refresh affected stories. JEV checks group coherence, selects an unchanged representative, applies news eligibility and scores interest. Pi researches, writes Russian text and reviews it. Non-empty reviewer notes appear on the post regardless of verdict; failed reviews do not hold publication.
+5. Refresh affected stories. JEV checks group coherence, selects an unchanged representative, applies news eligibility and scores interest. When its context is too small, Pi applies the same criteria to the full material and caches its own receipt. Pi researches, writes Russian text and reviews it. Non-empty reviewer notes appear on the post regardless of verdict; failed reviews do not hold publication.
 6. Enqueue completed current stories. The publisher sends once, edits meaningful updates, and reconciles uncertain Telegram outcomes instead of blindly resending.
+
+Orphan reports older than `collectionWindowHours`, considering collection and revision creation time, retain their text and extraction but receive `outside_collection_window` dispositions. Dropped reports are not recreated on replay. Active manual runs are preserved.
 
 An item uses revision-stage receipts for independent retries. A story has one automatic failure budget, not another set of stage receipts. Settings `requestMaxAttempts`, `retryBaseMs` and `retryMaxMs` bound failed work. Successful calls and checkpoints do not spend that budget. Exhausted units are skipped; healthy siblings and later batches continue. Link-enrichment failures cannot strand committed news.
 

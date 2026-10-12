@@ -23,6 +23,7 @@ export async function extractBatch(batchId: string, settings: AppSettings,
       AND s.status IN ('pending','waiting','running')`, [batchId]);
   const result = await db.query(`SELECT r.id,r.original_text,s.access FROM batch_items b JOIN item_revisions r ON r.id=b.revision_id
     JOIN source_items i ON i.id=r.item_id JOIN sources s ON s.id=i.source_id WHERE b.batch_id=$1 AND i.current_revision_id=r.id
+      AND b.disposition_reason IS DISTINCT FROM 'outside_collection_window'
     ORDER BY b.created_at,r.id`, [batchId]);
   const failed = await existingItemFailures(batchId);
   for (const revision of z.array(revisionSchema).parse(result.rows)) {

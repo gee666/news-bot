@@ -21,6 +21,11 @@ describe('full publication rendering', () => {
     expect(message.plainText).toBe('••••••••◦◦\n' + snapshot.headline + '\n\n' + snapshot.details + '\n\nВторичные источники\nКанал <1> · №23 · доступ ограничен');
     expect(message.plainText.slice(message.links[0]!.offset,message.links[0]!.offset+message.links[0]!.length)).toBe('Канал <1> · №23 · доступ ограничен');
   });
+  it('renders a clean review with no remark block', () => {
+    const message=render({...snapshot,review:{supported:true,reason:''}});
+    expect(message.plainText).not.toContain('Заметки проверяющего');
+    expect(message.links).toHaveLength(1);
+  });
   it('groups primary and secondary sources without conflating fetch and relevance', () => {
     const content: PublicationSnapshot = { ...snapshot,sources: [
       { ...snapshot.sources[0]!, primary: true },

@@ -1,6 +1,6 @@
 # Channel publications
 
-Each event has one HTML message with a ten-dot interest bar above the Russian headline, summary and source links. Every non-empty review reason appears as `Заметки проверяющего: <причина>`, including passed reviews. Review is informational, not an admission gate. The verdict and reason come from the generation JSON and are retained in the publication snapshot. The minimum score and current-generation checks still apply.
+Each event has one HTML message with a ten-dot interest bar above the Russian headline, summary and source links. The reviewer returns only actual issues in a remarks array, or an empty array when there are none. Only non-empty remarks appear as `Заметки проверяющего: <причина>`. Existing sent snapshots are not refreshed merely to change review wording. Review is informational, not an admission gate. The verdict and reason come from the generation JSON and are retained in the publication snapshot. The minimum score and current-generation checks still apply.
 
 Source links come from current collected mentions, source-only reports and successfully read, relevant research documents. All eligible current mention origins remain in the source list; the writer's partial URL selection cannot hide them. There is no claim-level citation or source-authority contract. Public feed/website reads still require collector metadata. Expired, superseded, irrelevant, inaccessible or failed fetched pages are not published as sources. Primary research sources appear first. Titles come from read content, not advertising anchors.
 

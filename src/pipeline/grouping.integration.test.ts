@@ -60,14 +60,14 @@ async function one(sql: string, values: unknown[] = []): Promise<string> {
   if (!row) throw new Error('Missing fixture');
   return row.id;
 }
-async function intake(texts: string[]): Promise<string> {
+async function intake(texts: string[],ageHours=0): Promise<string> {
   const batch=await one(`INSERT INTO processing_batches(status,cutoff_at,settings_snapshot,profile_version,model_version)
     VALUES('processing',now(),$1,$2,$3) RETURNING id`,[JSON.stringify(settings),settings.profileVersion,settings.modelVersion]);
   for (const text of texts) {
     const source=await one("INSERT INTO sources(connector_type,external_id,name,access) VALUES('feed',$1,'Fixture','public') RETURNING id",[randomUUID()]);
-    const item=await one("INSERT INTO source_items(source_id,external_id,original_url) VALUES($1,'1',$2) RETURNING id",[source,`https://example.org/${source}`]);
-    const revision=await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
-      VALUES($1,1,$2,$3,$3) RETURNING id`,[item,randomUUID(),text]);
+    const item=await one("INSERT INTO source_items(source_id,external_id,original_url,collected_at) VALUES($1,'1',$2,now()-$3*interval '1 hour') RETURNING id",[source,`https://example.org/${source}`,ageHours]);
+    const revision=await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text,created_at)
+      VALUES($1,1,$2,$3,$3,now()-$4*interval '1 hour') RETURNING id`,[item,randomUUID(),text,ageHours]);
     await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1',[item,revision]);
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[batch,revision]);
   }
@@ -97,6 +97,18 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     vi.restoreAllMocks(); await database?.db.end();
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
+  });
+  it('explicitly expires old orphans without deleting or recreating their extraction', async () => {
+    const batch=await intake(['Old report.'],72); const revision=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[batch]);
+    await (await import('./extraction-store.js')).applyExtraction(batch,revision,'Old report.',[{start:0,end:11}]);
+    const {expireUnassignedMentions}=await import('./item-failures.js');
+    await expireUnassignedMentions(settings); await processIntake(batch); await expireUnassignedMentions(settings);
+    expect((await database.db.query("SELECT metadata->>'disposition' AS disposition FROM story_mentions WHERE revision_id=$1",[revision])).rows)
+      .toEqual([{disposition:'outside_collection_window'}]);
+    expect((await database.db.query('SELECT status,disposition_reason FROM batch_items WHERE batch_id=$1',[batch])).rows)
+      .toEqual([{status:'rejected',disposition_reason:'outside_collection_window'}]);
+    expect((await database.db.query("SELECT jsonb_array_length(metadata->'pipelineExtraction') AS n FROM item_revisions WHERE id=$1",[revision])).rows).toEqual([{n:1}]);
+    expect(model.extractionCalls).toBe(0); expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(0);
   });
   it('groups duplicate reports, keeps distinct topics, and edits a meaningful update without another send', async () => {
     const batch=await intake(['Acme выпустила Compiler 2.', 'Состоялся выпуск Compiler 2 от Acme.', 'Beta выпустила Database 3.']);
