@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+.pi/
+.pi-auth/
+sessions/
+credentials/
+*.session
+*.session-journal
+*.log
+tmp/

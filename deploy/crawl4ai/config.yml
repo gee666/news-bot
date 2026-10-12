@@ -1,0 +1,42 @@
+app:
+  host: "0.0.0.0"
+  workers: 1
+security:
+  enabled: true
+  jwt_enabled: false
+  api_token: ""
+  https_redirect: false
+  trusted_hosts: ["crawl4ai", "localhost", "127.0.0.1"]
+  cors_allow_origins: []
+limits:
+  max_body_bytes: 16384
+  max_pages: 1
+  max_depth: 0
+  wall_clock_s: 40
+  queue:
+    maxsize: 1
+    workers: 1
+    per_principal: 1
+crawler:
+  base_config:
+    simulate_user: false
+  memory_threshold_percent: 85
+  rate_limiter:
+    enabled: false
+  pool:
+    max_pages: 1
+    max_pages_before_recycle: 1
+  browser:
+    kwargs:
+      headless: true
+      text_mode: false
+      java_script_enabled: true
+    extra_args:
+      - "--no-sandbox"
+      - "--disable-dev-shm-usage"
+      - "--disable-gpu"
+      - "--disable-software-rasterizer"
+logging:
+  level: "WARNING"
+webhooks:
+  enabled: false
