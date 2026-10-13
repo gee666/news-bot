@@ -97,7 +97,11 @@ export function processingDiagnostic(error: unknown) {
 /** Internal only. A failed diagnostic write must never replace the original exception. */
 export async function recordProcessingDiagnostic(error: unknown, context: DiagnosticContext): Promise<void> {
   try {
-    if (error instanceof ModelRequestError) return;
+    if (error instanceof ModelRequestError) {
+      console.error('Model processing failed; automatic unit retry applies.', {provider:error.metadata.service,
+        code:error.metadata.kind,scope:context.scope,nextRetryAt:error.metadata.nextRetryAt});
+      return;
+    }
     const safeContext = { scope: context.scope, batchId: uuid(context.batchId), storyId: uuid(context.storyId),
       revisionId: uuid(context.revisionId), stageId: uuid(context.stageId),
       task: allowed(context.task, tasks), operation: allowed(context.operation, operations) };

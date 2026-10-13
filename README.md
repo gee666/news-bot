@@ -135,7 +135,7 @@ bash scripts/start-wsl.sh
 bash scripts/wsl-relay.sh status
 ```
 
-The host helper needs Node 24, Bash, `flock` from util-linux and `ip` from iproute2. `start-wsl.sh` checks Docker, starts the relay supervisor, waits for the two model listeners and optional UI listener, then starts the Compose services. This listener check tests TCP readiness; the app's healthcheck verifies the API/database after Compose startup. It does not start Docker Engine or the Windows model services. `wsl-relay.sh start` is idempotent and can be used separately. Its supervisor restarts a crashed relay and waits for Docker interfaces to become available. Logs and PID state are owner-private under `tmp/wsl-relay-default`; logs retain at most about 1 MB plus one rotated copy. Runtime state is disposable; executable scripts are checked in.
+The host helper needs Node 24, Bash, `flock` from util-linux and `ip` from iproute2. `start-wsl.sh` checks Docker, starts the relay supervisor, waits for the two model listeners and optional UI listener, then starts the Compose services. This listener check tests TCP readiness; the app's healthcheck verifies the API/database after Compose startup. It does not start Docker Engine or the Windows model services. It now checks both relay listeners and actual upstream TCP ports, so a running proxy cannot disguise a stopped model service. `wsl-relay.sh start` is idempotent and can be used separately. Its supervisor restarts a crashed relay and waits for Docker interfaces to become available. Logs and PID state are owner-private under `tmp/wsl-relay-default`; logs retain at most about 1 MB plus one rotated copy. Runtime state is disposable; executable scripts are checked in.
 
 The bind address defaults to Docker's `docker0` IPv4 gateway, or another Docker bridge if `docker0` is absent. Configure `INFERENCE_RELAY_BIND` if needed; only local Docker addresses and loopback are accepted, never wildcard or LAN bindings. Listener ports are configurable through `JEV_RELAY_PORT` and `EMBEDDING_RELAY_PORT`; upstream loopback ports through `JEV_UPSTREAM_PORT` and `EMBEDDING_UPSTREAM_PORT`. `INFERENCE_CONNECT_TIMEOUT_MS` defaults to 10000. Set these non-secret environment variables before starting the supervisor and keep Compose endpoint ports and `INFERENCE_HOST_GATEWAY` consistent. Restart the supervisor after configuration changes.
 
@@ -179,14 +179,17 @@ bash scripts/wsl-relay.sh stop
 
 ### Boot without systemd
 
-Docker restart policies do not boot WSL, start Docker Engine, launch Windows model services, or start the host relay. For unattended startup, configure a Windows Task Scheduler task at logon/startup with these actions in order, substituting your distribution, Linux user and checkout path:
+Docker restart policies cannot boot WSL or start Docker Engine and the host relay. Install the checked-in Windows logon task from PowerShell, supplying the actual Node 24 executable installed in Linux:
 
 ```powershell
-wsl.exe -d Debian -u root -- service docker start
-wsl.exe -d Debian -u oira666 -- bash -lc 'cd /var/www/workshop/oira666/news-bot && bash scripts/start-wsl.sh'
+& '\\wsl.localhost\Debian\var\www\workshop\oira666\news-bot\scripts\install-wsl-startup.ps1' `
+  -Distro Debian -LinuxUser oira666 -ProjectPath '/var/www/workshop/oira666/news-bot' `
+  -NodeBin '/home/oira666/.nvm/versions/node/v24.16.0/bin/node' -StartNow
 ```
 
-Give the task a restart-on-failure policy and arrange startup for the Windows model services separately. Keep the Windows host awake and the distribution running. Once started, the relay supervisor runs independently of the terminal and restarts its child. If WSL terminates or the supervisor itself is killed, rerun the startup task. No boot configuration, system service or firewall rule is installed automatically.
+The task starts Docker as WSL root, then runs `start-wsl.sh --watch` as the Linux user in the foreground. Keeping `wsl.exe` active prevents terminal closure from leaving only detached daemons. The watcher checks the stack, restarts an unhealthy app, and exits on failure so Task Scheduler retries in one minute. Logs are bounded and private under `tmp/wsl-startup-watch-default/`. Installation is explicit and idempotent; no password, firewall or power-policy changes are made. Disable the task before deliberately shutting down this deployment.
+
+Keep Windows awake and arrange Windows model-service startup separately. No program can publish while its host is asleep or powered off. After app restart, the latest missed collection slot within the saved collection window is queued automatically, without replaying every lost slot or duplicating an existing snapshot.
 
 ## Small immediate publication runs
 
@@ -218,7 +221,7 @@ Use `DB_TEST_NAME` for another disposable database, or put `TEST_DATABASE_URL` i
 
 Migrations use checksums and an advisory lock. Add a new migration; never edit already-applied SQL. The runner installs pgvector in shared `public`, outside disposable test schemas.
 
-The app healthcheck reads `/api/status` on container loopback, so a failed database/query returns unhealthy rather than a false TCP-only success. It checks HTTP/database availability, not model access, publication maintenance or pipeline completion. A failed processing stage can coexist with a healthy settings API. Docker does not restart a container solely because its healthcheck fails; inspect stored status and correct the cause.
+The app healthcheck reads `/api/health` on container loopback. Database failures and worker-start failures return unhealthy while the management API remains available. Per-unit model errors and publication-maintenance failures are logged with safe codes, not provider payloads. This is not a paid model probe or a promise that every source is accessible. Docker alone does not restart an unhealthy container; the WSL watcher restarts the app before Task Scheduler retries.
 
 ## Backups and retention
 

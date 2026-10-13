@@ -34,7 +34,7 @@ test('Compose healthcheck reads the status API with an allowed Host', async () =
   const port = await listen(server);
   try {
     assert.equal(await check(port, 'allowed.example:3000'), 0);
-    assert.deepEqual(requests, [{ path: '/api/status', host: 'allowed.example:3000' }]);
+    assert.deepEqual(requests, [{ path: '/api/health', host: 'allowed.example:3000' }]);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 

@@ -3,7 +3,7 @@ import { db } from '../db.js';
 import { getSettings } from '../settings.js';
 import { publishDigest } from '../publishing/index.js';
 import { processBatch } from './batches.js';
-import { requestScheduledIntake, drainScheduledIntake } from './scheduled-intake.js';
+import { requestScheduledIntake, requestLatestScheduledIntake, drainScheduledIntake } from './scheduled-intake.js';
 import { Judgments } from './judgments.js';
 import { cleanup } from './retention.js';
 import { refreshDigest } from './stories.js';
@@ -134,6 +134,7 @@ export async function createPipeline(): Promise<Pipeline> {
       if (running) return;
       running = true;
       await configure();
+      await requestLatestScheduledIntake(await getSettings());
       void launch(recover);
       timer = setInterval(() => {
         void launch(configure);

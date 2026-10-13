@@ -33,6 +33,7 @@ vi.mock('./http/app.js', () => ({ createApp: vi.fn(() => ({
   },
 })) }));
 import { startServer } from './server.js';
+import { createApp } from './http/app.js';
 
 const readyOutbox: UsageOutboxStatus = { state: 'ready', pendingRecords: 0, oldestPendingAt: null,
   replaying: false, lastReplayAt: null, lastReplayRecordedRecords: 0, lastReplayFailed: false };
@@ -62,6 +63,15 @@ describe('server startup', () => {
     expect(mocks.startBot).toHaveBeenCalledOnce();
     await stop(); stop = undefined;
     expect(mocks.stopBot).toHaveBeenCalledOnce();
+  });
+
+  it('degrades health when a worker fails startup instead of falsely reporting a healthy API',async()=>{
+    mocks.startPipeline.mockRejectedValueOnce(new Error('PRIVATE_STARTUP_ERROR'));
+    const error=vi.spyOn(console,'error').mockImplementation(()=>{});
+    stop=await startServer();
+    await vi.waitFor(()=>expect(vi.mocked(createApp).mock.calls[0]?.[1]?.backgroundHealthy?.()).toBe(false));
+    expect(error).toHaveBeenCalledWith('Processing service failed to start; health is degraded. Check saved processing status.');
+    expect(JSON.stringify(error.mock.calls)).not.toContain('PRIVATE_STARTUP_ERROR');
   });
 
   it('refuses startup before listening or starting workers when usage storage is not private/ready', async () => {

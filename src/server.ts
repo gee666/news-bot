@@ -22,9 +22,10 @@ export async function startServer(): Promise<() => Promise<void>> {
   if ((await usageOutboxStatus()).state !== 'ready') throw new Error('Model usage storage is not private and ready');
   const pipeline = await createPipeline();
   const { services, operations, oauth } = createServices(pipeline, runtime);
+  let backgroundHealthy=true;
   const app = createApp(services, {
     allowedHosts: (process.env.APP_ALLOWED_HOSTS ?? '').split(',').map(value => value.trim()).filter(Boolean),
-    webDirectory: resolve('dist/web'), usageOutboxStatus,
+    webDirectory: resolve('dist/web'), usageOutboxStatus, backgroundHealthy:()=>backgroundHealthy,
   });
   const server = await new Promise<ReturnType<typeof app.listen>>((resolveServer, reject) => {
     const listener = app.listen(port, host, () => resolveServer(listener));
@@ -34,9 +35,9 @@ export async function startServer(): Promise<() => Promise<void>> {
   console.info(`Settings server listening on port ${port}. Access through loopback or an SSH tunnel only.`);
   let stopBot: (() => Promise<void>) | undefined;
   const ready = Promise.allSettled([
-    operations.resume().catch(() => { console.error('Saved operation recovery failed.'); }),
-    startPublicationMaintenance().then(stop => { stopBot = stop; }).catch(() => { console.error('Telegram publication maintenance failed to start.'); }),
-    pipeline.start().catch(() => { console.error('Processing service failed to start. Check saved processing status.'); }),
+    operations.resume().catch(() => { backgroundHealthy=false; console.error('Saved operation recovery failed; health is degraded.'); }),
+    startPublicationMaintenance().then(stop => { stopBot = stop; }).catch(() => { backgroundHealthy=false; console.error('Telegram publication maintenance failed to start; health is degraded.'); }),
+    pipeline.start().catch(() => { backgroundHealthy=false; console.error('Processing service failed to start; health is degraded. Check saved processing status.'); }),
   ]);
   let stopping = false;
   return async () => {

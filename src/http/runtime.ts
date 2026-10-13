@@ -8,6 +8,7 @@ const runtimeStatusSchema = z.object({
 });
 export interface RuntimeReadOptions {
   usageOutboxStatus?: () => Promise<UsageOutboxStatus>;
+  backgroundHealthy?: () => boolean;
 }
 export function runtimeRoutes(app: Express, options: RuntimeReadOptions): void {
   app.get('/api/runtime', async (_req, res) => {

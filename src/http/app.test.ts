@@ -50,6 +50,23 @@ afterEach(async () => {
 });
 
 describe('private browser API', () => {
+  it('health checks the database without exposing status fields',async()=>{
+    const response=await fetch(base+'/api/health');
+    expect(response.status).toBe(200); expect(await response.json()).toEqual({healthy:true});
+    vi.mocked(services.status).mockRejectedValueOnce(new Error(secret));
+    const failed=await fetch(base+'/api/health');
+    expect(failed.status).toBe(500); expect(await failed.text()).not.toContain(secret);
+  });
+  it('keeps management available but reports failed workers as unhealthy',async()=>{
+    server.closeAllConnections(); await new Promise<void>(resolve=>server.close(()=>resolve()));
+    server=createApp(services,{backgroundHealthy:()=>false}).listen(0,'127.0.0.1');
+    await once(server,'listening'); const address=server.address();
+    if(!address || typeof address==='string') throw new Error('Missing listener');
+    base=`http://127.0.0.1:${address.port}`;
+    const response=await fetch(base+'/api/health');
+    expect(response.status).toBe(503); expect(await response.json()).toEqual({healthy:false,issue:'background_startup_failed'});
+    expect((await fetch(base+'/api/status')).status).toBe(200);
+  });
   it('starts a durable bounded run with defaults and a polling handle', async () => {
     const response = await write('/api/operations', { kind: 'run_now' });
     expect(response.status).toBe(202);

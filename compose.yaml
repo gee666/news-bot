@@ -64,7 +64,7 @@ services:
         - -e
         - >-
           const host=(process.env.APP_ALLOWED_HOSTS||'').split(',').map(s=>s.trim()).find(Boolean)||'127.0.0.1:3000';
-          const req=require('node:http').get({hostname:'127.0.0.1',port:3000,path:'/api/status',headers:{Host:host},timeout:5000},
+          const req=require('node:http').get({hostname:'127.0.0.1',port:3000,path:'/api/health',headers:{Host:host},timeout:5000},
           res=>{res.resume();res.on('end',()=>process.exit(res.statusCode===200?0:1));});
           req.on('timeout',()=>req.destroy());req.on('error',()=>process.exit(1));
       interval: 30s

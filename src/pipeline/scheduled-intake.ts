@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import cron from 'node-cron';
+import type { AppSettings } from '../settings.js';
 import { db } from '../db.js';
 import { getSettings, settingsSchema } from '../settings.js';
 import { collectBatch } from './collection.js';
@@ -12,6 +14,22 @@ export async function requestScheduledIntake(slot: Date): Promise<void> {
   if (!Number.isFinite(slot.getTime())) throw new Error('Invalid collection slot');
   await db.query(`INSERT INTO operational_state(key,value) VALUES($1,$2) ON CONFLICT DO NOTHING`,
     [`scheduled_intake:${slot.toISOString()}`, JSON.stringify({ slot: slot.toISOString() })]);
+}
+
+/** Catch up only the latest missed slot. Existing slot uniqueness prevents restart replays. */
+export async function requestLatestScheduledIntake(settings:AppSettings,now=new Date()):Promise<void> {
+  const matcher=cron.createTask(settings.collectionCron,()=>{}, {timezone:settings.timezone});
+  try {
+    const seconds=cron.parse(settings.collectionCron).second.sort((a,b)=>b-a);
+    const earliest=now.getTime()-settings.collectionWindowHours*3600_000;
+    for(let minute=Math.floor(now.getTime()/60_000)*60_000;minute>=earliest;minute-=60_000) {
+      for(const second of seconds) {
+        const slot=new Date(minute+second*1000);
+        if(slot>now || slot.getTime()<earliest || !matcher.match(slot)) continue;
+        await requestScheduledIntake(slot); return;
+      }
+    }
+  } finally {await matcher.destroy();}
 }
 
 /** Caller holds the processor lease. One due snapshot per checkpoint keeps collection bounded. */

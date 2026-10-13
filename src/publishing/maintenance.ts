@@ -11,6 +11,7 @@ export async function startPublicationMaintenance(): Promise<() => Promise<void>
     while (!controller.signal.aborted) {
       try { await resumePublications(await getSettings()); }
       catch {
+        console.error('Telegram publication maintenance failed; retrying on the next maintenance tick.');
         await saveState('telegram_publication_maintenance', { status: 'waiting', errorCode: 'publication_resume_failed',
           nextRetryAt: new Date(Date.now() + intervalMs).toISOString() }).catch(() => {});
       }

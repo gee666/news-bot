@@ -49,7 +49,7 @@ vi.mock('./consolidation.js', () => ({ consolidateStories: vi.fn() }));
 vi.mock('./source-links.js', () => ({ associateSourceLinks: vi.fn(), SOURCE_MESSAGES_PER_PASS: 50 }));
 vi.mock('./vectors.js', () => ({ reembedPending: vi.fn() }));
 vi.mock('./processing-diagnostics.js', () => ({ recordProcessingDiagnostic: mocks.diagnostic }));
-vi.mock('./scheduled-intake.js', () => ({ requestScheduledIntake: mocks.request, drainScheduledIntake: mocks.drain }));
+vi.mock('./scheduled-intake.js', () => ({ requestScheduledIntake: mocks.request, requestLatestScheduledIntake:vi.fn(async()=>{}), drainScheduledIntake: mocks.drain }));
 
 import { createPipeline, type Pipeline } from './index.js';
 import { defaultSettings } from '../settings.js';

@@ -168,9 +168,10 @@ export async function startRelay(config) {
   }
 }
 
-export async function checkRelay(config, deadlineMs = 10000) {
+export async function checkRelay(config, deadlineMs = 10000, upstreams = false) {
   const deadline = Date.now() + deadlineMs;
-  for (const route of listeners(config)) {
+  const routes = upstreams ? config.routes.map(route => ({ ...route, bind: '127.0.0.1', port: route.upstreamPort })) : listeners(config);
+  for (const route of routes) {
     let ready = false;
     while (!ready && Date.now() < deadline) {
       ready = await new Promise(resolve => {
@@ -182,18 +183,18 @@ export async function checkRelay(config, deadlineMs = 10000) {
       });
       if (!ready) await delay(100);
     }
-    if (!ready) throw new Error('Relay listeners are not ready');
+    if (!ready) throw new Error(upstreams ? 'Windows model services are not reachable' : 'Relay listeners are not ready');
   }
 }
 
 async function run() {
-  if (process.argv.length > 3 || (process.argv[2] !== undefined && process.argv[2] !== '--check')) {
-    throw new Error('Usage: node scripts/wsl-inference-relay.mjs [--check]');
+  if (process.argv.length > 3 || (process.argv[2] !== undefined && !['--check', '--check-upstreams'].includes(process.argv[2]))) {
+    throw new Error('Usage: node scripts/wsl-inference-relay.mjs [--check|--check-upstreams]');
   }
   const config = relayConfig(await readHelperEnvironment());
-  if (process.argv[2] === '--check') {
-    await checkRelay(config);
-    console.log('Relay listeners are ready.');
+  if (['--check', '--check-upstreams'].includes(process.argv[2])) {
+    await checkRelay(config, 10000, process.argv[2] === '--check-upstreams');
+    console.log(process.argv[2] === '--check-upstreams' ? 'Windows model services are reachable.' : 'Relay listeners are ready.');
     return;
   }
   const relay = await startRelay(config);
@@ -215,7 +216,9 @@ async function run() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try { await run(); } catch {
-    console.error('Relay startup failed. Check Docker bridge, ports and configuration. No request data was logged.');
+    console.error(process.argv[2] === '--check-upstreams'
+      ? 'Windows model services are unreachable. Start JEV and embeddings on Windows; no request data was logged.'
+      : 'Relay startup failed. Check Docker bridge, ports and configuration. No request data was logged.');
     process.exitCode = 1;
   }
 }

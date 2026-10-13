@@ -64,6 +64,11 @@ export function createApp(services: ApiServices, options: RuntimeReadOptions & {
   primarySourceRoutes(app, services);
   usageRoutes(app, services);
   app.get('/api/status', async (_req, res) => { res.json(publicStatusSchema.parse(await services.status())); });
+  app.get('/api/health', async (_req, res) => {
+    publicStatusSchema.parse(await services.status()); // Probe the database without exposing status data or provider payloads.
+    const healthy=options.backgroundHealthy?.() ?? true;
+    res.status(healthy ? 200 : 503).json({healthy,...(!healthy ? {issue:'background_startup_failed'} : {})});
+  });
   app.get('/api/operations', async (_req, res) => { res.json(await services.operations()); });
   app.get('/api/operations/:id', async (req, res) => {
     const operation = await services.operation(idSchema.parse(req.params.id));
