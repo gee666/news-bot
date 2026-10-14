@@ -2,11 +2,12 @@ import { z } from 'zod';
 import { ModelRequestError, type TextGenerator } from '../models/index.js';
 import type { AppSettings } from '../settings.js';
 import { generationReviewSchema } from '../types.js';
-import { alreadyGenerated, evidenceSnapshotHash, loadStory, saveGenerations, type GeneratedStory } from './generation-store.js';
+import { alreadyGenerated, evidenceSnapshotHash, loadStory, loadCurrentEvidence, saveGenerations, type GeneratedStory } from './generation-store.js';
 import { generationClient, generationError, requireInferenceApproval } from './generation-model.js';
 import { researchDocuments, researchEvidence, researchReports } from './research.js';
 import { researchMentions } from './research-mentions.js';
 import { processingSliceMs } from './processing-slice.js';
+import { classifySourceOrigins } from './source-origins.js';
 
 const editorialSchema = z.object({
   headline: z.string().trim().min(1).regex(/[А-Яа-яЁё]/u),
@@ -21,6 +22,7 @@ const editorialPrompt = `Напиши понятную русскую новос
 Сохрани точные имена, версии, числа, единицы, сроки и условия сравнений. Не превращай слухи или планы в состоявшееся событие.
 Отделяй старые сведения от новых. Противоречия и неподтверждённые сообщения кратко атрибутируй источнику.
 Пиши простым русским языком, без рекламы, канцелярита, длинных тире и служебных комментариев о процессе проверки.
+Атрибутировать утверждения в заголовке и пересказе можно ТОЛЬКО первоисточникам из primary_sources: там, где сведения возникли впервые, включая оригинальные публикации авторов, компаний, журналистов, инсайдеров и авторов постов. Каналы-перепосты, агрегаторы и пересказы — вторичные источники; НИКОГДА не называй их в тексте, даже в оборотах «по сообщениям», «по данным» или «канал утверждает». Они будут перечислены только внизу под «Вторичные источники». Если первоисточник неизвестен, просто сообщи новость без атрибуции перепостам, сохраняя неопределённость. Непрочитанная ссылка обозначает происхождение сообщения, но не подтверждает факты: не изображай её как прочитанный или проверенный текст.
 Не копируй исходный пост. Не пиши заглушку вместо пересказа. Когда сведений мало, напиши коротко о том, что известно.
 Верни JSON с headline, summary и source_urls. В source_urls укажи ссылки на использованные источники из переданного материала, обычно 1–3 основных источника.
 Не выдумывай ссылки. Ссылки будут показаны отдельно, не включай их, HTML, Markdown или номера сносок в summary.`;
@@ -57,22 +59,33 @@ async function reviewDraft(generator: TextGenerator, material: unknown, operatio
   return { supported: remarks.length === 0, reason: remarks.join('; ') };
 }
 
-export async function researchStory(storyId: string, settings: AppSettings): Promise<void> {
+export async function researchStory(storyId: string, settings: AppSettings, force=false): Promise<void> {
   const input = await loadStory(storyId);
   const operationId = `research:${storyId}`;
   if (input.story.interest_score === null || !input.mentions.some(mention => mention.text.trim())) {
     return generationError(operationId, 'invalid_request');
   }
-  if (await alreadyGenerated(input, settings)) return;
+  if (!force && await alreadyGenerated(input, settings)) return;
   await requireInferenceApproval([...input.mentions.map(mention => mention.access),
     ...(input.supplementary_reports ?? []).map(report => report.access)], operationId);
   const generator = await generationClient(settings);
-  const documents = await researchEvidence(input, settings, generator);
+  const cached=await loadCurrentEvidence(storyId);
+  await requireInferenceApproval(cached.filter(doc=>doc.content && doc.access!=='unavailable').map(doc=>doc.access),operationId);
+  const origins=await classifySourceOrigins(input,cached,generator);
+  const documents = await researchEvidence(input, settings, generator,origins,cached);
+  const primarySourceUrls=[...new Set([...origins,...documents.filter(doc=>doc.role==='primary' && doc.relevance==='relevant')
+    .map(doc=>doc.canonical_url ?? doc.url)])];
+  const primary=new Set(primarySourceUrls);
   await requireInferenceApproval(documents.filter(document => document.content && document.access !== 'unavailable')
     .map(document => document.access), operationId);
   const evidenceSignature = await evidenceSnapshotHash(storyId);
-  const material = { mentions: researchMentions(input), reports: researchReports(input),
-    documents: researchDocuments(documents), links: input.links };
+  const material = { mentions: researchMentions(input).map(mention=>({...mention,source_name:undefined,
+      source_kind:mention.url && primary.has(mention.url) ? 'primary' : 'secondary'})),
+    reports: researchReports(input).map(report=>({...report,source_name:undefined,
+      source_kind:report.url && primary.has(report.url) ? 'primary' : 'secondary'})),
+    documents: researchDocuments(documents.map(doc=>primary.has(doc.canonical_url ?? doc.url)
+      ? {...doc,role:'primary',relevance:'relevant',metadata:{...doc.metadata,readAssessmentPolicy:'firsthand-v1'}} : doc)),links:input.links.map(link=>({...link,source_name:undefined})),
+    primary_sources:primarySourceUrls };
   let draft = await generateOnce(generator, editorialSchema, editorialPrompt, material, `${operationId}:generate`);
   let review: z.infer<typeof generationReviewSchema>;
   try {
@@ -93,6 +106,6 @@ export async function researchStory(storyId: string, settings: AppSettings): Pro
     ...input.links.map(link => link.url), ...documents.flatMap(document => [document.url, ...(document.canonical_url ? [document.canonical_url] : [])])]);
   const value: GeneratedStory = { id: storyId, headline: draft.headline, summary: draft.summary,
     translatedExcerpt: null, evidenceSignature, review: { ...review, reason: review.reason.replace(/\s+/gu, ' ').slice(0, 240) },
-    sourceUrls: [...new Set(draft.source_urls.filter(url => knownUrls.has(url)))] };
+    primarySourceUrls,sourceUrls: [...new Set(draft.source_urls.filter(url => knownUrls.has(url)))] };
   await saveGenerations([input], [value], settings);
 }

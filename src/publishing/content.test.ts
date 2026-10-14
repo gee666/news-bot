@@ -12,6 +12,16 @@ const origin = { source_id: 'mention:xor', text: 'Сообщение XOR', name:
   access: 'public', classification: 'relevant' };
 
 describe('generation source selection', () => {
+  it('lists a collected origin tweet as primary even without readable research evidence',async()=>{
+    const tweet='https://x.com/artist/status/123';
+    const query=vi.fn().mockResolvedValueOnce({rows:[origin]}).mockResolvedValueOnce({rows:[]})
+      .mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[{result:{primarySourceUrls:[tweet],review:{supported:true,reason:''}}}]})
+      .mockResolvedValueOnce({rows:[{url:tweet}]});
+    const snapshot=await snapshotFor({query},story);
+    expect(snapshot.sources.find(source=>source.url===tweet)).toMatchObject({primary:true,access:'unknown'});
+    expect(snapshot.sources.find(source=>source.url===xorUrl)?.primary).toBe(false);
+    expect(render(snapshot).links.some(link=>link.url===tweet)).toBe(true);
+  });
   it.each([
     { sourceUrls: [reportUrl] }, { sourceUrls: [xorUrl] }, { sourceUrls: [] },
     { sourceUrls: ['https://unknown.example'] },

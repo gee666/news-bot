@@ -10,12 +10,13 @@ import { evidenceDocument, modelResult, storyId, storyInput } from './generation
 const mocks = vi.hoisted(() => ({ input: vi.fn(), generate: vi.fn() }));
 vi.mock('./generation-store.js', () => ({
   loadStory: mocks.input, alreadyGenerated: vi.fn(), evidenceSnapshotHash: async () => 'evidence-signature',
-  saveGenerations: vi.fn(),
+  saveGenerations: vi.fn(), loadCurrentEvidence:async()=>[],
 }));
 vi.mock('./generation-model.js', async original => ({
   ...await original<typeof import('./generation-model.js')>(), generationClient: vi.fn(), recordGenerationFailure: vi.fn(),
 }));
 vi.mock('../db.js', () => ({ db: { query: vi.fn().mockResolvedValue({ rows: [] }) } }));
+vi.mock('./source-origins.js',()=>({classifySourceOrigins:async()=>[]}));
 vi.mock('./research.js', async original => ({
   ...await original<typeof import('./research.js')>(), researchEvidence: async () => [evidenceDocument()],
 }));
@@ -44,6 +45,10 @@ it('writes and reviews once, keeping all source material and links', async () =>
   await researchStory(storyId, defaultSettings);
   expect(mocks.generate).toHaveBeenCalledTimes(2);
   expect(mocks.generate.mock.calls[0]?.[0].prompt).toContain(text);
+  expect(mocks.generate.mock.calls[0]?.[0].systemPrompt).toContain('НИКОГДА не называй их в тексте');
+  const material=JSON.parse(mocks.generate.mock.calls[0]?.[0].prompt);
+  expect(material.mentions[0]).not.toHaveProperty('source_name');
+  expect(material).toHaveProperty('primary_sources');
   expect(mocks.generate.mock.calls[0]?.[1].operationId).toBe(`research:${storyId}:generate`);
   expect(mocks.generate.mock.calls[0]?.[1]).not.toHaveProperty('signal');
   expect(mocks.generate.mock.calls[1]?.[1].signal).toBeInstanceOf(AbortSignal);

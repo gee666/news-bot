@@ -32,11 +32,11 @@ it('requires typed relevance independently of evidence authority', () => {
 });
 
 it('records unrelated successfully read content without changing collected link decisions', async () => {
-  const input = storyInput();
+  const input = storyInput(8);
   const links = structuredClone(input.links);
   const generate = vi.fn().mockResolvedValue(modelResult({ evidence_id: evidenceId, role: 'candidate',
     relevance: 'irrelevant', reason: 'Документ о другом продукте.' }));
-  const documents = await researchEvidence(input, defaultSettings, { generate });
+  const documents = await researchEvidence(input, { ...defaultSettings,researchMaxSearches:0 }, { generate });
   expect(documents[0]).toMatchObject({ relevance: 'irrelevant', role: 'candidate' });
   expect(input.links).toEqual(links);
   expect(researchDocuments(documents)).toEqual([]);
@@ -46,7 +46,7 @@ it('keeps HTTP 403 and empty pages uncertain without asking the model to infer i
   vi.mocked(fetchPage).mockResolvedValue({ url: 'https://example.org/release', canonicalUrl: null, title: null,
     content: null, access: 'restricted', metadata: { status: 403 } });
   const generate = vi.fn();
-  const documents = await researchEvidence(storyInput(), defaultSettings, { generate });
+  const documents = await researchEvidence(storyInput(8), { ...defaultSettings,researchMaxSearches:0 }, { generate });
   expect(documents[0]).toMatchObject({ role: 'candidate', relevance: 'uncertain' });
   expect(assessEvidence).not.toHaveBeenCalled();
   expect(generate).not.toHaveBeenCalled();
@@ -55,7 +55,7 @@ it('keeps HTTP 403 and empty pages uncertain without asking the model to infer i
 it('rejects unrelated primary output instead of granting authority', async () => {
   const generate = vi.fn().mockResolvedValue(modelResult({ evidence_id: evidenceId, role: 'primary',
     relevance: 'irrelevant', reason: 'Other event.' }));
-  const documents = await researchEvidence(storyInput(), defaultSettings, { generate });
+  const documents = await researchEvidence(storyInput(8), { ...defaultSettings,researchMaxSearches:0 }, { generate });
   expect(generate).toHaveBeenCalledTimes(2);
   expect(documents[0]).toMatchObject({ role: 'candidate', relevance: 'uncertain' });
   expect(assessEvidence).not.toHaveBeenCalled();

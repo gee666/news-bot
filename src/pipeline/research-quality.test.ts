@@ -27,9 +27,9 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 
-it.each([5, 6, 7, 10])('runs bounded primary discovery at score %s even with an existing read primary', async score => {
+it.each([5, 6, 7, 10])('stops discovery at score %s once the primary has been read', async score => {
   await researchEvidence(storyInput(score), defaultSettings, { generate });
-  expect(searchPages).toHaveBeenCalledOnce();
+  expect(searchPages).not.toHaveBeenCalled();
   expect(loadEvidence).toHaveBeenCalledWith(expect.any(String), expect.stringContaining(':read-source-v5'));
 });
 
@@ -123,9 +123,9 @@ it('charges abstract fallback representations to the same actual page budget', a
   vi.mocked(fetchPage).mockImplementation(async (url, allowance) => ({ url, canonicalUrl: url,
     title: 'Paper', content: 'Author findings.', access: 'public', metadata: { representationReads: allowance === 2 ? 2 : 1 } }));
   await researchEvidence(input, { ...defaultSettings, researchMaxPages: 3, researchMaxSearches: 0 }, { generate });
-  expect(vi.mocked(fetchPage).mock.calls.map(call => call[1])).toEqual([2, 1]);
-  expect(fetchPage).toHaveBeenCalledTimes(2);
-  expect(generate).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(fetchPage).mock.calls.map(call => call[1])).toEqual([2]);
+  expect(fetchPage).toHaveBeenCalledOnce();
+  expect(generate).toHaveBeenCalledOnce();
 });
 
 it('keeps diagnostic candidates out of writer text and puts read primary text first', () => {
@@ -172,7 +172,7 @@ it('reads a pricing followup from actual page metadata within the existing budge
 });
 
 it('does not follow announcement links on documents already assessed unrelated', async () => {
-  const input=storyInput(3);
+  const input=storyInput(8);
   vi.mocked(fetchPage).mockImplementation(async url=>({url,canonicalUrl:url,title:'Unrelated page',content:'Other event',access:'public',
     metadata:{followupLinks:[{url:'https://company.org/pricing',title:'Full pricing'}]}}));
   generate.mockResolvedValue(modelResult({evidence_id:evidenceDocument().id,role:'candidate',relevance:'irrelevant',reason:'Other event.'}));
@@ -181,13 +181,13 @@ it('does not follow announcement links on documents already assessed unrelated',
 });
 
 it('passes read byline to assessment without promoting a social domain automatically', async () => {
-  const input = storyInput(3);
+  const input = storyInput(8);
   input.links = [{ url: 'https://x.com/reporter/status/101', classification: 'relevant' }];
   vi.mocked(fetchPage).mockImplementation(async url => ({ url, canonicalUrl: url, title: 'A report', content: 'A secondhand report.',
     access: 'public', metadata: { byline: 'Reporter (@reporter)' } }));
   generate.mockImplementation(async (request: PiRequest) => modelResult({ evidence_id: JSON.parse(request.prompt).document.evidence_id,
     role: 'supporting', relevance: 'relevant', reason: 'Secondhand report, not an involved announcer.' }));
-  const docs = await researchEvidence(input, defaultSettings, { generate });
+  const docs = await researchEvidence(input, { ...defaultSettings,researchMaxSearches:0 }, { generate });
   expect(docs[0]?.role).toBe('supporting');
   expect(JSON.parse(generate.mock.calls[0]![0].prompt).document.byline).toBe('Reporter (@reporter)');
 });

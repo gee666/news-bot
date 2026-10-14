@@ -156,6 +156,7 @@ export interface GeneratedStory {
   evidenceSignature?: string;
   review?: GenerationReview;
   sourceUrls?: string[];
+  primarySourceUrls?: string[];
 }
 
 export async function saveGenerations(inputs: StoryInput[], values: GeneratedStory[], settings: AppSettings): Promise<void> {
@@ -169,6 +170,7 @@ export async function saveGenerations(inputs: StoryInput[], values: GeneratedSto
       }
       if (value.review) generationReviewSchema.parse(value.review);
       if (value.sourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.sourceUrls);
+      if (value.primarySourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.primarySourceUrls);
       const stored = { ...value, contentVersion: input.story.content_version, evidenceSignature: signature };
       const updated = await client.query(`UPDATE stories SET headline = $2, summary = $3, translated_excerpt = $4,
         researched = $5, updated_at = now() WHERE id = $1 AND content_version = $6
@@ -216,6 +218,15 @@ export function parseEvidenceRows(rows: readonly unknown[]): Evidence[] {
       fetched_at: null, assessed_at: null, metadata: { error: 'invalid_cached_evidence' } });
     return unavailable.success ? [unavailable.data] : [];
   });
+}
+
+/** Existing read material for origin classification. This does not fetch or mutate evidence. */
+export async function loadCurrentEvidence(storyId:string):Promise<Evidence[]> {
+  const result=await db.query(`SELECT e.id,e.url,e.canonical_url,e.title,e.content,e.access,se.role,se.relevance,se.assessment,se.assessed_at,
+    e.metadata,e.metadata->>'publishedAt' AS published_at,e.metadata->>'updatedAt' AS updated_at,e.fetched_at
+    FROM story_evidence se JOIN evidence_documents e ON e.id=se.evidence_id
+    WHERE se.story_id=$1 AND se.superseded_at IS NULL AND e.expires_at>now() ORDER BY e.fetched_at DESC`,[storyId]);
+  return parseEvidenceRows(result.rows);
 }
 
 export async function loadEvidence(storyId: string, researchInputHash: string): Promise<Evidence[]> {

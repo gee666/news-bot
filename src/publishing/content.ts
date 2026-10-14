@@ -7,7 +7,7 @@ import { fetchedRelevanceCte } from './source-relevance.js';
 import { publicUrl } from '../pipeline/research-fetch.js';
 import { sourceAuthorityRanks, generationReviewSchema, publicationSnapshotSchema, publicationSourceSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
 
-const generationMetadataSchema = z.object({ review: generationReviewSchema.optional() });
+const generationMetadataSchema = z.object({ review: generationReviewSchema.optional(),primarySourceUrls:z.array(z.string()).optional() });
 
 export interface StoryContent {
   id: string; headline: string; summary: string | null; translated_excerpt: string | null;
@@ -123,7 +123,16 @@ export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: Stor
   [story.id, story.headline, story.summary, receiptId ?? null]);
   const parsed = generationMetadataSchema.safeParse(receipt.rows[0]?.result);
   const metadata = parsed.success ? parsed.data : undefined;
-  const sources = mergeSources(inventory);
+  const primary=new Set(metadata?.primarySourceUrls ?? []);
+  const referenced=primary.size ? await client.query<{url:string}>(`SELECT DISTINCT l.url FROM item_links l
+    JOIN source_items i ON i.current_revision_id=l.revision_id WHERE l.url=ANY($2::text[]) AND (
+      EXISTS(SELECT 1 FROM story_mentions m JOIN mention_links ml ON ml.mention_id=m.id
+        WHERE m.story_id=$1 AND m.revision_id=l.revision_id AND ml.link_id=l.id AND ml.classification='relevant')
+      OR EXISTS(SELECT 1 FROM story_link_sources sl WHERE sl.story_id=$1 AND sl.link_id=l.id AND sl.classification='relevant'))`,[story.id,[...primary]]) : {rows:[]};
+  const sources = mergeSources([...inventory.map(source=>({...source,
+    primary:metadata?.primarySourceUrls ? primary.has(source.url) : source.primary})),
+    ...referenced.rows.map(({url})=>{const parsed=new URL(url);return {url,label:parsed.hostname+parsed.pathname,
+      primary:true,access:'unknown' as const,classification:'relevant' as const};})]);
   for (const source of sources) delete source.labels;
   return publicationSnapshotSchema.parse({ headline: story.headline, score: story.interest_score,
     details: story.researched ? story.summary : story.translated_excerpt, detailsKind: story.researched ? 'summary' : 'excerpt', sources,

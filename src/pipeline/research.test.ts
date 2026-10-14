@@ -36,7 +36,7 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe('bounded evidence research', () => {
   it('charges failed reads to the configured page budget without discarding collected links', async () => {
-    const input = storyInput(3);
+    const input = storyInput(8);
     input.links = [
       { url: 'https://openai.com/blocked', classification: 'relevant' },
       { url: 'https://openai.com/second-blocked', classification: 'relevant' },
@@ -70,7 +70,7 @@ describe('bounded evidence research', () => {
 
   it('prefers configured publisher hosts and subdomains without granting primary authority', async () => {
     vi.stubEnv('RESEARCH_PREFERRED_DOMAINS', ' openai.com, another.org ');
-    const input = storyInput(3);
+    const input = storyInput(8);
     input.links = [
       { url: 'https://dslab.tech/model', classification: 'relevant' },
       { url: 'https://openai.com.attacker.org/model', classification: 'relevant' },
@@ -79,7 +79,7 @@ describe('bounded evidence research', () => {
       { url: 'https://openai.com/uncertain', classification: 'uncertain' },
     ];
     generate.mockResolvedValue(modelResult({ evidence_id: evidenceId, role: 'supporting', relevance: 'relevant', reason: 'Фоновый материал.' }));
-    const result = await researchEvidence(input, defaultSettings, { generate });
+    const result = await researchEvidence(input, { ...defaultSettings,researchMaxPages:2,researchMaxSearches:0 }, { generate });
     expect(vi.mocked(fetchPage).mock.calls.map(call => call[0])).toEqual([
       'https://openai.com/release', 'https://help.openai.com/terms']);
     expect(result.every(doc => doc.role === 'supporting')).toBe(true);
@@ -88,7 +88,7 @@ describe('bounded evidence research', () => {
   });
 
   it('deduplicates normalized URL variants and final redirect URLs', async () => {
-    const input = storyInput(3);
+    const input = storyInput(8);
     input.links = [
       { url: 'https://EXAMPLE.org:443/release#one', classification: 'relevant' },
       { url: 'https://example.org/release#two', classification: 'relevant' },
@@ -101,7 +101,7 @@ describe('bounded evidence research', () => {
   });
 
   it('accepts a freshly read Telegram announcement only after firsthand assessment', async () => {
-    const input = storyInput(3);
+    const input = storyInput(8);
     input.links = [{ url: 'https://t.me/company/123', classification: 'relevant' }];
     const documents = await researchEvidence(input, defaultSettings, { generate });
     expect(documents[0]?.role).toBe('primary');
@@ -141,7 +141,7 @@ describe('bounded evidence research', () => {
       'Оригинальное заявление разработчика.', defaultSettings, 'relevant');
     expect(result[0]).toMatchObject({ role: 'primary', assessment: 'Оригинальное заявление разработчика.' });
     expect(vi.mocked(saveEvidence).mock.invocationCallOrder[0]).toBeLessThan(generate.mock.invocationCallOrder[0] ?? Infinity);
-    expect(searchPages).toHaveBeenCalledOnce();
+    expect(searchPages).not.toHaveBeenCalled();
     expect(JSON.parse(generate.mock.calls[0]![0].prompt).document).toMatchObject({ evidence_id: evidenceId, content: 'Acme announces version 2.0.' });
   });
 
@@ -175,9 +175,9 @@ describe('bounded evidence research', () => {
       { url: 'https://example.org/second', classification: 'uncertain' },
       { url: 'https://example.org/third', classification: 'relevant' });
     const result = await researchEvidence(input, { ...defaultSettings, researchMaxPages: 2 }, { generate });
-    expect(result).toHaveLength(2);
-    expect(fetchPage).toHaveBeenCalledTimes(2);
-    expect(searchPages).toHaveBeenCalledOnce();
+    expect(result).toHaveLength(1);
+    expect(fetchPage).toHaveBeenCalledOnce();
+    expect(searchPages).not.toHaveBeenCalled();
   });
 
   it('searches only when primary evidence is missing and visits bounded search results', async () => {
@@ -231,14 +231,14 @@ describe('bounded evidence research', () => {
 
   it('keeps evidence unverified after failed optional assessment without blocking generation', async () => {
     generate.mockResolvedValue(modelResult({ evidence_id: evidenceId, role: 'trusted', relevance: 'uncertain', reason: 'Выдуманный статус.' }));
-    const result = await researchEvidence(storyInput(3), defaultSettings, { generate });
+    const result = await researchEvidence(storyInput(8), { ...defaultSettings,researchMaxSearches:0 }, { generate });
     expect(result[0]?.role).toBe('candidate');
     expect(saveEvidence).toHaveBeenCalledOnce();
     expect(assessEvidence).not.toHaveBeenCalled();
     expect(generate).toHaveBeenCalledTimes(2);
   });
 
-  it.each([1, 3])('uses only supplied links for score %s and keeps its effort bounded', async score => {
+  it.each([1, 3])('does not run web research below score 5 (score %s)', async score => {
     const input = storyInput(score);
     input.links = [
       { url: 'https://t.me/channel/1', classification: 'relevant' },
@@ -250,11 +250,16 @@ describe('bounded evidence research', () => {
       : modelResult({ evidence_id: evidenceId, role: 'candidate', relevance: 'uncertain', reason: 'Другая версия продукта.' }));
     vi.mocked(searchPages).mockResolvedValue(['https://vendor.org/release-notes']);
     const documents = await researchEvidence(input, { ...defaultSettings, researchMaxPages: 10, researchMaxSearches: 5 }, { generate });
-    expect(vi.mocked(fetchPage).mock.calls[0]?.[0]).toBe('https://vendor.org/announcement');
-    expect(fetchPage).toHaveBeenCalledTimes(2);
-    expect(searchPages).not.toHaveBeenCalled();
-    expect(vi.mocked(fetchPage).mock.calls[1]?.[0]).toBe('https://secondary.org/story');
-    expect(documents.every(document => document.role === 'candidate')).toBe(true);
+    expect(fetchPage).not.toHaveBeenCalled(); expect(searchPages).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled(); expect(documents).toEqual([]);
+  });
+
+  it('skips all web research when the known origin is an unreadable tweet',async()=>{
+    const input=storyInput(8); const tweet='https://x.com/author/status/123';
+    input.links=[{url:tweet,classification:'relevant'}];
+    const documents=await researchEvidence(input,defaultSettings,{generate},[tweet],[]);
+    expect(documents).toEqual([]); expect(fetchPage).not.toHaveBeenCalled();
+    expect(searchPages).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled();
   });
 
   it('does no fallback search or model work for a low-score story without links', async () => {
@@ -267,12 +272,12 @@ describe('bounded evidence research', () => {
   });
 
   it('preserves relevant and uncertain link classifications when fetching fails', async () => {
-    const input = storyInput(3);
+    const input = storyInput(8);
     input.links.push({ url: 'https://example.org/blocked', classification: 'uncertain' });
     const links = structuredClone(input.links);
     vi.mocked(fetchPage).mockImplementation(async url => ({ url, canonicalUrl: null, title: null,
       content: null, access: 'unavailable', metadata: { error: 'fetch_failed' } }));
-    const documents = await researchEvidence(input, defaultSettings, { generate });
+    const documents = await researchEvidence(input, { ...defaultSettings,researchMaxPages:2,researchMaxSearches:0 }, { generate });
     expect(documents).toHaveLength(2);
     expect(input.links).toEqual(links);
     expect(documents.every(document => document.role === 'candidate')).toBe(true);

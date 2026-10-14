@@ -43,7 +43,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 it('reads a root followup before another root or unrelated supplied links within the same budget', async () => {
-  const input = storyInput(3);
+  const input = storyInput(8);
   input.links = [
     { url: 'https://secondary.org/recap', classification: 'relevant' },
     { url: 'https://t.me/invite', classification: 'uncertain' },
@@ -60,7 +60,7 @@ it('reads a root followup before another root or unrelated supplied links within
 });
 
 it('attempts linked originals before web/feed intake without treating either URL as authority', async () => {
-  const input = storyInput(3);
+  const input = storyInput(8);
   input.mentions[0] = { ...input.mentions[0]!, connector_type: 'rss', original_url: root };
   input.links = [{ url: original, classification: 'relevant', original_url: root }];
   generate.mockResolvedValue(modelResult({ evidence_id: evidenceId, role: 'supporting', relevance: 'relevant', reason: 'Secondhand reporting.' }));
@@ -109,7 +109,7 @@ it('extracts and actually reads only the requested social post article card', as
   vi.mocked(fetchPage).mockImplementation(async url => url === social
     ? { url, canonicalUrl: url, title: article.title, content: article.content, access: 'public', metadata: { followupLinks: article.followupLinks ?? [] } }
     : fetchOriginal(url));
-  const input = storyInput(3);
+  const input = storyInput(8);
   input.links = [{ url: social, classification: 'relevant' }, { url: 'https://secondary.org/recap', classification: 'relevant' }];
   const docs = await researchEvidence(input, settings, { generate });
   expect(vi.mocked(fetchPage).mock.calls.map(call => call[0])).toEqual([social, original]);
@@ -158,7 +158,7 @@ it.each(['supporting', 'primary'] as const)('does not auto-promote a legacy cach
 });
 
 it('retains a current firsthand Telegram assessment on reuse without a platform-wide grant', async () => {
-  const input = storyInput(3);
+  const input = storyInput(8);
   input.links = [{ url: 'https://t.me/author/1', classification: 'relevant' }];
   vi.mocked(fetchPage).mockImplementation(async url => ({ url, canonicalUrl: url, title: 'Our release',
     content: 'We measured version 2.0 ourselves.', access: 'public', metadata: {} }));
@@ -173,11 +173,11 @@ it('retains a current firsthand Telegram assessment on reuse without a platform-
     content: 'We measured version 2.0 ourselves.', access: 'public',
   }), settings, expect.stringContaining(':read-source-v5'));
   expect(assessmentPrompt).not.toContain('ALWAYS secondary');
-  expect(assessmentPrompt).toContain('Require read text establishing');
+  expect(assessmentPrompt).toContain('The same origin test applies');
 });
 
 it('keeps a newly read Telegram repost supporting when the assessment finds no firsthand evidence', async () => {
-  const input = storyInput(3);
+  const input = storyInput(8);
   input.links = [{ url: 'https://t.me/repost/1', classification: 'relevant' }];
   const docs = await researchEvidence(input, settings, { generate });
   expect(docs[0]?.role).toBe('supporting');
