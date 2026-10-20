@@ -14,7 +14,7 @@ const origin = { source_id: 'mention:xor', text: 'Сообщение XOR', name:
 describe('generation source selection', () => {
   it('lists a collected origin tweet as primary even without readable research evidence',async()=>{
     const tweet='https://x.com/artist/status/123';
-    const query=vi.fn().mockResolvedValueOnce({rows:[origin]}).mockResolvedValueOnce({rows:[]})
+    const query=vi.fn().mockResolvedValue({rows:[]}).mockResolvedValueOnce({rows:[origin]}).mockResolvedValueOnce({rows:[]})
       .mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[{result:{primarySourceUrls:[tweet],review:{supported:true,reason:''}}}]})
       .mockResolvedValueOnce({rows:[{url:tweet}]});
     const snapshot=await snapshotFor({query},story);
@@ -22,13 +22,25 @@ describe('generation source selection', () => {
     expect(snapshot.sources.find(source=>source.url===xorUrl)?.primary).toBe(false);
     expect(render(snapshot).links.some(link=>link.url===tweet)).toBe(true);
   });
+  it('adds the previous post in the resolved destination and hides the category without a publication',async()=>{
+    const query=vi.fn().mockResolvedValue({rows:[]})
+      .mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[]})
+      .mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[]})
+      .mockResolvedValueOnce({rows:[{headline:'Предыдущая новость',destination_id:'-1004376672811',message_id:'644'}]});
+    const snapshot=await snapshotFor({query},story);
+    expect(snapshot.sources).toEqual([{label:'Предыдущая новость',url:'https://t.me/c/4376672811/644',
+      primary:false,previousPublication:true,access:'public',classification:'relevant'}]);
+    expect(String(query.mock.calls.at(-1)?.[0])).toContain("p.destination_id=(SELECT value->>'channelId'");
+    expect(render(snapshot).text).toContain('Предыдущая публикация');
+    expect(render(await snapshotFor({query},story)).text).not.toContain('Предыдущая публикация');
+  });
   it.each([
     { sourceUrls: [reportUrl] }, { sourceUrls: [xorUrl] }, { sourceUrls: [] },
     { sourceUrls: ['https://unknown.example'] },
   ])(
     'retains every mention when the model selects $sourceUrls', async ({ sourceUrls }) => {
       const review = { supported: true, reason: 'Уточните формулировку' };
-      const query = vi.fn()
+      const query = vi.fn().mockResolvedValue({rows:[]})
         .mockResolvedValueOnce({ rows: [origin, { ...origin, source_id: 'mention:duplicate' },
           { ...origin, source_id: 'mention:other', name: 'Другой канал', original_url: otherUrl, external_id: '1' }] })
         .mockResolvedValueOnce({ rows: [

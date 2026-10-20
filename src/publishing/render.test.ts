@@ -21,6 +21,14 @@ describe('full publication rendering', () => {
     expect(message.plainText).toBe('••••••••◦◦\n' + snapshot.headline + '\n\n' + snapshot.details + '\n\nВторичные источники\nКанал <1> · №23 · доступ ограничен');
     expect(message.plainText.slice(message.links[0]!.offset,message.links[0]!.offset+message.links[0]!.length)).toBe('Канал <1> · №23 · доступ ограничен');
   });
+  it('shows the previous-publication category last, with the channel link', () => {
+    const message=render({...snapshot,sources:[{label:'Старая новость',url:'https://t.me/c/4376672811/644',
+      primary:false,previousPublication:true,access:'public',classification:'relevant'},...snapshot.sources]});
+    expect(message.text).toContain('<b>Предыдущая публикация</b>');
+    expect(message.links.at(-1)?.url).toBe('https://t.me/c/4376672811/644');
+    expect(message.plainText.indexOf('Предыдущая публикация')).toBeGreaterThan(message.plainText.indexOf('Вторичные источники'));
+    expect(render(snapshot).text).not.toContain('Предыдущая публикация');
+  });
   it('renders a clean review with no remark block', () => {
     const message=render({...snapshot,review:{supported:true,reason:''}});
     expect(message.plainText).not.toContain('Заметки проверяющего');

@@ -6,7 +6,7 @@ import type { AppSettings } from '../settings.js';
 import { BotApi } from '../publishing/bot-api.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 
-const model = vi.hoisted(() => ({ groupingCalls: 0, extractionCalls: 0, linksCalls: 0 }));
+const model = vi.hoisted(() => ({ groupingCalls: 0, extractionCalls: 0, linksCalls: 0, verdict: 'followup', relation: '' }));
 vi.mock('./collection.js', () => ({ collectBatch: async () => {} }));
 vi.mock('./extraction-model.js', () => ({ extractEvents: async (text: string) => {
   model.extractionCalls++;
@@ -29,13 +29,13 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
     if (input.incoming.text.includes('Сбой')) throw new ModelRequestError(
       failureMetadata(new RequestFault('transient'), 'grouping', 'pi', 1, 0));
     return modelResult({ matches: input.candidates.filter(candidate => candidate.text.includes('Compiler 2') && input.incoming.text.includes('Compiler 2'))
-      .map(candidate => ({ storyId: candidate.id, relation: input.incoming.text.includes('40 долларов') ? 'update' : 'same' })) });
+      .map(candidate => ({ storyId: candidate.id, relation: model.relation || (input.incoming.text.includes('40 долларов') ? 'update' : 'same') })) });
   } }),
 }));
 vi.mock('../models/jev.js', async original => ({ ...await original<typeof import('../models/jev.js')>(), JevClient: class {
   async judge(template: string) {
     const answer = template==='interest' ? { type: 'score', score: 7, probabilities: {}, confidence: 1, legend: {} }
-      : { type: 'choice', choice: template==='event_group_integrity' ? 'coherent' : template==='representative' ? 'left' : 'eligible', probabilities: {}, confidence: 1 };
+      : { type: 'choice', choice: template==='published_update' ? model.verdict : template==='event_group_integrity' ? 'coherent' : template==='representative' ? 'left' : 'eligible', probabilities: {}, confidence: 1 };
     return { answers: { answer }, metrics: {}, model: 'fixture' };
   }
   async close() {}
@@ -84,13 +84,13 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     settings=await (await import('../settings.js')).saveSettings({publishingEnabled:true,embeddingDimensions:3});
   });
   beforeEach(async () => {
-    vi.restoreAllMocks(); model.groupingCalls=0; model.extractionCalls=0; model.linksCalls=0;
+    vi.restoreAllMocks(); model.groupingCalls=0; model.extractionCalls=0; model.linksCalls=0; model.verdict='followup'; model.relation='';
     await database.db.query('TRUNCATE processing_batches,sources,stories,publications,model_cache,operational_state CASCADE');
     const { saveState }=await import('../publishing/store.js');
     await saveState('telegram_destination',{channelId:'-100123'});
     await saveState('bot_verified',{verified:true,destinationId:'-100123',botId:123});
     vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({id:123,is_bot:true});
-    vi.spyOn(BotApi.prototype,'send').mockImplementation(async () => randomUUID());
+    vi.spyOn(BotApi.prototype,'send').mockImplementation(async () => String(100 + vi.mocked(BotApi.prototype.send).mock.calls.length));
     vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
   });
   afterAll(async () => {
@@ -110,23 +110,45 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     expect((await database.db.query("SELECT jsonb_array_length(metadata->'pipelineExtraction') AS n FROM item_revisions WHERE id=$1",[revision])).rows).toEqual([{n:1}]);
     expect(model.extractionCalls).toBe(0); expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(0);
   });
-  it('groups duplicate reports, keeps distinct topics, and edits a meaningful update without another send', async () => {
+  it('groups draft reports and publishes a linked follow-up without modifying the previous story', async () => {
     const batch=await intake(['Acme выпустила Compiler 2.', 'Состоялся выпуск Compiler 2 от Acme.', 'Beta выпустила Database 3.']);
     await processIntake(batch); await publish();
     expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
     const canonical=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
     expect((await database.db.query('SELECT id FROM story_mentions WHERE story_id=$1',[canonical])).rows).toHaveLength(2);
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2);
+    const original=(await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0];
     const extracted=model.extractionCalls;
     await processIntake(batch); await publish();
     expect(model.extractionCalls).toBe(extracted);
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2);
     await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.']));
     await publish(); await publish();
+    expect(BotApi.prototype.send).toHaveBeenCalledTimes(3);
+    expect(BotApi.prototype.edit).not.toHaveBeenCalled();
+    expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
+    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE text LIKE '%40 долларов%' ")).rows)
+      .toEqual([{previous:canonical}]);
+    expect(vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text).toContain('Предыдущая публикация');
+    expect((await database.db.query('SELECT id FROM publications')).rows).toHaveLength(3);
+  });
+  it.each(['same','update'])('gates a %s match to a published story as duplicate or different', async relation => {
+    await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
+    const canonical=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
+    const original=(await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0];
+    model.relation=relation; model.verdict='duplicate';
+    await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.'])); await publish();
+    expect((await database.db.query("SELECT story_id,metadata->>'relation' AS relation FROM story_mentions WHERE text LIKE '%40 долларов%'")).rows)
+      .toEqual([{story_id:canonical,relation:'same'}]);
+    expect(BotApi.prototype.send).toHaveBeenCalledOnce();
+    model.verdict='different';
+    await processIntake(await intake(['Compiler 2: отдельное событие.'])); await publish();
+    const different=(await database.db.query("SELECT story_id,metadata->>'previous_story_id' AS previous FROM story_mentions WHERE text LIKE '%отдельное событие%'")).rows[0];
+    expect(different?.story_id).not.toBe(canonical); expect(different?.previous).toBeNull();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2);
-    expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
-    expect((await database.db.query('SELECT summary FROM stories WHERE id=$1',[canonical])).rows[0]?.summary).toContain('40 долларов');
-    expect((await database.db.query('SELECT id FROM publications')).rows).toHaveLength(2);
+    expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
+    expect((await database.db.query("SELECT result->>'choice' AS verdict FROM judgments WHERE stage='published_update' ORDER BY created_at")).rows)
+      .toEqual([{verdict:'duplicate'},{verdict:'different'}]);
   });
   it('adds a source-only recap to stories arriving later, without a separate post or confirmation calls', async () => {
     const recap=await intake(['Ссылки на релизы Compiler 2.']);
@@ -195,8 +217,8 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     expect((await database.db.query("SELECT status,error_code FROM stage_state WHERE batch_id=$1 AND stage LIKE 'consolidate:%'",[seed])).rows)
       .toEqual([{status:'waiting',error_code:'invalid_request'}]);
   });
-  it('reopens completed legacy merge intake and preserves the original Telegram post', async () => {
-    await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
+  it('reopens completed legacy draft intake and merges it before publishing', async () => {
+    await processIntake(await intake(['Acme выпустила Compiler 2.']));
     const canonical=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
     const legacy=await intake(['Ещё один источник сообщил о выпуске Compiler 2.']);
     const revision=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[legacy]);
@@ -214,7 +236,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows).toEqual([{story_id:canonical}]);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
   });
-  it('merges a historical published owner and a live duplicate when a source edit retires its last report', async () => {
+  it('keeps a historical published owner unchanged when a source edit joins a live draft', async () => {
     const first=await intake(['Acme выпустила Compiler 2.']); await processIntake(first); await publish();
     const original=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[first]);
     const item=await one('SELECT item_id AS id FROM item_revisions WHERE id=$1',[original]);
@@ -232,10 +254,11 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1',[item,edited]);
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[update,edited]);
     await processIntake(update); await publish();
-    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[edited])).rows).toEqual([{story_id:canonical}]);
-    expect((await database.db.query('SELECT canonical_story_id FROM story_merges WHERE merged_story_id=$1',[duplicate])).rows)
-      .toEqual([{canonical_story_id:canonical}]);
-    expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
+    const attached=(await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[edited])).rows[0]?.story_id;
+    expect(attached).not.toBe(canonical); expect(attached).not.toBe(duplicate);
+    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:canonical}]);
+    expect((await database.db.query('SELECT headline FROM stories WHERE id=$1',[canonical])).rows[0]?.headline).not.toBeNull();
+    expect(BotApi.prototype.send).toHaveBeenCalledTimes(2); expect(BotApi.prototype.edit).not.toHaveBeenCalled();
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[update])).rows).toEqual([{status:'completed'}]);
   });
   it('parks one grouping failure while a healthy sibling is generated and published', async () => {

@@ -5,6 +5,7 @@ import { eventInput } from './consolidation-input.js';
 import { mergeStories } from './consolidation-store.js';
 import { retainedStories } from './matching.js';
 import { groupReport, GROUPING_VERSION } from './grouping-model.js';
+import { publishedStory } from './generation-store.js';
 import { stage } from './state.js';
 import { existingItemFailures, itemWork } from './item-failures.js';
 
@@ -24,10 +25,13 @@ export async function consolidateStories(settings: AppSettings, batchId: string)
     await stage(batchId, { revisionId: revision.revision_id }, `consolidate:${GROUPING_VERSION}`, settings, z.boolean(), async context => {
       const owned = await db.query<{ story_id: string }>('SELECT DISTINCT story_id FROM story_mentions WHERE revision_id=$1 AND story_id IS NOT NULL', [revision.revision_id]);
       for (const owner of owned.rows) {
+        if (await publishedStory(owner.story_id)) continue;
         let incoming = await eventInput(owner.story_id);
         if (!incoming) continue;
         const candidates = (await retainedStories(settings)).filter(story => story.id!==incoming?.id);
-        const matches = await groupReport(incoming, candidates, settings, { ...context,storyId:owner.story_id });
+        const drafts = [];
+        for (const candidate of candidates) if (!await publishedStory(candidate.id)) drafts.push(candidate);
+        const matches = await groupReport(incoming, drafts, settings, { ...context,storyId:owner.story_id });
         for (const match of matches) {
           const right = candidates.find(story => story.id===match.storyId);
           if (!right) throw new Error('Grouping target changed');

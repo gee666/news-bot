@@ -8,6 +8,8 @@ import { eventInput, mentionInput, type EventInput, type HistoricalEventRef } fr
 import { GROUPING_VERSION, groupReport } from './grouping-model.js';
 import { mergeStories } from './consolidation-store.js';
 import { historicalEventInput } from './historical-input.js';
+import { publishedStory } from './generation-store.js';
+import { choice, Judgments } from './judgments.js';
 import { ProcessingYield } from './processing-slice.js';
 
 export interface Mention { id: string; revision_id: string; text: string; story_id: string | null }
@@ -119,9 +121,26 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
           return candidate.input;
         });
         const matches = await groupReport(incoming, inputs, settings, context);
-        let matched = available.find(candidate => candidate.id === matches[0]?.storyId);
+        // Published matches always get the event-identity and novelty gate.
+        const posted = new Map<string, Awaited<ReturnType<typeof publishedStory>>>();
+        for (const match of matches) posted.set(match.storyId, await publishedStory(match.storyId));
+        const ordered = [...matches].sort((a,b) => Number(Boolean(posted.get(b.storyId))) - Number(Boolean(posted.get(a.storyId))));
+        let matched = available.find(candidate => candidate.id === ordered[0]?.storyId);
         const relation = matches.some(match => match.relation === 'update') ? 'update' : 'same';
-        for (const match of matches.slice(1)) {
+        const previous = matched ? posted.get(matched.id) : null;
+        if (previous) {
+          const judgments = new Judgments(settings);
+          let verdict: 'different' | 'duplicate' | 'followup';
+          try {
+            verdict = z.enum(['different','duplicate','followup']).parse(choice(await judgments.judge('published_update', {
+              previousPost:{headline:previous.headline,summary:previous.summary},newEvent:incoming.text,
+            },context)));
+          } finally { await judgments.close(); }
+          return attach(mention,incoming,vector,verdict === 'different' ? undefined : matched,
+            verdict === 'duplicate' ? 'same' : 'update',vectors,context,
+            verdict === 'followup' ? previous.storyId : undefined,true);
+        }
+        for (const match of ordered.slice(1).filter(match => !posted.get(match.storyId))) {
           if (!matched) break;
           const left = matched.input;
           const right = inputs.find(input => input.id===match.storyId);
@@ -151,7 +170,7 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
 }
 
 async function attach(mention: Mention, incoming: EventInput, vector: number[], matched: Candidate | undefined, relation: string,
-  vectors: Vectors, context: StageContext): Promise<string> {
+  vectors: Vectors, context: StageContext, previousStoryId?: string, judgedPublication=false): Promise<string> {
   return transaction(async client => {
     // Keep collection edits from retiring either source while committing a model decision.
     await client.query(`SELECT i.id FROM source_items i WHERE i.id IN(
@@ -162,21 +181,25 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
         : await eventInput(matched.id, client))?.fingerprint !== matched.input.fingerprint)) {
       throw new Error('Event input changed during matching');
     }
-    let storyId = matched?.id;
+    if (matched) await client.query('SELECT id FROM stories WHERE id=$1 FOR UPDATE', [matched.id]);
+    const posted = matched ? await publishedStory(matched.id,client.query.bind(client)) : null;
+    // Publication may have finished while grouping was in flight. Retry with its posted context.
+    if (posted && !judgedPublication) throw new Error('Story published during matching');
+    let storyId = previousStoryId ? undefined : matched?.id;
     if (!storyId) {
       const created = await client.query<{ id: string }>(`INSERT INTO stories(status,chosen_excerpt,meaningful_hash)
         VALUES('processing',$1,$2) RETURNING id`, [mention.text, hash(mention.text)]);
       storyId = z.uuid().parse(created.rows[0]?.id);
     } else if (relation === 'update') {
       await client.query(`UPDATE stories SET status='processing',content_version=content_version+1,meaningful_hash=$2,
-        chosen_excerpt=$3,headline=NULL,summary=NULL,translated_excerpt=NULL,researched=false,interest_stale=true,updated_at=now() WHERE id=$1`,
+        chosen_excerpt=$3,headline=NULL,summary=NULL,translated_excerpt=NULL,researched=false,interest_stale=true,updated_at=now() WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=stories.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)`,
       [storyId, hash([matched?.text, mention.text]), mention.text]);
       // Preserve evidence associations; research freshness checks reassess them for the new input.
     }
     await client.query('UPDATE story_mentions SET story_id=$2,metadata=metadata || $3::jsonb WHERE id=$1',
-      [mention.id, storyId, JSON.stringify({ relation, batchId: context.batchId })]);
+      [mention.id, storyId, JSON.stringify({ relation, batchId: context.batchId, ...(previousStoryId ? { previous_story_id:previousStoryId } : {}) })]);
     await client.query(`UPDATE stories SET status='processing',interest_stale=true,updated_at=now()
-      WHERE id=$1 AND status='rejected'`, [storyId]);
+      WHERE id=$1 AND status='rejected' AND NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=stories.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)`, [storyId]);
     await client.query(`INSERT INTO consolidation_intake(revision_id,item_id,text_fingerprint,urls)
       SELECT r.id,r.item_id,encode(sha256(convert_to(r.original_text,'UTF8')),'hex'),
         ARRAY(SELECT DISTINCT l.url FROM item_links l WHERE l.revision_id=r.id ORDER BY l.url)
@@ -184,7 +207,7 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
         SELECT 1 FROM story_mentions m WHERE m.revision_id=r.id AND m.story_id IS NULL
           AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window')
       ON CONFLICT(revision_id) DO NOTHING`, [mention.revision_id]);
-    if (!matched || relation === 'update') await client.query(`INSERT INTO embeddings(config_id,story_id,input_hash,embedding)
+    if (!matched || previousStoryId || relation === 'update') await client.query(`INSERT INTO embeddings(config_id,story_id,input_hash,embedding)
       VALUES($1,$2,$3,$4::vector) ON CONFLICT(config_id,story_id) DO UPDATE SET input_hash=EXCLUDED.input_hash,embedding=EXCLUDED.embedding`,
     [vectors.config.id, storyId, hash([vectors.config.input_version, mention.text]), JSON.stringify(vector)]);
     return storyId;

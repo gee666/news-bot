@@ -56,7 +56,7 @@ export async function applyExtraction(batchId: string, revisionId: string, text:
         await client.query(`INSERT INTO stage_state(batch_id,story_id,stage,status,output) VALUES($1,$2,'extraction_affected','skipped',$3)
           ON CONFLICT(batch_id,revision_id,story_id,stage) DO UPDATE SET output=EXCLUDED.output`,
         [batchId, storyId, JSON.stringify({ revisionId, previousText: existing.rows.filter(row => row.story_id === storyId).map(row => row.text).join('\n\n') })]);
-        await client.query("UPDATE stories SET status='processing',interest_stale=true WHERE id=$1", [storyId]);
+        await client.query(`UPDATE stories SET status='processing',interest_stale=true WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=stories.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)`, [storyId]);
       }
       await client.query('DELETE FROM story_mentions WHERE revision_id=$1', [revisionId]);
       await client.query(`UPDATE stage_state SET status='pending',output=NULL,completed_at=NULL

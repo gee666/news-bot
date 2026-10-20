@@ -133,6 +133,17 @@ export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: Stor
     primary:metadata?.primarySourceUrls ? primary.has(source.url) : source.primary})),
     ...referenced.rows.map(({url})=>{const parsed=new URL(url);return {url,label:parsed.hostname+parsed.pathname,
       primary:true,access:'unknown' as const,classification:'relevant' as const};})]);
+  const previous = await client.query<{headline:string;destination_id:string;message_id:string}>(`SELECT snap.content->>'headline' AS headline,p.destination_id,p.message_id
+    FROM story_mentions m JOIN publications p ON p.story_id::text=m.metadata->>'previous_story_id'
+    JOIN publication_snapshots snap ON snap.id=p.snapshot_id
+    WHERE m.story_id=$1 AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
+      AND p.destination_id=(SELECT value->>'channelId' FROM operational_state WHERE key='telegram_destination')
+    ORDER BY p.published_at,p.id LIMIT 1`, [story.id]);
+  const posted=previous.rows[0];
+  if (posted && /^-100\d+$/u.test(posted.destination_id) && /^\d+$/u.test(posted.message_id)) sources.push({
+    label:posted.headline,url:`https://t.me/c/${posted.destination_id.slice(4)}/${posted.message_id}`,
+    primary:false,previousPublication:true,access:'public',classification:'relevant',
+  });
   for (const source of sources) delete source.labels;
   return publicationSnapshotSchema.parse({ headline: story.headline, score: story.interest_score,
     details: story.researched ? story.summary : story.translated_excerpt, detailsKind: story.researched ? 'summary' : 'excerpt', sources,

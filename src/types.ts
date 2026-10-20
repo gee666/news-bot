@@ -22,6 +22,7 @@ export const publicationSourceSchema = z.object({
   url: z.string().url().refine(value => ['http:', 'https:'].includes(new URL(value).protocol)),
   access: z.enum(['public', 'restricted', 'unavailable', 'unknown']),
   primary: z.boolean(),
+  previousPublication: z.literal(true).optional(),
   kind: sourceAuthorityKindSchema.optional(),
   classification: z.enum(['relevant', 'uncertain']),
 }).strict().transform(source => source.kind ? { ...source, primary: source.kind === 'primary' } : source);

@@ -61,6 +61,16 @@ export const jevTemplates = {
         different: "Different main products or separate event episodes, or no identifying connection beyond a company, conference or broad topic. Differences in detail, certainty or preview specificity alone do not imply different episodes." },
     } },
   },
+  published_update: {
+    version: "published-update-v2",
+    questions: { report: {
+      type: "choice", instructions: untrusted +
+        "Compare newEvent with previousPost.headline and previousPost.summary, the text readers already received. First check concrete event identity, not broad topic or shared company. Different incidents, experiments, products or episodes are different even when they share AI safety, crime or another theme. Return different when the concrete event differs. For the same event, return followup for substantive new results, corrections, changed certainty, consequences, pricing or availability not already reported and worth a separate post. Return duplicate for repetitions, paraphrases, incidental details or older background. Judge supplied facts, not the source's excitement; do not verify or infer unseen links.",
+      criteria: { different: "Not the same concrete event; report independently without a previous-post link.",
+        duplicate: "Same event, already reported or too little new information for another post.",
+        followup: "Same concrete event with material new information worth a separate follow-up." },
+    } },
+  },
   news_eligibility: {
     version: "news-eligibility-v3",
     questions: { eligible: {

@@ -1,10 +1,11 @@
 import { evidenceLinkSql } from '../sources/link-policy.js';
+import type { PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import type { ResearchPage } from './research-page.js';
-import { generationReviewSchema, type GenerationReview } from '../types.js';
+import { publicationSnapshotSchema, generationReviewSchema, type GenerationReview } from '../types.js';
 import { jevTemplates } from '../models/templates.js';
 
 const accessSchema = z.enum(['public', 'restricted', 'unknown']);
@@ -281,4 +282,26 @@ export async function assessEvidence(storyId: string, evidence: Evidence, role: 
       JSON.stringify({ evidenceId: evidence.id, role, relevance, assessment }), settings.retentionDays]);
   });
   return { ...evidence, role, relevance, assessment, assessed_at: assessedAt };
+}
+
+export interface PublishedStory { storyId: string; headline: string; summary: string; destinationId: string; messageId: string }
+
+/** Read the actual posted copy, not a possibly stale story draft. */
+export async function publishedStory(storyId: string, query = db.query.bind(db), destinationId?: string): Promise<PublishedStory | null> {
+  const result = await query<{ content: unknown; destination_id: string; message_id: string }>(`SELECT snap.content,p.destination_id,p.message_id
+    FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id
+    WHERE p.story_id=$1 AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
+      AND ($2::text IS NULL OR p.destination_id=$2) ORDER BY p.published_at,p.id LIMIT 1`, [storyId,destinationId ?? null]);
+  const row = result.rows[0];
+  if (!row) return null;
+  const snapshot = publicationSnapshotSchema.parse(row.content);
+  return { storyId,headline:snapshot.headline,summary:snapshot.details,destinationId:row.destination_id,messageId:row.message_id };
+}
+
+/** The seed mention owns the follow-up link in existing JSON metadata. */
+export async function previousStory(storyId: string, client: Pick<PoolClient, 'query'> = db, destinationId?: string): Promise<PublishedStory | null> {
+  const result = await client.query<{ previous_story_id: string }>(`SELECT metadata->>'previous_story_id' AS previous_story_id
+    FROM story_mentions WHERE story_id=$1 AND metadata ? 'previous_story_id' ORDER BY created_at,id LIMIT 1`, [storyId]);
+  const id = result.rows[0]?.previous_story_id;
+  return id ? publishedStory(id,client.query.bind(client),destinationId) : null;
 }

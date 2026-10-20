@@ -3,12 +3,13 @@ import type { PiRequest, RequestContext } from '../models/index.js';
 import { defaultSettings } from '../settings.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 import { researchStory } from './generation.js';
-import { alreadyGenerated, saveGenerations } from './generation-store.js';
+import { previousStory, publishedStory, alreadyGenerated, saveGenerations } from './generation-store.js';
 import { generationClient } from './generation-model.js';
 import { evidenceDocument, modelResult, storyId, storyInput } from './generation.test-helpers.js';
 
 const mocks = vi.hoisted(() => ({ input: vi.fn(), generate: vi.fn() }));
 vi.mock('./generation-store.js', () => ({
+  publishedStory:vi.fn(async()=>null),previousStory:vi.fn(async()=>null),
   loadStory: mocks.input, alreadyGenerated: vi.fn(), evidenceSnapshotHash: async () => 'evidence-signature',
   saveGenerations: vi.fn(), loadCurrentEvidence:async()=>[],
 }));
@@ -196,4 +197,20 @@ it('skips an already generated story without buying another review', async () =>
   vi.mocked(alreadyGenerated).mockResolvedValue(true);
   await researchStory(storyId, defaultSettings);
   expect(mocks.generate).not.toHaveBeenCalled();
+});
+
+it('passes the posted copy to a follow-up writer and tells it to cover only new information', async () => {
+  vi.mocked(previousStory).mockResolvedValueOnce({storyId:'previous',headline:'Предыдущий заголовок',summary:'Старые сведения',destinationId:'-100123',messageId:'644'});
+  mocks.generate.mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(passed));
+  await researchStory(storyId,defaultSettings);
+  const request=mocks.generate.mock.calls[0]?.[0];
+  expect(JSON.parse(request.prompt).previous_post).toEqual({headline:'Предыдущий заголовок',summary:'Старые сведения'});
+  expect(request.systemPrompt).toContain('не пересказывай предыдущую публикацию');
+});
+
+it('never regenerates a published story, even when forced', async () => {
+  vi.mocked(publishedStory).mockResolvedValueOnce({storyId,headline:'Уже опубликовано',summary:'Сведения',destinationId:'-100123',messageId:'644'});
+  await researchStory(storyId,defaultSettings,true);
+  expect(mocks.generate).not.toHaveBeenCalled();
+  expect(mocks.input).not.toHaveBeenCalled();
 });

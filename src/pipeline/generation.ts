@@ -9,6 +9,8 @@ import { researchMentions } from './research-mentions.js';
 import { processingSliceMs } from './processing-slice.js';
 import { classifySourceOrigins } from './source-origins.js';
 
+import { previousStory, publishedStory } from './generation-store.js';
+
 const editorialSchema = z.object({
   headline: z.string().trim().min(1).regex(/[А-Яа-яЁё]/u),
   summary: z.string().trim().min(1).regex(/[А-Яа-яЁё]/u),
@@ -60,6 +62,8 @@ async function reviewDraft(generator: TextGenerator, material: unknown, operatio
 }
 
 export async function researchStory(storyId: string, settings: AppSettings, force=false): Promise<void> {
+  if (await publishedStory(storyId)) return;
+  const previous = await previousStory(storyId);
   const input = await loadStory(storyId);
   const operationId = `research:${storyId}`;
   if (input.story.interest_score === null || !input.mentions.some(mention => mention.text.trim())) {
@@ -85,13 +89,15 @@ export async function researchStory(storyId: string, settings: AppSettings, forc
       source_kind:report.url && primary.has(report.url) ? 'primary' : 'secondary'})),
     documents: researchDocuments(documents.map(doc=>primary.has(doc.canonical_url ?? doc.url)
       ? {...doc,role:'primary',relevance:'relevant',metadata:{...doc.metadata,readAssessmentPolicy:'firsthand-v1'}} : doc)),links:input.links.map(link=>({...link,source_name:undefined})),
-    primary_sources:primarySourceUrls };
-  let draft = await generateOnce(generator, editorialSchema, editorialPrompt, material, `${operationId}:generate`);
+    primary_sources:primarySourceUrls,
+    ...(previous ? { previous_post:{headline:previous.headline,summary:previous.summary} } : {}) };
+  const prompt = editorialPrompt + (previous ? '\nЭто продолжение: пиши о новом по сравнению с previous_post, не пересказывай предыдущую публикацию.' : '');
+  let draft = await generateOnce(generator, editorialSchema, prompt, material, `${operationId}:generate`);
   let review: z.infer<typeof generationReviewSchema>;
   try {
     review = await reviewDraft(generator, { material, draft }, `${operationId}:review`);
     if (!review.supported) {
-      draft = await generateOnce(generator, editorialSchema, editorialPrompt,
+      draft = await generateOnce(generator, editorialSchema, prompt,
         { material, draft, review, instruction: 'Исправь пересказ один раз по исходным материалам. Замечание проверки не является новым источником фактов.' },
         `${operationId}:rewrite`, AbortSignal.timeout(processingSliceMs()));
       review = await reviewDraft(generator, { material, draft }, `${operationId}:re-review`);

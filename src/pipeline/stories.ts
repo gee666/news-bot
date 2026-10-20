@@ -82,7 +82,8 @@ async function refreshEmbedding(id: string, vectors: Vectors, context: StageCont
 export async function finishBatchStories(batchId: string, settings: AppSettings, judgments: Judgments, vectors: Vectors,
   onReady?: (id: string) => Promise<void>, storyIds?: readonly string[]): Promise<StoryWorkReport> {
   const result = await db.query<Candidate>(`WITH RECURSIVE ${blockedStoriesCte} SELECT s.id,s.content_version,s.status,s.interest_stale,s.profile_version,s.model_version FROM stories s
-    WHERE s.id::text NOT IN(SELECT id FROM blocked_stories) AND s.status IN ('pending','processing','failed','completed') AND EXISTS(SELECT 1 FROM story_mentions current
+    WHERE NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=s.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)
+    AND s.id::text NOT IN(SELECT id FROM blocked_stories) AND s.status IN ('pending','processing','failed','completed') AND EXISTS(SELECT 1 FROM story_mentions current
       JOIN item_revisions cr ON cr.id=current.revision_id JOIN source_items ci ON ci.current_revision_id=cr.id WHERE current.story_id=s.id)
     AND (EXISTS(SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
       JOIN item_revisions br ON br.item_id=r.item_id JOIN batch_items b ON b.revision_id=br.id
@@ -185,7 +186,8 @@ export async function refreshDigest(settings: AppSettings, judgments: Judgments,
       JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=s.id))`);
   // A scoped replay can yield after merges enqueue refreshes but before its story cap is pinned.
   const result = await db.query<Candidate>(`WITH RECURSIVE ${blockedStoriesCte} SELECT s.id,s.content_version,s.status,s.interest_stale,s.profile_version,s.model_version FROM stories s
-    WHERE s.id::text NOT IN(SELECT id FROM blocked_stories)
+    WHERE NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=s.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)
+    AND s.id::text NOT IN(SELECT id FROM blocked_stories)
     AND ($3::uuid[] IS NULL OR s.id=ANY($3))
     AND ($3::uuid[] IS NOT NULL OR NOT EXISTS(SELECT 1 FROM processing_batches batch
       WHERE batch.completed_at IS NULL AND batch.manual_operation_id IS NOT NULL AND (
