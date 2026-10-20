@@ -6,8 +6,8 @@ import { modelResult } from './generation.test-helpers.js';
 const range = (first: string, last = first, excerpt: string | null = null) => ({ first, last, excerpt });
 
 describe('multi-span news mentions', () => {
-  it('keeps detached access and quota details with their own product, not the intervening event', () => {
-    const text = 'Acme launched an assistant.\nIt has memory.\nBeta updated its editor.\nThe assistant is free and quota-free.';
+  it('keeps detached details with their roundup item, not the intervening item', () => {
+    const text = 'News of the week: Acme launched an assistant.\nIt has memory.\nBeta updated its editor.\nThe assistant is free and quota-free.';
     const result = selectedEvents(text, sourceUnits(text), { events: [
       { parts: [range('u0', 'u1'), range('u3')], context: [] },
       { parts: [range('u2')], context: [] },
@@ -19,7 +19,7 @@ describe('multi-span news mentions', () => {
     expect(result?.[0] && eventSpans(result[0])).toHaveLength(2);
   });
   it('preserves rumor attribution and shared place context, including overlapping context ranges', () => {
-    const text = 'At Acme Day in Oslo.\nRumors suggest:\nAn agent forum.\nA security model.\nProtesters arrived outside.';
+    const text = 'News roundup at Acme Day in Oslo.\nRumors suggest:\nAn agent forum.\nA security model.\nProtesters arrived outside.';
     const result = selectedEvents(text, sourceUnits(text), { events: [
       { parts: [range('u2')], context: [range('u0', 'u1')] },
       { parts: [range('u3')], context: [range('u0', 'u1')] },
@@ -30,18 +30,18 @@ describe('multi-span news mentions', () => {
     expect(result?.[2] && eventText(text, result[2])).toContain('Oslo');
     expect(result?.[2] && eventText(text, result[2])).not.toContain('Rumors');
   });
-  it('splits a named-product recap within one sentence with shared update context', () => {
-    const text = 'Updated tools include Compiler A and Security B.';
+  it('resolves explicit roundup items within one sentence with shared context', () => {
+    const text = 'News of the week: Compiler A shipped and Security B launched.';
     const selection: EventSelection = { events: [
-      { parts: [range('u0', 'u0', 'Compiler A')], context: [range('u0', 'u0', 'Updated tools include')] },
-      { parts: [range('u0', 'u0', 'and Security B.')], context: [range('u0', 'u0', 'Updated tools include')] },
+      { parts: [range('u0', 'u0', 'Compiler A shipped')], context: [range('u0', 'u0', 'News of the week:')] },
+      { parts: [range('u0', 'u0', 'and Security B launched.')], context: [range('u0', 'u0', 'News of the week:')] },
     ], omitted: [] };
     const result = selectedEvents(text, sourceUnits(text), selection);
     expect(result).toHaveLength(2);
     expect(result?.[1] && eventText(text, result[1])).toContain('Security B');
     const second = selection.events[1];
     if (!second) throw new Error('Missing fixture event');
-    second.parts[0] = range('u0', 'u0', 'Security B.');
+    second.parts[0] = range('u0', 'u0', 'Security B launched.');
     expect(selectedEvents(text, sourceUnits(text), selection)).toBeNull();
     expect(selectionFeedback(text, sourceUnits(text), selection)).toContain('and');
   });
@@ -67,6 +67,31 @@ describe('multi-span news mentions', () => {
     expect(selectedEvents(text, sourceUnits(text), { events: [
       { parts: [range('u0')], context: [] }, { parts: [range('u0')], context: [] },
     ], omitted: [] })).toBeNull();
+  });
+  it.each([
+    'Google presented Gemini 4 Argon and Antigravity demos.\nOne demo uses Lyria for background music.\nLyria can generate music in several styles.',
+    'A research paper introduces Agent X.\nExperiments use Model Y and Tool Z.\nModel Y also supports image generation.',
+  ])('instructs extraction and review to keep the main topic, not secondary products: %s', async text => {
+    const proposed = { events: [
+      { parts: [range('u0')], context: [] },
+      { parts: [range('u1', 'u2')], context: [] },
+    ], omitted: [] };
+    const reviewed = { events: [{ parts: [range('u0')], context: [range('u1')] }],
+      omitted: [{ id: 'u2', last: null, excerpt: null, reason: 'non_news' }] };
+    const generator = { generate: vi.fn().mockResolvedValueOnce(modelResult(proposed)).mockResolvedValueOnce(modelResult(reviewed)) };
+    const events = await extractEvents(text, generator, { operationId: 'extract' }, vi.fn(), 'Technology news');
+    expect(events.map(event => eventText(text, event))).toEqual([text.split('\n').slice(0, 2).join('\n\n')]);
+    expect(generator.generate).toHaveBeenCalledTimes(2);
+    for (const [request] of generator.generate.mock.calls) {
+      expect(request.systemPrompt).toContain('A source item normally yields exactly ONE event');
+      expect(request.systemPrompt).toContain('headline and opening framing');
+      expect(request.systemPrompt).toContain('A single research post, paper or article is ONE event');
+      expect(request.systemPrompt).toContain('or explicitly omitted, NEVER separate events');
+      expect(request.systemPrompt).toContain('The only exception is an explicit news roundup/digest');
+      expect(request.systemPrompt).toContain('A paragraph about a secondary product inside another story is NOT a roundup');
+      expect(request.systemPrompt).not.toMatch(/separate independently announced products|Keep every named product update|Restore missing news, recap products|FOUR candidates/u);
+    }
+    expect(generator.generate.mock.calls[1]?.[0].systemPrompt).toContain('merge proposed events that split a single research post, paper or article');
   });
   it('independently reviews omissions and can restore a missing event', async () => {
     const empty = { events: [], omitted: [{ id: 'u0', last: null, excerpt: null, reason: 'non_news' }] };
