@@ -1,0 +1,16 @@
+[Unit]
+Description=Recover unhealthy news bot containers
+Requires=docker.service
+After=docker.service news-bot.service
+
+[Service]
+Type=oneshot
+User=oira666
+SupplementaryGroups=docker
+WorkingDirectory=/home/oira666/Work/news-bot
+Environment=PATH=/usr/bin:/bin
+Environment=ROOT=/home/oira666/Work/news-bot
+Environment=DOCKER_BIN=/usr/bin/docker
+ExecStart=/usr/local/libexec/news-bot-watchdog
+TimeoutStartSec=300
+UMask=0077

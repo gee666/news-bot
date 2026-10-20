@@ -1,0 +1,22 @@
+[Unit]
+Description=News bot Compose boot
+Requires=docker.service
+Wants=network-online.target
+After=docker.service network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=oira666
+SupplementaryGroups=docker
+WorkingDirectory=/home/oira666/Work/news-bot
+Environment=PATH=/usr/bin:/bin
+ExecStart=/usr/bin/docker compose --project-name news-bot up --detach --no-build --pull never --no-recreate --wait --wait-timeout 120
+TimeoutStartSec=180
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=60
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

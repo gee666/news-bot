@@ -12,6 +12,8 @@ A single-user Telegram news collector with a Russian digest and a React settings
 
 On WSL2, run Docker Engine in the Linux distribution and enable its service. A fresh login applies Docker group membership. The commands below use `sg docker -c` so an older terminal session also works. macOS needs a Linux VM runtime such as Colima.
 
+For native Linux boot and unhealthy-container recovery, see [Linux deployment](docs/linux-deployment.md). Install it only after stopping the old production app and verifying the final migration snapshot.
+
 ## Configure and build
 
 Do not overwrite an existing private configuration:
