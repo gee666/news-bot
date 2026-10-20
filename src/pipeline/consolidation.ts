@@ -5,7 +5,7 @@ import { eventInput } from './consolidation-input.js';
 import { mergeStories } from './consolidation-store.js';
 import { retainedStories } from './matching.js';
 import { groupReport, GROUPING_VERSION } from './grouping-model.js';
-import { publishedStory } from './generation-store.js';
+import { publishedStory, unpublished } from './generation-store.js';
 import { stage } from './state.js';
 import { existingItemFailures, itemWork } from './item-failures.js';
 
@@ -29,11 +29,13 @@ export async function consolidateStories(settings: AppSettings, batchId: string)
         let incoming = await eventInput(owner.story_id);
         if (!incoming) continue;
         const candidates = (await retainedStories(settings)).filter(story => story.id!==incoming?.id);
-        const drafts = [];
-        for (const candidate of candidates) if (!await publishedStory(candidate.id)) drafts.push(candidate);
+        const draftRows = await db.query<{ id: string }>(`SELECT id FROM stories WHERE id=ANY($1::uuid[]) AND ${unpublished('stories')}`,
+          [candidates.map(candidate => candidate.id)]);
+        const draftIds = new Set(draftRows.rows.map(row => row.id));
+        const drafts = candidates.filter(candidate => draftIds.has(candidate.id));
         const matches = await groupReport(incoming, drafts, settings, { ...context,storyId:owner.story_id });
         for (const match of matches) {
-          const right = candidates.find(story => story.id===match.storyId);
+          const right = drafts.find(story => story.id===match.storyId);
           if (!right) throw new Error('Grouping target changed');
           const merged = await mergeStories(incoming,right,'update');
           if (!merged) throw new Error('Grouping target changed');

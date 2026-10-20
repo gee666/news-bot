@@ -247,6 +247,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     await (await import('./extraction-store.js')).applyExtraction(live,liveRevision,otherText,[{start:0,end:otherText.length}]);
     const duplicate=await one('INSERT INTO stories(chosen_excerpt) VALUES($1) RETURNING id',[otherText]);
     await database.db.query('UPDATE story_mentions SET story_id=$2 WHERE revision_id=$1',[liveRevision,duplicate]);
+    model.verdict='different';
     const update=await intake([]);
     const text='Compiler 2 теперь стоит 40 долларов в месяц.';
     const edited=await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
@@ -255,8 +256,10 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[update,edited]);
     await processIntake(update); await publish();
     const attached=(await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[edited])).rows[0]?.story_id;
-    expect(attached).not.toBe(canonical); expect(attached).not.toBe(duplicate);
-    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:canonical}]);
+    expect(attached).toBe(duplicate);
+    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:null}]);
+    expect((await database.db.query("SELECT id FROM judgments WHERE stage='published_update'")).rows).toEqual([]);
+    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
     expect((await database.db.query('SELECT headline FROM stories WHERE id=$1',[canonical])).rows[0]?.headline).not.toBeNull();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2); expect(BotApi.prototype.edit).not.toHaveBeenCalled();
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[update])).rows).toEqual([{status:'completed'}]);

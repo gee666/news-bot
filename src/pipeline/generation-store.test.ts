@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../settings.js';
 import { alreadyGenerated, assessEvidence, GENERATION_VERSION, generationHash, loadEvidence, loadStory,
-  evidenceSnapshotHash, saveEvidence, saveGenerations } from './generation-store.js';
+  evidenceSnapshotHash, saveEvidence, saveGenerations, unpublished } from './generation-store.js';
 import { evidenceDocument, evidenceId, secondId, storyId, storyInput } from './generation.test-helpers.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn() }));
@@ -14,6 +14,9 @@ beforeEach(() => {
 });
 
 describe('generation database boundary', () => {
+  it.each(['stories','s'])('builds the unpublished predicate for %s', alias => {
+    expect(unpublished(alias)).toBe(`NOT EXISTS(SELECT 1 FROM publications p\n  WHERE p.story_id=${alias}.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)`);
+  });
   it('loads only current-revision mentions and links, preserving source access and classifications', async () => {
     const input = storyInput();
     mocks.query.mockResolvedValueOnce({ rows: [input.story] }).mockResolvedValueOnce({ rows: input.mentions })

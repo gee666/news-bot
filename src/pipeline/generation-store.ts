@@ -284,6 +284,10 @@ export async function assessEvidence(storyId: string, evidence: Evidence, role: 
   return { ...evidence, role, relevance, assessment, assessed_at: assessedAt };
 }
 
+/** Alias is a trusted SQL table name, never user input. */
+export const unpublished = (alias: string): string => `NOT EXISTS(SELECT 1 FROM publications p
+  WHERE p.story_id=${alias}.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)`;
+
 export interface PublishedStory { storyId: string; headline: string; summary: string; destinationId: string; messageId: string }
 
 /** Read the actual posted copy, not a possibly stale story draft. */

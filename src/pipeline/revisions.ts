@@ -1,3 +1,4 @@
+import { unpublished } from './generation-store.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { db, transaction } from '../db.js';
@@ -13,7 +14,7 @@ export function meaningfulFingerprint(texts: readonly string[], links: readonly 
 /** Reconcile current evidence, including reactivation of an older saved revision. */
 export async function reconcileStory(client: Pick<PoolClient, 'query'>, storyId: string): Promise<void> {
   const story = await client.query<{ status: string }>(`WITH RECURSIVE ${blockedStoriesCte}
-    SELECT status FROM stories WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=stories.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL) AND id::text NOT IN(SELECT id FROM blocked_stories) FOR UPDATE`, [storyId]);
+    SELECT status FROM stories WHERE id=$1 AND ${unpublished('stories')} AND id::text NOT IN(SELECT id FROM blocked_stories) FOR UPDATE`, [storyId]);
   if (!story.rows.length) return;
   const current = await client.query<{ text: string }>(`SELECT m.text FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
     JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=$1 ORDER BY m.id`, [storyId]);

@@ -8,7 +8,7 @@ import { eventInput, mentionInput, type EventInput, type HistoricalEventRef } fr
 import { GROUPING_VERSION, groupReport } from './grouping-model.js';
 import { mergeStories } from './consolidation-store.js';
 import { historicalEventInput } from './historical-input.js';
-import { publishedStory } from './generation-store.js';
+import { publishedStory, unpublished } from './generation-store.js';
 import { choice, Judgments } from './judgments.js';
 import { ProcessingYield } from './processing-slice.js';
 
@@ -121,12 +121,13 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
           return candidate.input;
         });
         const matches = await groupReport(incoming, inputs, settings, context);
-        // Published matches always get the event-identity and novelty gate.
+        // Reuse a matching draft before considering a separate post.
         const posted = new Map<string, Awaited<ReturnType<typeof publishedStory>>>();
         for (const match of matches) posted.set(match.storyId, await publishedStory(match.storyId));
-        const ordered = [...matches].sort((a,b) => Number(Boolean(posted.get(b.storyId))) - Number(Boolean(posted.get(a.storyId))));
-        let matched = available.find(candidate => candidate.id === ordered[0]?.storyId);
-        const relation = matches.some(match => match.relation === 'update') ? 'update' : 'same';
+        const drafts = matches.filter(match => !posted.get(match.storyId));
+        const selected = drafts.length ? drafts : matches;
+        let matched = available.find(candidate => candidate.id === selected[0]?.storyId);
+        const relation = selected.some(match => match.relation === 'update') ? 'update' : 'same';
         const previous = matched ? posted.get(matched.id) : null;
         if (previous) {
           const judgments = new Judgments(settings);
@@ -140,7 +141,7 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
             verdict === 'duplicate' ? 'same' : 'update',vectors,context,
             verdict === 'followup' ? previous.storyId : undefined,true);
         }
-        for (const match of ordered.slice(1).filter(match => !posted.get(match.storyId))) {
+        for (const match of selected.slice(1)) {
           if (!matched) break;
           const left = matched.input;
           const right = inputs.find(input => input.id===match.storyId);
@@ -192,14 +193,14 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
       storyId = z.uuid().parse(created.rows[0]?.id);
     } else if (relation === 'update') {
       await client.query(`UPDATE stories SET status='processing',content_version=content_version+1,meaningful_hash=$2,
-        chosen_excerpt=$3,headline=NULL,summary=NULL,translated_excerpt=NULL,researched=false,interest_stale=true,updated_at=now() WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=stories.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)`,
+        chosen_excerpt=$3,headline=NULL,summary=NULL,translated_excerpt=NULL,researched=false,interest_stale=true,updated_at=now() WHERE id=$1 AND ${unpublished('stories')}`,
       [storyId, hash([matched?.text, mention.text]), mention.text]);
       // Preserve evidence associations; research freshness checks reassess them for the new input.
     }
     await client.query('UPDATE story_mentions SET story_id=$2,metadata=metadata || $3::jsonb WHERE id=$1',
       [mention.id, storyId, JSON.stringify({ relation, batchId: context.batchId, ...(previousStoryId ? { previous_story_id:previousStoryId } : {}) })]);
     await client.query(`UPDATE stories SET status='processing',interest_stale=true,updated_at=now()
-      WHERE id=$1 AND status='rejected' AND NOT EXISTS(SELECT 1 FROM publications p WHERE p.story_id=stories.id AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL)`, [storyId]);
+      WHERE id=$1 AND status='rejected' AND ${unpublished('stories')}`, [storyId]);
     await client.query(`INSERT INTO consolidation_intake(revision_id,item_id,text_fingerprint,urls)
       SELECT r.id,r.item_id,encode(sha256(convert_to(r.original_text,'UTF8')),'hex'),
         ARRAY(SELECT DISTINCT l.url FROM item_links l WHERE l.revision_id=r.id ORDER BY l.url)
