@@ -238,7 +238,7 @@ describe('bounded evidence research', () => {
     expect(generate).toHaveBeenCalledTimes(2);
   });
 
-  it.each([1, 3])('does not run web research below score 5 (score %s)', async score => {
+  it.each([1, 3])('reads supplied links but does not search below score 5 (score %s)', async score => {
     const input = storyInput(score);
     input.links = [
       { url: 'https://t.me/channel/1', classification: 'relevant' },
@@ -250,16 +250,26 @@ describe('bounded evidence research', () => {
       : modelResult({ evidence_id: evidenceId, role: 'candidate', relevance: 'uncertain', reason: 'Другая версия продукта.' }));
     vi.mocked(searchPages).mockResolvedValue(['https://vendor.org/release-notes']);
     const documents = await researchEvidence(input, { ...defaultSettings, researchMaxPages: 10, researchMaxSearches: 5 }, { generate });
-    expect(fetchPage).not.toHaveBeenCalled(); expect(searchPages).not.toHaveBeenCalled();
-    expect(generate).not.toHaveBeenCalled(); expect(documents).toEqual([]);
+    expect(fetchPage).toHaveBeenCalledTimes(2); expect(searchPages).not.toHaveBeenCalled();
+    expect(documents).toHaveLength(2);
   });
 
-  it('skips all web research when the known origin is an unreadable tweet',async()=>{
-    const input=storyInput(8); const tweet='https://x.com/author/status/123';
-    input.links=[{url:tweet,classification:'relevant'}];
-    const documents=await researchEvidence(input,defaultSettings,{generate},[tweet],[]);
-    expect(documents).toEqual([]); expect(fetchPage).not.toHaveBeenCalled();
-    expect(searchPages).not.toHaveBeenCalled(); expect(generate).not.toHaveBeenCalled();
+  it.each([1, 8])('reads every classified origin even after primary evidence is found (score %s)', async score => {
+    const input=storyInput(score);
+    const origins=['https://author.org/one','https://author.org/two','https://author.org/three'];
+    const documents=await researchEvidence(input,{...defaultSettings,researchMaxPages:2},{generate},origins);
+    expect(vi.mocked(fetchPage).mock.calls.map(call=>call[0])).toEqual(origins.slice(0,2));
+    expect(documents).toHaveLength(2);
+    expect(searchPages).not.toHaveBeenCalled();
+  });
+
+  it('retains unvisited stored documents when classified origins fill the budget', async () => {
+    const stored={...evidenceDocument(),id:storyId,url:'https://cached.org/context',canonical_url:null};
+    vi.mocked(loadEvidence).mockResolvedValue([stored]);
+    const result=await researchEvidence(storyInput(1),{...defaultSettings,researchMaxPages:1},{generate},['https://author.org/new']);
+    expect(result).toHaveLength(2);
+    expect(result[1]).toEqual(stored);
+    expect(fetchPage).toHaveBeenCalledOnce();
   });
 
   it('does no fallback search or model work for a low-score story without links', async () => {

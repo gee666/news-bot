@@ -17,9 +17,10 @@ let updates: typeof import('./updates.js');
 let delivery: typeof import('./delivery.js');
 let digest: typeof import('./digest.js');
 let settings: import('../settings.js').AppSettings;
-const original: PublicationSnapshot = { headline: 'Раньше',details: 'Старые детали',score: 3,detailsKind: 'summary',sources: [] };
 const current: PublicationSnapshot = { headline: 'Событие целиком',details: 'Все новые подробности',score: 8,detailsKind: 'summary',sources: [],
   review: { supported: true, reason: 'Существенных ошибок не найдено' } };
+const original: PublicationSnapshot = { ...current,sources:[{label:'Старый источник',url:'https://old.example/report',
+  primary:false,access:'public',classification:'relevant'}] };
 async function one(sql: string, values: unknown[] = []): Promise<string> {
   const row = (await database.db.query<{ id: string }>(sql,values)).rows[0];
   if (!row) throw new Error('Fixture missing'); return row.id;
@@ -93,7 +94,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     expect((await database.db.query('SELECT original_story_id FROM story_publication_aliases WHERE publication_id=$1',[id])).rows[0]?.original_story_id).toBe(loser);
     expect((await database.db.query('SELECT content FROM publication_snapshots WHERE id=$1',[previous.snapshot_id])).rows[0]?.content).toEqual(original);
     const send = vi.spyOn(BotApi.prototype,'send').mockImplementation(async (_destination,message) => {
-      expect(message.text).toContain(current.details); expect(message.text).not.toContain(original.details); return '9';
+      expect(message.text).toContain(current.details); expect(message.text).not.toContain(original.sources[0]!.url); return '9';
     });
     expect(await delivery.sendPrepared(adopted,new BotApi(),settings)).toBe('9');
     await store.prepareDigest(settings,'-100123');
@@ -151,10 +152,12 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     ]);
     expect(await store.rateLimited()).toBe(true); expect(BotApi.prototype.send).not.toHaveBeenCalled();
   });
-  it.each(['unknown','retryable'] as const)('stages a trimmed summary replacement while preserving an older %s edit\'s delivery safety', async outcome => {
+  it.each(['unknown','retryable'] as const)('stages a source replacement while preserving an older %s edit\'s delivery safety', async outcome => {
     const { id,storyId,desiredId,edit } = await pendingEdit(outcome); const publishedId = (await row(id)).snapshot_id;
-    const summary = '😀'.repeat(3000);
-    await database.db.query('UPDATE stories SET summary=$1 WHERE id=$2',[summary,storyId]);
+    const source = {url:'https://new.example/report',label:'New report',primary:false,access:'public',classification:'relevant'};
+    const evidence=await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
+      VALUES($1,$2,'Read report details','public',now()+interval '1 day') RETURNING id`,[source.url,source.label]);
+    await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at) VALUES($1,$2,'supporting','relevant',now())",[storyId,evidence]);
     await acceptFixtureStories(settings);
     await updates.prepareUpdates(settings,'-100123');
     const next = (await row(id)).pending_snapshot_id;
@@ -165,7 +168,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
         : { status:'failed',error_code:'edit_superseded',next_retry_at:null },
     ]);
     expect((await database.db.query('SELECT content FROM publication_snapshots WHERE id=$1',[next])).rows[0]?.content)
-      .toEqual({ ...current, details: summary });
+      .toEqual({ ...current, sources: [source] });
     edit.mockResolvedValue(undefined);
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(outcome === 'unknown' ? 0 : 1);
     if (outcome === 'unknown') {
@@ -177,31 +180,32 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     } else {
       expect(edit).toHaveBeenCalledTimes(2);
       expect(edit.mock.calls[1]?.[2].plainText.length).toBeLessThanOrEqual(4096);
-      expect(edit.mock.calls[1]?.[2].plainText).toContain('…\n\nЗаметки проверяющего: Существенных ошибок не найдено');
-      expect((await row(id)).content).toEqual({ ...current, details: summary });
+      expect(edit.mock.calls[1]?.[2].plainText).toContain('New report');
+      expect((await row(id)).content).toEqual({ ...current, sources: [source] });
       expect((await row(id)).pending_snapshot_id).toBeNull(); expect((await row(id)).snapshot_id).toBe(next);
     }
     expect((await database.db.query('SELECT content FROM publication_snapshots WHERE id=$1',[desiredId])).rows[0]?.content).toEqual(current);
     expect((await database.db.query("SELECT error_code FROM request_attempts WHERE operation='prepare_edit'")).rows).toEqual([]);
   });
-  it('cancels a superseded summary before maintenance retry even without a new preparation tick', async () => {
+  it('keeps a source-only unknown edit when an unrelated draft summary changes', async () => {
     const { id,storyId,edit } = await pendingEdit();
     await database.db.query('UPDATE stories SET summary=$1 WHERE id=$2',['😀'.repeat(3000),storyId]);
     edit.mockResolvedValue(undefined); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
-    expect((await row(id)).pending_snapshot_id).toBeNull(); expect(edit).toHaveBeenCalledOnce();
+    expect((await row(id)).pending_snapshot_id).not.toBeNull(); expect(edit).toHaveBeenCalledOnce();
   });
-  it('invalidates an edit on entity-limit preflight failure even with unchanged headline/details/score', async () => {
+  it('bounds a source edit to 90 links with unchanged headline/details/score', async () => {
     const { id,storyId,edit } = await pendingEdit();
     await database.db.query(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
       SELECT 'https://publisher.org/'||n,'Источник '||n,'Actual read relevant source text','public',now()+interval '1 day' FROM generate_series(1,99) n`);
     await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at)
       SELECT $1,id,'supporting','relevant',now() FROM evidence_documents WHERE url<>'https://fixture.example/announcement'`,[storyId]);
     await acceptFixtureStories(settings);
-    await updates.prepareUpdates(settings,'-100123'); expect((await row(id)).pending_snapshot_id).toBeNull();
+    await updates.prepareUpdates(settings,'-100123');
+    const desired=(await database.db.query<{content:PublicationSnapshot}>(`${store.publicationEditSelect} WHERE p.id=$1`,[id])).rows[0]?.content;
+    expect(desired?.sources).toHaveLength(90);
+    expect(desired?.details).toBe(original.details);
     edit.mockResolvedValue(undefined); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0); expect(edit).toHaveBeenCalledOnce();
-    expect((await database.db.query("SELECT error_code FROM request_attempts WHERE operation='prepare_edit'")).rows).toEqual([
-      { error_code: 'publication_entity_limit' },
-    ]);
+    expect((await database.db.query("SELECT error_code FROM request_attempts WHERE operation='prepare_edit'")).rows).toEqual([]);
   });
   it.each([true,false])('invalidates a pending edit on a rejected live story, with preparation=%s', async prepare => {
     const { id,storyId,edit } = await pendingEdit(); await database.db.query("UPDATE stories SET status='rejected' WHERE id=$1",[storyId]);

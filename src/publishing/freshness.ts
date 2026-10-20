@@ -4,7 +4,7 @@ import { settingsSchema, type AppSettings } from '../settings.js';
 import { publicationSnapshotSchema } from '../types.js';
 import { blockedStoriesCte } from '../pipeline/item-failures.js';
 import { generationIsCurrent } from '../pipeline/generation-freshness.js';
-import { eligible, snapshotFor } from './content.js';
+import { eligible, snapshotFor, snapshotSources } from './content.js';
 import { loadAction, snapshotHash, type DeliveryAuthorization } from './approval.js';
 import { rateLimited,unsafeSendAttempt,type Publication } from './store.js';
 import { lockAdmissionInputs } from './admission-locks.js';
@@ -69,12 +69,24 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
     }
     if (!saved.publishingEnabled && !explicit) return deny('publishing_paused');
     if (!row.canonical_story_id || row.desired_story_id !== row.canonical_story_id) return deny('retained_provenance_unknown');
-    if (!row.eligible) return deny('story_ineligible');
     const quarantined=await client.query(`WITH RECURSIVE ${blockedStoriesCte} SELECT 1 WHERE $1::text IN(SELECT id FROM blocked_stories)
       OR EXISTS(SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
         JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=$1::uuid
         AND r.metadata ? 'pipelineFailure' AND r.metadata->'pipelineFailure' IS DISTINCT FROM 'false'::jsonb)`,[row.canonical_story_id]);
     if(quarantined.rows.length) return deny('story_ineligible');
+    if (z.object({status:z.enum(['failed','rejected'])}).safeParse(row.story).success) return deny('story_ineligible');
+    if (operation === 'edit') {
+      const sent = publicationSnapshotSchema.parse((await client.query<{ content: unknown }>(
+        'SELECT content FROM publication_snapshots WHERE id=$1', [row.snapshot_id])).rows[0]?.content);
+      const desired = publicationSnapshotSchema.parse(row.content);
+      if (snapshotHash({ ...sent, sources: [] }) === snapshotHash({ ...desired, sources: [] })) {
+        const story = storySchema.parse(row.story);
+        const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
+          summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, row.destination_id);
+        return snapshotHash({ ...sent, sources }) === snapshotHash(desired) ? { allowed: true } : deny('snapshot_changed');
+      }
+    }
+    if (!row.eligible) return deny('story_ineligible');
     const story = storySchema.parse(row.story);
     if (!await generationIsCurrent(story.id,saved,client.query.bind(client),approvedReceiptId)) return deny('current_generation_missing');
     const currentSnapshot = await snapshotFor(client,story,approvedReceiptId);

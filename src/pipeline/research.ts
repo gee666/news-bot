@@ -95,20 +95,21 @@ export async function reassessEvidence(input: StoryInput, evidence: Evidence, ge
 }
 
 export async function researchEvidence(input: StoryInput, settings: AppSettings, generator: TextGenerator,
-  primaryOrigins?:readonly string[],cached?:Evidence[]): Promise<Evidence[]> {
+  primaryOrigins?: readonly string[]): Promise<Evidence[]> {
   const operationId = `research:${input.story.id}`;
   // The guard runs before using a private excerpt as a search query or model input.
   await requireInferenceApproval([...input.mentions.map(mention => mention.access),
     ...input.links.flatMap(link => link.access ? [link.access] : []),
     ...(input.supplementary_reports ?? []).map(report => report.access)], operationId);
   const inputHash = `${generationHash(input, settings)}:${readSourceVersion}`;
-  const hasOrigin=Boolean(primaryOrigins?.length);
-  const belowThreshold=(input.story.interest_score ?? 0)<Math.max(5,settings.researchThreshold);
-  const stored = hasOrigin || belowThreshold ? cached ?? await loadEvidence(input.story.id,inputHash) : await loadEvidence(input.story.id,inputHash);
+  const stored = (await loadEvidence(input.story.id,inputHash)).map(doc=>legacyTelegramPrimary(doc) ? {...doc,role:'supporting' as const} : doc);
   await requireInferenceApproval(stored.filter(doc => doc.content && doc.access !== 'unavailable').map(doc => doc.access), operationId);
-  if(hasOrigin || belowThreshold) return stored.map(doc=>legacyTelegramPrimary(doc) ? {...doc,role:'supporting'} : doc);
-  if(stored.some(doc=>doc.role==='primary' && doc.relevance==='relevant' && doc.content?.trim() && doc.access==='public'
-    && !legacyTelegramPrimary(doc) && !readFailure(doc.title,doc.content,doc.canonical_url ?? doc.url))) return stored;
+  // Classified origins are always read: provenance alone cannot supply their content to the writer.
+  const origins = [...new Set(primaryOrigins ?? [])];
+  const attempted = (url: string) => stored.some(doc => [doc.url, doc.canonical_url]
+    .some(known => known && normalizedResearchUrl(known) === normalizedResearchUrl(url)));
+  if (origins.every(attempted) && stored.some(doc=>doc.role==='primary' && doc.relevance==='relevant' && doc.content?.trim() && doc.access==='public'
+    && !readFailure(doc.title,doc.content,doc.canonical_url ?? doc.url))) return stored;
   const byUrl = new Map<string, Evidence>();
   for (const doc of stored) {
     for (const url of [doc.url, doc.canonical_url].filter(value => value !== null)) {
@@ -132,9 +133,9 @@ export async function researchEvidence(input: StoryInput, settings: AppSettings,
   const pageLimit = (originalCandidate = false) => discovery || originalCandidate ? maxPages : suppliedPages;
   const budgetAvailable = (originalCandidate = false) => !documents.some(doc=>doc.role==='primary' && doc.relevance==='relevant') && pages < pageLimit(originalCandidate);
 
-  async function visit(url: string, originalCandidate = false): Promise<void> {
+  async function visit(url: string, originalCandidate = false, origin = false): Promise<void> {
     const key = normalizedResearchUrl(url);
-    if (seen.has(key) || !budgetAvailable(originalCandidate)) return;
+    if (seen.has(key) || (origin ? pages >= settings.researchMaxPages : !budgetAvailable(originalCandidate))) return;
     seen.add(key);
     pages++;
     let evidence = byUrl.get(key);
@@ -189,6 +190,7 @@ export async function researchEvidence(input: StoryInput, settings: AppSettings,
       && normalizedResearchUrl(link.original_url) === normalizedResearchUrl(root)).map(link => link.url), root,
   ]);
   const supplied = [...rootCandidates, ...links.map(link => link.url)];
+  for (const url of origins) await visit(url, true, true);
   for (const url of supplied) await visitWithFollowups(url);
   if (deep) for (const document of stored) await visitWithFollowups(document.url);
   discovery = true;
@@ -212,6 +214,6 @@ export async function researchEvidence(input: StoryInput, settings: AppSettings,
   }
   // Release the reservation when search leaves unused budget, keeping the same candidate priority.
   for (const url of supplied) await visitWithFollowups(url);
-  return documents;
+  return [...documents, ...stored.filter(doc => !documents.some(visited => visited.id === doc.id))];
 }
 

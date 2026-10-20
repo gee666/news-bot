@@ -291,7 +291,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
     const generate = vi.mocked(researchStory).getMockImplementation(); if (!generate) throw new Error('Missing generator fixture');
     const previous = process.env.PROCESSING_SLICE_MS; process.env.PROCESSING_SLICE_MS = '1000';
     let clock = 0; const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
-    vi.mocked(researchStory).mockImplementation(async (...args) => { await generate(...args); clock = 1001; });
+    vi.mocked(researchStory).mockImplementation(async (...args) => { const result = await generate(...args); clock = 1001; return result; });
     const judgments = new Judgments(settings);
     try {
       await expect(withProcessingSlice(() => refreshDigest(settings, judgments, ids))).rejects.toBeInstanceOf(ProcessingYield);

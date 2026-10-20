@@ -1,5 +1,4 @@
 import { evidenceLinkSql } from '../sources/link-policy.js';
-import type { PoolClient } from 'pg';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
@@ -14,7 +13,7 @@ const storySchema = z.object({
   headline: z.string().nullable(), summary: z.string().nullable(), researched: z.boolean(),
   translated_excerpt: z.string().nullable(), content_version: z.number().int(), meaningful_hash: z.string().nullable(),
 });
-export const GENERATION_VERSION = 'generation-v10';
+export const GENERATION_VERSION = 'generation-v11';
 const timestampSchema = z.union([z.date().transform(value => value.toISOString()), z.iso.datetime({ offset: true })]);
 const mentionSchema = z.object({ id: z.uuid(), text: z.string(), access: accessSchema, original_url: z.string().nullable(),
   source_name: z.string().optional(), connector_type: z.string().optional(),
@@ -158,6 +157,8 @@ export interface GeneratedStory {
   review?: GenerationReview;
   sourceUrls?: string[];
   primarySourceUrls?: string[];
+  /** Follow-ups only: combined summary of the thread's earlier posts. */
+  earlierSummary?: string;
 }
 
 export async function saveGenerations(inputs: StoryInput[], values: GeneratedStory[], settings: AppSettings): Promise<void> {
@@ -300,12 +301,4 @@ export async function publishedStory(storyId: string, query = db.query.bind(db),
   if (!row) return null;
   const snapshot = publicationSnapshotSchema.parse(row.content);
   return { storyId,headline:snapshot.headline,summary:snapshot.details,destinationId:row.destination_id,messageId:row.message_id };
-}
-
-/** The seed mention owns the follow-up link in existing JSON metadata. */
-export async function previousStory(storyId: string, client: Pick<PoolClient, 'query'> = db, destinationId?: string): Promise<PublishedStory | null> {
-  const result = await client.query<{ previous_story_id: string }>(`SELECT metadata->>'previous_story_id' AS previous_story_id
-    FROM story_mentions WHERE story_id=$1 AND metadata ? 'previous_story_id' ORDER BY created_at,id LIMIT 1`, [storyId]);
-  const id = result.rows[0]?.previous_story_id;
-  return id ? publishedStory(id,client.query.bind(client),destinationId) : null;
 }

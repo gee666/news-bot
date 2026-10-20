@@ -164,7 +164,7 @@ describe('automatic recovery fairness', () => {
     expect(mocks.leases.size).toBe(0);
   });
 
-  it('bounds a healthy source-link backlog while refresh, publication and collection keep taking turns', async () => {
+  it('defers new publication during partial recovery, then publishes when the source-link sweep finishes', async () => {
     vi.stubEnv('PROCESSING_SLICE_MS', '1000'); mocks.alwaysDue = true;
     vi.mocked(associateSourceLinks).mockImplementation(async () => {
       for (let index = 0; index < 50; index++) { checkProcessingSlice(); await delay(500); }
@@ -174,10 +174,27 @@ describe('automatic recovery fairness', () => {
     await vi.advanceTimersByTimeAsync(31_001);
     expect(mocks.process.mock.calls.length).toBeGreaterThanOrEqual(3);
     expect(mocks.refresh).toHaveBeenCalledTimes(2);
-    expect(mocks.publish).toHaveBeenCalledTimes(2);
-    expect(mocks.operations.get('pipeline_digest')).toMatchObject({ phase: 'waiting', attempt: 0, next: expect.any(String) });
+    expect(mocks.publish).not.toHaveBeenCalled();
+    mocks.alwaysDue = false;
+    vi.mocked(associateSourceLinks).mockResolvedValue(undefined);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(mocks.publish).toHaveBeenCalledOnce();
+    expect(mocks.operations.get('pipeline_digest')).toMatchObject({ phase: 'completed', attempt: 0 });
     expect(mocks.diagnostic).not.toHaveBeenCalled();
     expect(mocks.leases.size).toBe(0);
+  });
+
+  it('selects ready stories on a scheduled cron tick even when the sweep checkpoints', async () => {
+    await start();
+    vi.mocked(associateSourceLinks).mockImplementationOnce(async () => {
+      const { ProcessingYield } = await import('./processing-slice.js');
+      throw new ProcessingYield();
+    });
+    const callback=mocks.scheduled.get(defaultSettings.digestCron);
+    if (!callback) throw new Error('Missing digest callback');
+    await callback({date:new Date()});
+    expect(mocks.publish).toHaveBeenCalledOnce();
+    expect(mocks.operations.get('pipeline_digest')).toMatchObject({phase:'waiting',attempt:0});
   });
 
   it('coalesces ticks during slow collection, then runs the waiting digest', async () => {
@@ -269,11 +286,11 @@ describe('automatic recovery fairness', () => {
     mocks.leases.add('news-bot-pipeline');
     await start();
     expect(mocks.operations.get('pipeline_digest')).toMatchObject({ phase: 'waiting', code: 'lease_busy', attempt: 0 });
-    expect(mocks.publish).toHaveBeenCalledOnce();
+    expect(mocks.publish).not.toHaveBeenCalled();
     mocks.leases.delete('news-bot-pipeline');
     await vi.advanceTimersByTimeAsync(15_000);
     expect(mocks.turns).toEqual(['collection', 'digest']);
-    expect(mocks.publish).toHaveBeenCalledTimes(2);
+    expect(mocks.publish).toHaveBeenCalledOnce();
   });
 
   it('waits for active collection at shutdown without starting the next recovery leg', async () => {

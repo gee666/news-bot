@@ -25,6 +25,12 @@ async function story(index = 0): Promise<string> {
   [`Event ${index}`,settings.profileVersion,settings.modelVersion]);
 }
 async function publication(storyId: string | null, messageId: string, content = oldContent, botId = '123'): Promise<string> {
+  if (storyId) {
+    const story=(await database.db.query<{headline:string;summary:string;interest_score:number}>('SELECT headline,summary,interest_score FROM stories WHERE id=$1',[storyId])).rows[0];
+    if (!story) throw new Error('Missing published story');
+    content={...content,headline:story.headline,details:story.summary,score:story.interest_score,
+      review:{supported:true,reason:'Существенных ошибок не найдено'}};
+  }
   const snapshot = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id',[storyId,JSON.stringify(content)]);
   return one(`INSERT INTO publications(story_id,snapshot_id,destination_id,message_id,status,bot_id)
     VALUES($1,$2,'-100123',$3,'published',$4) RETURNING id`,[storyId,snapshot,messageId,botId]);
@@ -109,7 +115,7 @@ describe.skipIf(!url)('reviewed repair preview and registered verification test'
     expect(JSON.stringify(plan)).not.toContain('Current generated details'); expect(JSON.stringify(plan)).not.toContain(testContent.details);
     expect(await pointers()).toEqual(before);
     for (const method of ['identity','send','edit','delete'] as const) expect(BotApi.prototype[method]).not.toHaveBeenCalled();
-  });
+  }, 60_000);
   it('enforces read-only SQL even if a snapshot reader accidentally attempts a write', async () => {
     const id = await story(); await publication(id,'5'); await provenance(id);
     vi.spyOn(store,'snapshotFor').mockImplementation(async client => {

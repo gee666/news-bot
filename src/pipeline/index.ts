@@ -59,7 +59,7 @@ export async function createPipeline(): Promise<Pipeline> {
         attempt => reembedPending(settings, attempt));
     });
   };
-  const digest = async (manual = false) => {
+  const digest = async (manual = false, scheduled = false) => {
     await withLease('news-bot-digest-refresh', async () => {
       const settings = await getSettings();
 
@@ -83,9 +83,8 @@ export async function createPipeline(): Promise<Pipeline> {
             await associateSourceLinks(settings);
             return report;
           });
-          // Ready-event selection and final delivery already check each story's exact freshness.
-          // Unrelated retained history must not hold publication or the processor lease.
-          await publishDigest(settings);
+          // Scheduled ticks can send ready stories; recovery waits for a complete sweep.
+          if (scheduled || !partial) await publishDigest(settings);
           if (partial) throw new OperationalDeferred('Partial digest sweep. Saved work will resume after the checkpoint.');
           return report;
         } finally { await judgments.close(); }
@@ -122,7 +121,7 @@ export async function createPipeline(): Promise<Pipeline> {
         const options = { timezone: settings.timezone, noOverlap: true };
         tasks = [
           cron.schedule(settings.collectionCron, context => launch(() => collection(false, true, context.date)), options),
-          cron.schedule(settings.digestCron, () => launch(digest), options),
+          cron.schedule(settings.digestCron, () => launch(() => digest(false, true)), options),
           cron.schedule(settings.cleanupCron, () => launch(runCleanup), options),
         ];
         scheduleKey = key;

@@ -19,8 +19,8 @@ const legacyRow = (role: 'primary' | 'supporting' | 'candidate') => ({
 });
 const oldHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-it('preserves the research hash after removing the separate headline API', () => {
-  expect(generationHash(storyInput(), defaultSettings)).toBe('ffd5d162cd0c76c857c4b7b49587e267258896ab6845cbd673524f2733ce0981');
+it('pins the research hash for the thread-aware generation policy', () => {
+  expect(generationHash(storyInput(), defaultSettings)).toBe('799ab22a64431130f04ada990dd14cbb5ee720d38af575ced23dd36081a11382');
 });
 
 it.each([
@@ -110,7 +110,7 @@ it('invalidates legacy generation receipts for the calibrated policy without cha
   }));
   expect(await alreadyGenerated(input, defaultSettings)).toBe(false);
   expect(mocks.query).toHaveBeenCalledOnce();
-  expect(mocks.query.mock.calls[0]?.[0]).toContain("prompt_version = 'generation-v10'");
+  expect(mocks.query.mock.calls[0]?.[0]).toContain("prompt_version = 'generation-v11'");
   expect(mocks.query.mock.calls[0]?.[1]?.[2]).toBe(current);
   mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT result FROM judgments') ? [receipt] : [] }));
   expect(await alreadyGenerated(input, defaultSettings)).toBe(true);

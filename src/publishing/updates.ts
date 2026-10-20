@@ -1,13 +1,13 @@
 import type { PoolClient } from 'pg';
-import { generationIsCurrent } from '../pipeline/generation-freshness.js';
 import { ZodError } from 'zod';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js';
+import { snapshotSources } from './content.js';
 import { BotApi } from './bot-api.js';
 import { editPublication } from './delivery.js';
 import { PublicationRenderError, render } from './render.js';
-import { eligible, locked, publicationEditSelect, rateLimited, snapshotFor, supersedeAttempts, type Publication, type StoryContent } from './store.js';
+import { eligible, locked, publicationEditSelect, rateLimited, supersedeAttempts, type Publication, type StoryContent } from './store.js';
 
 /** One tracked survivor per canonical event and destination. Alias audit survives story pruning. */
 export const canonicalPublications = `SELECT DISTINCT ON (s.id) p.id,s.id AS canonical_story_id
@@ -34,14 +34,16 @@ async function invalidateStaleEdits(client: PoolClient, settings: AppSettings, d
     LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id
     JOIN stories s ON s.id=coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id)
     JOIN publication_snapshots desired ON desired.id=coalesce(p.pending_snapshot_id,p.snapshot_id)
+    JOIN publication_snapshots sent ON sent.id=p.snapshot_id
     WHERE p.destination_id=$1 AND p.status='published' AND ($5::uuid IS NULL OR p.id=$5)
       AND ($6::uuid[] IS NULL OR s.id=ANY($6))
       AND (p.pending_snapshot_id IS NOT NULL OR EXISTS(SELECT 1 FROM request_attempts a
         WHERE a.publication_id=p.id AND a.operation='edit' AND a.status IN ('running','unknown','retryable')))
+      AND (s.status IN ('failed','rejected') OR (((desired.content-'sources') IS DISTINCT FROM (sent.content-'sources'))
       AND ((${eligible}) IS NOT TRUE OR desired.content->>'headline' IS DISTINCT FROM s.headline
         OR desired.content->>'details' IS DISTINCT FROM CASE WHEN s.researched THEN s.summary ELSE s.translated_excerpt END
         OR desired.content->>'score' IS DISTINCT FROM s.interest_score::text
-        OR desired.content->>'detailsKind' IS DISTINCT FROM CASE WHEN s.researched THEN 'summary' ELSE 'excerpt' END)
+        OR desired.content->>'detailsKind' IS DISTINCT FROM CASE WHEN s.researched THEN 'summary' ELSE 'excerpt' END)))
     FOR UPDATE OF p,s`, [destinationId,settings.minimumPublicationScore,settings.profileVersion,settings.modelVersion,publicationId ?? null,storyIds ?? null]);
   // Retention keeps historical outcomes; final admission blocks retries without current provenance.
   await cancelEdits(client,invalid.rows.map(row => row.id));
@@ -69,15 +71,17 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
       FROM (${canonicalPublications}) chosen JOIN stories s ON s.id=chosen.canonical_story_id
       JOIN publications p ON p.id=chosen.id JOIN publication_snapshots snap ON snap.id=p.snapshot_id
       LEFT JOIN publication_snapshots desired ON desired.id=p.pending_snapshot_id
-      WHERE ${eligible} AND ($5::uuid[] IS NULL OR s.id=ANY($5)) FOR UPDATE OF p,s`,
-    [destinationId,settings.minimumPublicationScore,settings.profileVersion,settings.modelVersion,storyIds ?? null]);
+      WHERE s.status='completed' AND ($2::uuid[] IS NULL OR s.id=ANY($2)) FOR UPDATE OF p,s`,
+    [destinationId,storyIds ?? null]);
     for (const story of rows.rows) {
-      if (!await generationIsCurrent(story.id, settings, client.query.bind(client))) {
-        await cancelEdits(client,[story.publication_id]);
-        continue;
-      }
       let content: PublicationSnapshot;
-      try { content = await snapshotFor(client,story); render(content); }
+      try {
+        const sent = publicationSnapshotSchema.parse(story.old_content);
+        const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
+          summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, destinationId);
+        content = publicationSnapshotSchema.parse({ ...sent, sources });
+        render(content);
+      }
       catch (error) {
         if (!(error instanceof PublicationRenderError || error instanceof ZodError)) throw error;
         await cancelEdits(client,[story.publication_id]);
@@ -129,4 +133,12 @@ export async function retryEdits(api: BotApi, settings: AppSettings, destination
     });
   }
   return edited;
+}
+
+/** Stage source-only edits wherever these stories have already been published. */
+export async function refreshPublishedSources(settings: AppSettings, storyIds: string[]): Promise<void> {
+  if (!storyIds.length) return;
+  const destinations = await db.query<{ destination_id: string }>(`SELECT DISTINCT destination_id FROM publications
+    WHERE story_id=ANY($1::uuid[]) AND status='published' AND message_id IS NOT NULL AND published_at IS NOT NULL`, [storyIds]);
+  for (const { destination_id } of destinations.rows) await prepareUpdates(settings, destination_id, storyIds);
 }

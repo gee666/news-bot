@@ -26,9 +26,10 @@ async function story(label: string) {
     FROM stories WHERE id=$1`, [id, jevTemplates.news_eligibility.version, settings.profileVersion, settings.modelVersion]);
   return id;
 }
-async function published(storyId: string, headline = 'Old headline') {
+async function published(storyId: string) {
+  const headline=(await database.db.query<{headline:string}>('SELECT headline FROM stories WHERE id=$1',[storyId])).rows[0]?.headline;
   const snapshot = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id',
-    [storyId, JSON.stringify({ headline, details: 'Full details', score: 8, detailsKind: 'summary', sources: [] })]);
+    [storyId, JSON.stringify({ headline, details: 'Full details', score: 8, detailsKind: 'summary', sources: [{label:'Old source',url:'https://old.example/report',primary:false,access:'public',classification:'relevant'}] })]);
   return one(`INSERT INTO publications(story_id,snapshot_id,destination_id,message_id,status,bot_id)
     VALUES($1,$2,$3,$4,'published','123') RETURNING id`, [storyId, snapshot, destination, String(messageSequence++)]);
 }
@@ -90,7 +91,9 @@ describe.skipIf(!url)('scoped manual publication with PostgreSQL', () => {
     const selection = (await database.db.query('SELECT value FROM operational_state WHERE key=$1', [`run_now_publications:${runId}`])).rows[0]?.value;
     expect(selection.editTargets).toHaveLength(1);
     // A later normal edit of the new post must not become a manual existing-post update.
-    await database.db.query("UPDATE stories SET headline='Later normal correction' WHERE id=$1", [next]);
+    const evidence=await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
+      VALUES('https://new.example/report','New source','New report details','public',now()+interval '1 day') RETURNING id`);
+    await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at) VALUES($1,$2,'supporting','relevant',now())",[next,evidence]);
     await acceptFixtureStories(settings);
     const updates = await import('./updates.js'); await updates.prepareUpdates(settings, destination, [next]);
     await updates.retryEdits(new BotApi(), settings, destination, [next]);

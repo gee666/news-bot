@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PublicationSnapshot } from '../types.js';
-import { escapeHtml, MESSAGE_LIMIT, publicationDetailsBudget, render, SOURCE_LIMIT } from './render.js';
+import { escapeHtml, MESSAGE_LIMIT, render, SOURCE_LIMIT } from './render.js';
 import { mergeSources } from './store.js';
 const snapshot: PublicationSnapshot = {
   headline: 'Компания <AI> выпустила "модель" & SDK', score: 8, details: 'Подробности <b>не разметка</b>',
@@ -24,10 +24,31 @@ describe('full publication rendering', () => {
   it('shows the previous-publication category last, with the channel link', () => {
     const message=render({...snapshot,sources:[{label:'Старая новость',url:'https://t.me/c/4376672811/644',
       primary:false,previousPublication:true,access:'public',classification:'relevant'},...snapshot.sources]});
-    expect(message.text).toContain('<b>Предыдущая публикация</b>');
+    expect(message.text).toContain('<b>Предыдущие публикации</b>');
     expect(message.links.at(-1)?.url).toBe('https://t.me/c/4376672811/644');
-    expect(message.plainText.indexOf('Предыдущая публикация')).toBeGreaterThan(message.plainText.indexOf('Вторичные источники'));
-    expect(render(snapshot).text).not.toContain('Предыдущая публикация');
+    expect(message.plainText.indexOf('Предыдущие публикации')).toBeGreaterThan(message.plainText.indexOf('Вторичные источники'));
+    expect(render(snapshot).text).not.toContain('Предыдущие публикации');
+  });
+  it('renders new information and earlier history, with escaped text and correct link offsets', () => {
+    const message=render({...snapshot,earlier:'Было <известно> [1]'});
+    expect(message.text).toContain('<b>Новое</b>\n'+escapeHtml(snapshot.details));
+    expect(message.text).toContain('<b>Ранее было опубликовано</b>\nБыло &lt;известно&gt;');
+    const link=message.links[0]!;
+    expect(message.plainText.slice(link.offset,link.offset+link.length)).toContain('Канал <1>');
+  });
+  it('trims earlier history before new information and preserves source links', () => {
+    const content={...snapshot,details:'Новые сведения. '.repeat(100),earlier:'Старые сведения. '.repeat(1000)};
+    const message=render(content);
+    expect(message.plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
+    expect(message.text).toContain(content.details);
+    expect(message.text).not.toContain(content.earlier);
+    expect(message.links).toHaveLength(1);
+    expect(render({...content,details:'😀'.repeat(5000)}).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
+  });
+  it('counts both follow-up headings against the Telegram entity limit', () => {
+    const sources=Array.from({length:97},()=>snapshot.sources[0]!);
+    expect(()=>render({...snapshot,sources})).not.toThrow();
+    expect(()=>render({...snapshot,sources,earlier:'Прежние сведения'})).toThrow('publication_entity_limit');
   });
   it('renders a clean review with no remark block', () => {
     const message=render({...snapshot,review:{supported:true,reason:''}});
@@ -54,7 +75,6 @@ describe('full publication rendering', () => {
   it('includes each group heading in the entity budget', () => {
     const external = { ...snapshot.sources[0]!,url: 'https://example.org',access: 'public' as const };
     const sources = [snapshot.sources[0]!,{ ...external,primary: true },...Array.from({ length: 96 }, () => external)];
-    expect(publicationDetailsBudget({ ...snapshot,sources })).toBe(0);
     expect(() => render({ ...snapshot,sources })).toThrow('publication_entity_limit');
   });
   it('strips only trailing numeric citation markers and keeps source links and offsets intact', () => {
@@ -106,7 +126,7 @@ describe('full publication rendering', () => {
     expect(message.text).not.toContain(escapeHtml(sources[0]!.label));
   });
   it('trims oversized details but still rejects too many Telegram entities', () => {
-    const budget = publicationDetailsBudget(snapshot);
+    const budget = MESSAGE_LIMIT - render({ ...snapshot, details: '' }).plainText.length - 2;
     expect(render({ ...snapshot, details: 'x'.repeat(budget) }).plainText.length).toBe(MESSAGE_LIMIT);
     expect(render({ ...snapshot, details: 'x'.repeat(budget+1) }).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
     expect(render({ ...snapshot, details: '😀'.repeat(Math.floor(budget/2)+1) }).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
@@ -120,7 +140,7 @@ describe('full publication rendering', () => {
     const link = message.links[0]!;
     expect(message.plainText.slice(link.offset, link.offset + link.length)).toBe('Канал <1> · №23 · доступ ограничен');
     const content = { ...snapshot, review: { supported, reason: 'Замечание '.repeat(50) } };
-    const budget = publicationDetailsBudget(content);
+    const budget = MESSAGE_LIMIT - render({ ...content, details: '' }).plainText.length - 2;
     expect(render({ ...content, details: 'x'.repeat(budget) }).plainText.length).toBe(MESSAGE_LIMIT);
   });
   it('omits reviewer notes when no review is present', () => {

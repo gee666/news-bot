@@ -146,12 +146,16 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
     expect(await delivery.sendPrepared(f.pub, new BotApi(), settings)).toBe('9');
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
   });
-  it('sends a current summary once, then edits the existing message once without an ID/date allowlist',async () => {
+  it('keeps sent text immutable when a later draft summary changes, but still edits sources',async () => {
     const f = await fixture(); expect(await delivery.sendPrepared(f.pub,new BotApi(),settings)).toBe('9');
     expect(await delivery.sendPrepared(await publication(f.id),new BotApi(),settings)).toBeNull();
     await database.db.query("UPDATE stories SET summary='Acme также выпустила документацию.' WHERE id=$1",[f.storyId]);
     await acceptFixtureStories(settings);
     const updates = await import('./updates.js'); await updates.prepareUpdates(settings,'-100123');
+    expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
+    expect((await publication(f.id)).content).toMatchObject({details:'Acme открыла код модели.'});
+    await database.db.query("UPDATE evidence_documents SET title='New source label' WHERE id=$1",[f.evidence]);
+    await updates.prepareUpdates(settings,'-100123');
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(1);
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();

@@ -78,10 +78,13 @@ describe.skipIf(!url)('chronological new publications with PostgreSQL', () => {
       expect(sent[index]).toContain(title);
     }
   });
-  it('edits already published corrections without another new post or duplicate snapshot ownership', async () => {
+  it('edits sources of already published stories without another new post or duplicate snapshot ownership', async () => {
     const original = (await database.db.query<{ id: string; snapshot_id: string }>("SELECT id,snapshot_id FROM publications WHERE story_id='00000000-0000-4000-8000-000000000004'")).rows[0];
     if (!original) throw new Error('Missing publication');
     await database.db.query("UPDATE stories SET headline='Первая новость с уточнением',summary='Уточненные факты' WHERE id='00000000-0000-4000-8000-000000000004'");
+    const evidence=await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
+      VALUES('https://new.example/report','New report','Read report details','public',now()+interval '1 day') RETURNING id`);
+    await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at) VALUES('00000000-0000-4000-8000-000000000004',$1,'supporting','relevant',now())",[evidence]);
     await acceptFixtureStories(settings);
     // Existing-post corrections are prepared by accepted ready events, not a history sweep.
     await (await import('./updates.js')).prepareUpdates(settings, '-100123', ['00000000-0000-4000-8000-000000000004']);

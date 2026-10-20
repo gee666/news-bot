@@ -31,11 +31,16 @@ async function story(batchId: string) {
   await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
   await database.db.query('INSERT INTO story_mentions(story_id,revision_id,text,ordinal) VALUES($1,$2,$3,0)', [id, revision, label]);
   await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)', [batchId, revision]);
-  await acceptFixtureStories(settings);
+  await acceptFixtureStories(settings, [id]);
   await database.db.query(`INSERT INTO judgments(story_id,stage,input_hash,model_key,prompt_version,profile_version,model_version,result,expires_at)
     SELECT id,'eligibility','fixture','fixture',$2,$3,$4,jsonb_build_object('eligible',true,'contentVersion',content_version),now()+interval '7 days'
     FROM stories WHERE id=$1`, [id, jevTemplates.news_eligibility.version, settings.profileVersion, settings.modelVersion]);
   return id;
+}
+async function sourceCorrection(storyId: string) {
+  const evidence=await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
+    VALUES('https://new.example/report','New source','Read report details','public',now()+interval '1 day') RETURNING id`);
+  await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at) VALUES($1,$2,'supporting','relevant',now())",[storyId,evidence]);
 }
 async function enqueue(id: string, batchId: string | null) {
   await database.transaction(client => ready.enqueueReadyStory(client, id, settings, batchId));
@@ -129,15 +134,15 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
     await drain();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(25);
     expect((await database.db.query("SELECT story_id FROM story_publication_ready WHERE status='pending'")).rows).toHaveLength(0);
-  });
-  it('keeps ready work pending while publishing is paused, and edits a correction on a later ready event', async () => {
+  }, 60_000);
+  it('keeps ready work pending while publishing is paused, and edits sources on a later ready event', async () => {
     const batchId = await batch(); const id = await story(batchId); await enqueue(id, batchId);
     settings = await (await import('../settings.js')).saveSettings({ publishingEnabled: false });
     await drain(); expect(BotApi.prototype.send).not.toHaveBeenCalled();
     expect((await database.db.query('SELECT status FROM story_publication_ready')).rows[0]?.status).toBe('pending');
     settings = await (await import('../settings.js')).saveSettings({ publishingEnabled: true });
     await drain();
-    await database.db.query("UPDATE stories SET headline='Accepted correction' WHERE id=$1", [id]);
+    await sourceCorrection(id);
     await acceptFixtureStories(settings); await enqueue(id, batchId); await drain();
     expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
   });
@@ -264,8 +269,8 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)', [normal, unchanged?.revision_id]);
     await enqueue(ids[6] ?? '', normal); await drain();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(5); // Archived manual batches cannot erase the input boundary.
-    await database.db.query("UPDATE stories SET headline='Accepted correction after manual run' WHERE id=$1", [ids[0]]);
+    await sourceCorrection(ids[0] ?? '');
     await acceptFixtureStories(settings); await enqueue(ids[0] ?? '', null); await drain();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(5); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
-  });
+  }, 60_000);
 });

@@ -6,7 +6,7 @@ import type { AppSettings } from '../settings.js';
 import { BotApi } from '../publishing/bot-api.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 
-const model = vi.hoisted(() => ({ groupingCalls: 0, extractionCalls: 0, linksCalls: 0, verdict: 'followup', relation: '' }));
+const model = vi.hoisted(() => ({ groupingCalls: 0, extractionCalls: 0, linksCalls: 0, verdict: 'followup', relation: '', previousPosts: [] as {headline:string;summary:string}[] }));
 vi.mock('./collection.js', () => ({ collectBatch: async () => {} }));
 vi.mock('./extraction-model.js', () => ({ extractEvents: async (text: string) => {
   model.extractionCalls++;
@@ -33,7 +33,8 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
   } }),
 }));
 vi.mock('../models/jev.js', async original => ({ ...await original<typeof import('../models/jev.js')>(), JevClient: class {
-  async judge(template: string) {
+  async judge(template: string, state: unknown) {
+    if (template==='published_update') model.previousPosts.push(z.object({previousPost:z.object({headline:z.string(),summary:z.string()})}).parse(state).previousPost);
     const answer = template==='interest' ? { type: 'score', score: 7, probabilities: {}, confidence: 1, legend: {} }
       : { type: 'choice', choice: template==='published_update' ? model.verdict : template==='event_group_integrity' ? 'coherent' : template==='representative' ? 'left' : 'eligible', probabilities: {}, confidence: 1 };
     return { answers: { answer }, metrics: {}, model: 'fixture' };
@@ -47,8 +48,11 @@ vi.mock('../models/embedding.js', () => ({ EmbeddingClient: class {
 vi.mock('./generation.js', () => ({ researchStory: async (id: string, settings: AppSettings) => {
   const { loadStory, saveGenerations } = await import('./generation-store.js');
   const input = await loadStory(id);
+  const { publishedThread, threadKnowledge } = await import('./publication-thread.js');
+  const thread = await publishedThread(id);
   await saveGenerations([input],[{ id, headline: 'Новости разработки',
-    summary: [...new Set(input.mentions.map(mention=>mention.text))].join('\n'), translatedExcerpt: null }],settings);
+    summary: [...new Set(input.mentions.map(mention=>mention.text))].join('\n'), translatedExcerpt: null,
+    ...(thread.length ? {earlierSummary:threadKnowledge(thread)} : {}) }],settings);
 } }));
 const url = process.env.TEST_DATABASE_URL;
 const schema = `grouping_${randomUUID().replaceAll('-','')}`;
@@ -68,6 +72,8 @@ async function intake(texts: string[],ageHours=0): Promise<string> {
     const item=await one("INSERT INTO source_items(source_id,external_id,original_url,collected_at) VALUES($1,'1',$2,now()-$3*interval '1 hour') RETURNING id",[source,`https://example.org/${source}`,ageHours]);
     const revision=await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text,created_at)
       VALUES($1,1,$2,$3,$3,now()-$4*interval '1 hour') RETURNING id`,[item,randomUUID(),text,ageHours]);
+    await database.db.query(`UPDATE item_revisions SET metadata=jsonb_build_object('connectorKind','feed',
+      'canonicalUrl',$2::text,'title','Fixture article') WHERE id=$1`,[revision,`https://example.org/${source}`]);
     await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1',[item,revision]);
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[batch,revision]);
   }
@@ -75,7 +81,7 @@ async function intake(texts: string[],ageHours=0): Promise<string> {
 }
 async function processIntake(batch: string) { await (await import('./batches.js')).processBatch(false,true,batch); }
 async function publish() { await (await import('../publishing/digest.js')).publishDigest(settings); }
-describe.skipIf(!url)('grouping through Telegram delivery', () => {
+describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 }, () => {
   beforeAll(async () => {
     admin=new pg.Pool({connectionString:url}); await admin.query(`CREATE SCHEMA ${schema}`);
     const scoped=new URL(url ?? ''); scoped.searchParams.set('options',`-c search_path=${schema},public`);
@@ -84,7 +90,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     settings=await (await import('../settings.js')).saveSettings({publishingEnabled:true,embeddingDimensions:3});
   });
   beforeEach(async () => {
-    vi.restoreAllMocks(); model.groupingCalls=0; model.extractionCalls=0; model.linksCalls=0; model.verdict='followup'; model.relation='';
+    vi.restoreAllMocks(); model.groupingCalls=0; model.extractionCalls=0; model.linksCalls=0; model.verdict='followup'; model.relation=''; model.previousPosts.length=0;
     await database.db.query('TRUNCATE processing_batches,sources,stories,publications,model_cache,operational_state CASCADE');
     const { saveState }=await import('../publishing/store.js');
     await saveState('telegram_destination',{channelId:'-100123'});
@@ -129,7 +135,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
     expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE text LIKE '%40 долларов%' ")).rows)
       .toEqual([{previous:canonical}]);
-    expect(vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text).toContain('Предыдущая публикация');
+    expect(vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text).toContain('Предыдущие публикации');
     expect((await database.db.query('SELECT id FROM publications')).rows).toHaveLength(3);
   });
   it.each(['same','update'])('gates a %s match to a published story as duplicate or different', async relation => {
@@ -137,7 +143,10 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     const canonical=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
     const original=(await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0];
     model.relation=relation; model.verdict='duplicate';
-    await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.'])); await publish();
+    await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.']));
+    expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE story_id=$1',[canonical])).rows[0]?.pending_snapshot_id).not.toBeNull();
+    await publish();
+    expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
     expect((await database.db.query("SELECT story_id,metadata->>'relation' AS relation FROM story_mentions WHERE text LIKE '%40 долларов%'")).rows)
       .toEqual([{story_id:canonical,relation:'same'}]);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
@@ -149,6 +158,33 @@ describe.skipIf(!url)('grouping through Telegram delivery', () => {
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
     expect((await database.db.query("SELECT result->>'choice' AS verdict FROM judgments WHERE stage='published_update' ORDER BY created_at")).rows)
       .toEqual([{verdict:'duplicate'},{verdict:'different'}]);
+  });
+  it('compares the whole thread and attaches a later duplicate to its latest post', async () => {
+    await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
+    const first=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%выпустила Compiler 2%'");
+    await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.'])); await publish();
+    await processIntake(await intake(['Compiler 2 получила поддержку Linux.'])); await publish();
+    const { latestThreadStory, publishedThread }=await import('./publication-thread.js');
+    const latest=await latestThreadStory(first);
+    const thread=await publishedThread(latest);
+    expect(thread).toHaveLength(3);
+    const text=vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text ?? '';
+    expect(text).toContain('<b>Новое</b>'); expect(text).toContain('<b>Ранее было опубликовано</b>');
+    expect(text.match(/https:\/\/t.me\/c\/123\//gu)).toHaveLength(2);
+    vi.mocked(BotApi.prototype.edit).mockClear();
+    model.verdict='duplicate';
+    await processIntake(await intake(['Ещё один пересказ выпуска Compiler 2 без новых сведений.']));
+    const previous=model.previousPosts.at(-1);
+    expect(previous?.summary).toContain('выпустила Compiler 2');
+    expect(previous?.summary).toContain('40 долларов');
+    expect(previous?.summary).toContain('поддержку Linux');
+    expect((await database.db.query("SELECT story_id FROM story_mentions WHERE text LIKE 'Ещё один пересказ%' ")).rows)
+      .toEqual([{story_id:latest}]);
+    expect((await database.db.query('SELECT story_id FROM publications WHERE pending_snapshot_id IS NOT NULL')).rows)
+      .toEqual([{story_id:latest}]);
+    await publish();
+    expect(BotApi.prototype.send).toHaveBeenCalledTimes(3);
+    expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
   });
   it('adds a source-only recap to stories arriving later, without a separate post or confirmation calls', async () => {
     const recap=await intake(['Ссылки на релизы Compiler 2.']);

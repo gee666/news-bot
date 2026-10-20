@@ -31,6 +31,8 @@ export const publicationSnapshotSchema = z.object({
   headline: z.string().min(1),
   score: z.number().int().min(1).max(10),
   details: z.string(),
+  /** Combined summary of earlier posts in a follow-up thread; details then hold only the new information. */
+  earlier: z.string().min(1).optional(),
   detailsKind: z.enum(['summary', 'excerpt']),
   sources: z.array(publicationSourceSchema),
   review: generationReviewSchema.optional(),

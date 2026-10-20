@@ -64,10 +64,11 @@ describe.skipIf(!url)('bounded manual orchestration with PostgreSQL', () => {
     await database.db.query('TRUNCATE processing_batches,sources,stories,request_attempts CASCADE');
     await database.db.query("DELETE FROM operational_state WHERE key LIKE 'run_now_%'");
     mocks.userClient.mockRejectedValue(new Error('Live Telegram reads forbidden in tests'));
+    const publishedAt = new Date(Date.now() - 1000);
     mocks.index.mockResolvedValue(Array.from({ length: 30 }, (_, index) => ({ id: String(index),
-      url: `https://example.com/news/${index}`, title: 'News', publishedAt: new Date(Date.now() - 1000) })));
+      url: `https://example.com/news/${index}`, title: 'News', publishedAt })));
     mocks.article.mockImplementation(async (url: string) => ({ access: 'public', canonicalUrl: url, title: 'News',
-      content: 'New event with details.', publishedAt: new Date(Date.now() - 1000).toISOString(), metadata: {} }));
+      content: 'New event with details.', publishedAt: publishedAt.toISOString(), metadata: {} }));
     mocks.extraction.mockImplementation(async (batchId: string, settings: AppSettings) => {
       const { stage } = await import('./state.js');
       const revisions = await database.db.query<{ revision_id: string }>('SELECT revision_id FROM batch_items WHERE batch_id=$1', [batchId]);

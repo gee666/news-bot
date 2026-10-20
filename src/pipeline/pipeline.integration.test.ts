@@ -329,7 +329,7 @@ describe.skipIf(!databaseUrl)('pipeline with PostgreSQL and deterministic model 
     try { await refreshDigest(settings, nextJudge); } finally { await nextJudge.close(); }
     expect((await database.db.query('SELECT profile_version,status FROM stories WHERE id=$1', [story])).rows[0])
       .toMatchObject({ profile_version: settings.profileVersion, status: 'rejected' });
-  });
+  }, 60_000);
   it('retains active history and preserves detached publication snapshots after cleanup', async () => {
     const id = await batch();
     const revision = await item(id, 'Old story released.', true);

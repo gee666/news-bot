@@ -10,6 +10,8 @@ import { mergeStories } from './consolidation-store.js';
 import { historicalEventInput } from './historical-input.js';
 import { publishedStory, unpublished } from './generation-store.js';
 import { choice, Judgments } from './judgments.js';
+import { latestThreadStory, publishedThread, threadKnowledge } from './publication-thread.js';
+import { refreshPublishedSources } from '../publishing/updates.js';
 import { ProcessingYield } from './processing-slice.js';
 
 export interface Mention { id: string; revision_id: string; text: string; story_id: string | null }
@@ -130,16 +132,23 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
         const relation = selected.some(match => match.relation === 'update') ? 'update' : 'same';
         const previous = matched ? posted.get(matched.id) : null;
         if (previous) {
+          const latest = await latestThreadStory(previous.storyId);
+          const thread = await publishedThread(latest);
+          const latestInput = await eventInput(latest);
+          const target: Candidate | undefined = latestInput
+            ? { id: latest, text: latestInput.text, previous_revision_id: null, input: latestInput } : matched;
           const judgments = new Judgments(settings);
           let verdict: 'different' | 'duplicate' | 'followup';
           try {
             verdict = z.enum(['different','duplicate','followup']).parse(choice(await judgments.judge('published_update', {
-              previousPost:{headline:previous.headline,summary:previous.summary},newEvent:incoming.text,
+              previousPost:{headline:thread.at(-1)?.headline ?? previous.headline,summary:threadKnowledge(thread)},newEvent:incoming.text,
             },context)));
           } finally { await judgments.close(); }
-          return attach(mention,incoming,vector,verdict === 'different' ? undefined : matched,
+          const attached = await attach(mention,incoming,vector,verdict === 'different' ? undefined : target,
             verdict === 'duplicate' ? 'same' : 'update',vectors,context,
-            verdict === 'followup' ? previous.storyId : undefined,true);
+            verdict === 'followup' ? latest : undefined,true);
+          if (verdict === 'duplicate') await refreshPublishedSources(settings, [attached]);
+          return attached;
         }
         for (const match of selected.slice(1)) {
           if (!matched) break;

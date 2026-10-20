@@ -15,9 +15,10 @@ let delivery: typeof import('./delivery.js');
 let repair: typeof import('./repair.js');
 let store: typeof import('./store.js');
 let settings: import('../settings.js').AppSettings;
-const oldContent: PublicationSnapshot = { headline: 'Раньше', details: 'Старые детали', score: 3, detailsKind: 'summary', sources: [] };
 const newContent: PublicationSnapshot = { headline: 'Новая модель', details: 'Полное описание', score: 8, detailsKind: 'summary', sources: [],
   review: { supported: true, reason: 'Существенных ошибок не найдено' } };
+const oldContent: PublicationSnapshot = { ...newContent, sources: [{label:'Старый источник',url:'https://old.example/report',
+  primary:false,access:'public',classification:'relevant'}] };
 async function one(sql: string, values: unknown[] = []): Promise<string> {
   const row = (await database.db.query<{ id: string }>(sql,values)).rows[0];
   if (!row) throw new Error('Fixture missing');
@@ -69,7 +70,7 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
-  it('stages immutable details, edits one existing message and switches the snapshot only after success', async () => {
+  it('preserves sent details, stages sources, edits one existing message and switches the snapshot only after success', async () => {
     const id = await publication(await story(),'5'); const previous = await row(id);
     await updates.prepareUpdates(settings,'-100123');
     const staged = await row(id); expect(staged.snapshot_id).toBe(previous.snapshot_id); expect(staged.pending_snapshot_id).not.toBeNull();
@@ -98,14 +99,14 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     expect((await row(id)).story_id).toBeNull(); expect((await row(id)).content).toEqual(oldContent);
     expect((await database.db.query("SELECT status FROM request_attempts WHERE operation='edit'")).rows).toEqual([{ status:'unknown' }]);
   });
-  it('trims oversized revisions for Telegram while retaining the full immutable snapshot', async () => {
+  it('trims oversized sent text for Telegram while retaining the full immutable source-edit snapshot', async () => {
     const storyId = await story(); const id = await publication(storyId,'5');
     const summary = '😀'.repeat(3000);
-    await database.db.query('UPDATE stories SET summary=$1 WHERE id=$2',[summary,storyId]);
+    await database.db.query("UPDATE publication_snapshots SET content=jsonb_set(content,'{details}',to_jsonb($1::text)) WHERE id=$2",[summary,(await row(id)).snapshot_id]);
     await acceptFixtureStories(settings);
     const edit = vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
     await updates.prepareUpdates(settings,'-100123');
-    expect((await row(id)).content).toEqual(oldContent);
+    expect((await row(id)).content).toEqual({ ...oldContent, details: summary });
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(1);
     expect(edit).toHaveBeenCalledOnce();
     const message = edit.mock.calls[0]?.[2];

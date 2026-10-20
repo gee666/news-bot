@@ -27,7 +27,7 @@ function status(source: PublicationSource): string {
     source.access === 'restricted' ? 'доступ ограничен' : source.access === 'unavailable' ? 'недоступно' : ''].filter(Boolean).join(', ');
 }
 function sourceEntityCount(snapshot: PublicationSnapshot): number {
-  return 1 + snapshot.sources.length + new Set(snapshot.sources.map(sourceGroup)).size;
+  return 1 + (snapshot.earlier ? 2 : 0) + snapshot.sources.length + new Set(snapshot.sources.map(sourceGroup)).size;
 }
 function sourceSections(snapshot: PublicationSnapshot, compact: boolean): { text: string; plainText: string; links: SourceLink[] } {
   let text = ''; let plainText = ''; let number = 0;
@@ -64,14 +64,6 @@ function reviewNotes(snapshot: PublicationSnapshot): string {
   return reason ? `\n\nЗаметки проверяющего: ${reason}` : '';
 }
 
-/** Telegram's visible-text budget, including reviewer notes and source links. */
-export function publicationDetailsBudget(content: unknown): number {
-  const snapshot = publicationSnapshotSchema.parse(content);
-  if (sourceEntityCount(snapshot) > 100) return 0;
-  const headline = stripTrailingCitationMarkers(snapshot.headline);
-  return Math.max(0, MESSAGE_LIMIT - header(snapshot, headline).length - 2
-    - reviewNotes(snapshot).length - sourceSections(snapshot, true).plainText.length);
-}
 export function render(content: unknown): RenderedMessage {
   const parsed = publicationSnapshotSchema.safeParse(content);
   if (!parsed.success) throw new PublicationRenderError('publication_snapshot_invalid');
@@ -80,20 +72,26 @@ export function render(content: unknown): RenderedMessage {
   const headline = stripTrailingCitationMarkers(snapshot.headline).slice(0, 180);
   const notes = reviewNotes(snapshot);
   let details = stripTrailingCitationMarkers(snapshot.details ?? '');
-  let body = header(snapshot, headline) + (details ? `\n\n${details}` : '') + notes;
+  let earlier = stripTrailingCitationMarkers(snapshot.earlier ?? '');
+  const bodyText = () => header(snapshot, headline) + (snapshot.earlier
+    ? `\n\nНовое\n${details}\n\nРанее было опубликовано\n${earlier}` : details ? `\n\n${details}` : '') + notes;
+  let body = bodyText();
   let sections = sourceSections(snapshot, false);
   if ((body + sections.plainText).length > MESSAGE_LIMIT) {
     sections = sourceSections(snapshot, true);
-    const budget = Math.max(0, MESSAGE_LIMIT - header(snapshot, headline).length - 2 - notes.length - sections.plainText.length);
-    if (details.length > budget) {
-      details = details.slice(0, Math.max(0, budget - 1)).replace(/[\uD800-\uDBFF]$/u, '').trimEnd() + (budget ? '…' : '');
-      body = header(snapshot, headline) + (details ? `\n\n${details}` : '') + notes;
-    }
+    const trim = (text: string, budget: number) => text.slice(0, Math.max(0, budget - 1))
+      .replace(/[\uD800-\uDBFF]$/u, '').trimEnd() + (budget > 0 ? '…' : '');
+    const overflow = () => Math.max(0, bodyText().length + sections.plainText.length - MESSAGE_LIMIT);
+    if (overflow() && earlier) earlier = trim(earlier, Math.max(0, earlier.length - overflow()));
+    if (overflow() && details) details = trim(details, Math.max(0, details.length - overflow()));
+    body = bodyText();
   }
+
   const plainText = body + sections.plainText;
   if (plainText.length > MESSAGE_LIMIT) throw new PublicationRenderError('publication_message_too_long');
   let text = `${interestBar(snapshot.score)}\n<b>${escapeHtml(headline)}</b>`;
-  if (details) text += `\n\n${escapeHtml(details)}`;
+  if (snapshot.earlier) text += `\n\n<b>Новое</b>\n${escapeHtml(details)}\n\n<b>Ранее было опубликовано</b>\n${escapeHtml(earlier)}`;
+  else if (details) text += `\n\n${escapeHtml(details)}`;
   text += escapeHtml(notes) + sections.text;
   const links = sections.links.map(link => ({ ...link, offset: body.length + link.offset }));
   return { text, plainText, links, parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: [] } };

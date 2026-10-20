@@ -3,13 +3,15 @@ import type { PiRequest, RequestContext } from '../models/index.js';
 import { defaultSettings } from '../settings.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 import { researchStory } from './generation.js';
-import { previousStory, publishedStory, alreadyGenerated, saveGenerations } from './generation-store.js';
+import { publishedStory, alreadyGenerated, saveGenerations } from './generation-store.js';
+import { publishedThread, absorbIntoPublished, rebaseFollowup } from './publication-thread.js';
+import { refreshPublishedSources } from '../publishing/updates.js';
 import { generationClient } from './generation-model.js';
 import { evidenceDocument, modelResult, storyId, storyInput } from './generation.test-helpers.js';
 
 const mocks = vi.hoisted(() => ({ input: vi.fn(), generate: vi.fn() }));
 vi.mock('./generation-store.js', () => ({
-  publishedStory:vi.fn(async()=>null),previousStory:vi.fn(async()=>null),
+  publishedStory:vi.fn(async()=>null),
   loadStory: mocks.input, alreadyGenerated: vi.fn(), evidenceSnapshotHash: async () => 'evidence-signature',
   saveGenerations: vi.fn(), loadCurrentEvidence:async()=>[],
 }));
@@ -17,6 +19,9 @@ vi.mock('./generation-model.js', async original => ({
   ...await original<typeof import('./generation-model.js')>(), generationClient: vi.fn(), recordGenerationFailure: vi.fn(),
 }));
 vi.mock('../db.js', () => ({ db: { query: vi.fn().mockResolvedValue({ rows: [] }) } }));
+vi.mock('./publication-thread.js', () => ({ publishedThread: vi.fn(async () => []), rebaseFollowup: vi.fn(),
+  latestThreadStory: vi.fn(async (id: string) => id), absorbIntoPublished: vi.fn(async () => true) }));
+vi.mock('../publishing/updates.js', () => ({ refreshPublishedSources: vi.fn() }));
 vi.mock('./source-origins.js',()=>({classifySourceOrigins:async()=>[]}));
 vi.mock('./research.js', async original => ({
   ...await original<typeof import('./research.js')>(), researchEvidence: async () => [evidenceDocument()],
@@ -199,13 +204,38 @@ it('skips an already generated story without buying another review', async () =>
   expect(mocks.generate).not.toHaveBeenCalled();
 });
 
-it('passes the posted copy to a follow-up writer and tells it to cover only new information', async () => {
-  vi.mocked(previousStory).mockResolvedValueOnce({storyId:'previous',headline:'Предыдущий заголовок',summary:'Старые сведения',destinationId:'-100123',messageId:'644'});
-  mocks.generate.mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(passed));
-  await researchStory(storyId,defaultSettings);
+const previous = { storyId:'previous',headline:'Предыдущий заголовок',details:'Старые сведения',
+  destinationId:'-100123',messageId:'644',sources:[] };
+it('passes all posted copies and saves the combined earlier summary for a follow-up', async () => {
+  vi.mocked(publishedThread).mockResolvedValueOnce([previous, { ...previous, storyId:'second',details:'Продолжение' }]);
+  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, new_information:true, earlier_summary:'Сводка прежних сообщений' }))
+    .mockResolvedValueOnce(modelResult(passed));
+  expect(await researchStory(storyId,defaultSettings)).toBe('ready');
   const request=mocks.generate.mock.calls[0]?.[0];
-  expect(JSON.parse(request.prompt).previous_post).toEqual({headline:'Предыдущий заголовок',summary:'Старые сведения'});
-  expect(request.systemPrompt).toContain('не пересказывай предыдущую публикацию');
+  expect(JSON.parse(request.prompt).previous_posts).toEqual([
+    {headline:previous.headline,summary:previous.details}, {headline:previous.headline,summary:'Продолжение'},
+  ]);
+  expect(request.systemPrompt).toContain('summary: только новые сведения');
+  expect(saveGenerations).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({ earlierSummary:'Сводка прежних сообщений' })], defaultSettings);
+});
+it('absorbs a follow-up with no new information and stages only a source edit', async () => {
+  vi.mocked(publishedThread).mockResolvedValueOnce([previous]);
+  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, new_information:false, earlier_summary:'Старые сведения' }));
+  expect(await researchStory(storyId,defaultSettings)).toBe('absorbed');
+  expect(absorbIntoPublished).toHaveBeenCalledWith(storyId, previous.storyId, expect.any(Array));
+  expect(refreshPublishedSources).toHaveBeenCalledWith(defaultSettings, [previous.storyId]);
+  expect(saveGenerations).not.toHaveBeenCalled();
+  expect(mocks.generate).toHaveBeenCalledOnce();
+});
+
+it('regenerates a cached follow-up when a newer post rebases its thread', async () => {
+  vi.mocked(rebaseFollowup).mockResolvedValueOnce(true);
+  vi.mocked(alreadyGenerated).mockResolvedValue(true);
+  vi.mocked(publishedThread).mockResolvedValueOnce([previous]);
+  mocks.generate.mockResolvedValueOnce(modelResult({...draft,new_information:true,earlier_summary:'Обновлённая предыстория'}))
+    .mockResolvedValueOnce(modelResult(passed));
+  await researchStory(storyId,defaultSettings);
+  expect(mocks.generate).toHaveBeenCalledTimes(2);
 });
 
 it('never regenerates a published story, even when forced', async () => {

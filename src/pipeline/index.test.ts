@@ -29,19 +29,19 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 const states = () => mocks.query.mock.calls.filter(call => String(call[0]).includes('INSERT INTO operational_state'))
   .map(call => JSON.parse(String(call[1]?.[1])) as unknown);
-it('publishes current ready stories even when the processor lease is busy', async () => {
+it('defers new selection when an unscheduled sweep finds the processor lease busy', async () => {
   mocks.held.push(true,false);
   await (await createPipeline()).runDigest();
-  expect(mocks.publish).toHaveBeenCalledOnce();
+  expect(mocks.publish).not.toHaveBeenCalled();
   expect(mocks.refresh).not.toHaveBeenCalled();
   expect(states().at(-1)).toMatchObject({ phase: 'waiting', attempt: 0 });
 });
-it('refreshes before historical link enrichment and publishes after a checkpoint', async () => {
+it('defers new selection after an unscheduled sweep checkpoint', async () => {
   vi.mocked(associateSourceLinks).mockRejectedValueOnce(new ProcessingYield());
   mocks.held.push(true,true);
   await (await createPipeline()).runDigest();
   expect(mocks.refresh).toHaveBeenCalledOnce();
-  expect(mocks.publish).toHaveBeenCalledOnce();
+  expect(mocks.publish).not.toHaveBeenCalled();
   expect(mocks.release).toHaveBeenCalledTimes(2);
   expect(states().at(-1)).toMatchObject({ phase: 'waiting', attempt: 0 });
 });

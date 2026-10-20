@@ -1,13 +1,14 @@
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import { orderSources } from './sources.js';
+import { publishedThread } from '../pipeline/publication-thread.js';
+import { orderSources, sourceGroup } from './sources.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
 import { evidenceMetadataSchema } from '../pipeline/generation-store.js';
 import { fetchedRelevanceCte } from './source-relevance.js';
 import { publicUrl } from '../pipeline/research-fetch.js';
 import { sourceAuthorityRanks, generationReviewSchema, publicationSnapshotSchema, publicationSourceSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
 
-const generationMetadataSchema = z.object({ review: generationReviewSchema.optional(),primarySourceUrls:z.array(z.string()).optional() });
+const generationMetadataSchema = z.object({ review: generationReviewSchema.optional(),primarySourceUrls:z.array(z.string()).optional(), earlierSummary:z.string().optional() });
 
 export interface StoryContent {
   id: string; headline: string; summary: string | null; translated_excerpt: string | null;
@@ -35,7 +36,8 @@ export function mergeSources(input: PublicationSource[]): PublicationSource[] {
     old.label = [...(labelSet ?? [])].join(' / ');
     if ((labelSet?.size ?? 0) > 1 || old.labels || source.labels) old.labels = [...(labelSet ?? [])];
     if (source.kind && (!old.kind || sourceAuthorityRanks[source.kind] < sourceAuthorityRanks[old.kind])) old.kind = source.kind;
-    old.primary = old.kind ? old.kind === 'primary' : old.primary || source.primary;
+    old.primary = old.primary || source.primary || old.kind === 'primary';
+    if (old.primary && old.kind) old.kind = 'primary';
     if (source.classification === 'relevant') old.classification = 'relevant';
     if (source.access === 'restricted' || source.url.startsWith('https://t.me/c/')) old.access = 'restricted';
   }
@@ -114,8 +116,8 @@ export async function sourceInventory(client: Pick<PoolClient, 'query'>, storyId
   return [...verifiedSources, ...originSources].filter(source => admitted(source.url));
 }
 
-export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: StoryContent,
-  receiptId?: string): Promise<PublicationSnapshot> {
+export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: StoryContent,
+  receiptId?: string, destinationId?: string): Promise<Pick<PublicationSnapshot, 'sources' | 'earlier' | 'review'>> {
   const inventory = await sourceInventory(client, story.id);
   const receipt = await client.query<{ result: unknown }>(`SELECT result FROM judgments WHERE story_id=$1
     AND stage='generation_research' AND result->>'headline'=$2 AND result->>'summary' IS NOT DISTINCT FROM $3
@@ -123,30 +125,46 @@ export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: Stor
   [story.id, story.headline, story.summary, receiptId ?? null]);
   const parsed = generationMetadataSchema.safeParse(receipt.rows[0]?.result);
   const metadata = parsed.success ? parsed.data : undefined;
-  const primary=new Set(metadata?.primarySourceUrls ?? []);
+  const mentions = await client.query<{ url: string }>(`SELECT DISTINCT jsonb_array_elements_text(metadata->'primary_source_urls') AS url
+    FROM story_mentions WHERE story_id=$1 AND jsonb_typeof(metadata->'primary_source_urls')='array'`, [story.id]);
+  const primary=new Set([...(metadata?.primarySourceUrls ?? []), ...mentions.rows.map(row => row.url)]);
   const referenced=primary.size ? await client.query<{url:string}>(`SELECT DISTINCT l.url FROM item_links l
     JOIN source_items i ON i.current_revision_id=l.revision_id WHERE l.url=ANY($2::text[]) AND (
       EXISTS(SELECT 1 FROM story_mentions m JOIN mention_links ml ON ml.mention_id=m.id
         WHERE m.story_id=$1 AND m.revision_id=l.revision_id AND ml.link_id=l.id AND ml.classification='relevant')
       OR EXISTS(SELECT 1 FROM story_link_sources sl WHERE sl.story_id=$1 AND sl.link_id=l.id AND sl.classification='relevant'))`,[story.id,[...primary]]) : {rows:[]};
   const sources = mergeSources([...inventory.map(source=>({...source,
-    primary:metadata?.primarySourceUrls ? primary.has(source.url) : source.primary})),
+    primary:source.primary || primary.has(source.url)})),
     ...referenced.rows.map(({url})=>{const parsed=new URL(url);return {url,label:parsed.hostname+parsed.pathname,
       primary:true,access:'unknown' as const,classification:'relevant' as const};})]);
-  const previous = await client.query<{headline:string;destination_id:string;message_id:string}>(`SELECT snap.content->>'headline' AS headline,p.destination_id,p.message_id
-    FROM story_mentions m JOIN publications p ON p.story_id::text=m.metadata->>'previous_story_id'
-    JOIN publication_snapshots snap ON snap.id=p.snapshot_id
-    WHERE m.story_id=$1 AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
-      AND p.destination_id=(SELECT value->>'channelId' FROM operational_state WHERE key='telegram_destination')
-    ORDER BY p.published_at,p.id LIMIT 1`, [story.id]);
-  const posted=previous.rows[0];
-  if (posted && /^-100\d+$/u.test(posted.destination_id) && /^\d+$/u.test(posted.message_id)) sources.push({
-    label:posted.headline,url:`https://t.me/c/${posted.destination_id.slice(4)}/${posted.message_id}`,
-    primary:false,previousPublication:true,access:'public',classification:'relevant',
-  });
-  for (const source of sources) delete source.labels;
-  return publicationSnapshotSchema.parse({ headline: story.headline, score: story.interest_score,
-    details: story.researched ? story.summary : story.translated_excerpt, detailsKind: story.researched ? 'summary' : 'excerpt', sources,
-    ...(metadata?.review ? { review: metadata.review } : {}) });
+  const currentDestination = destinationId ?? (await client.query<{ id: string }>(
+    "SELECT value->>'channelId' AS id FROM operational_state WHERE key='telegram_destination'")).rows[0]?.id;
+  const thread = currentDestination ? (await publishedThread(story.id, client.query.bind(client), currentDestination))
+    .filter(post => post.storyId !== story.id) : [];
+  const inherited = thread.flatMap(post => post.sources.filter(source => !source.previousPublication));
+  const previous: PublicationSource[] = thread.flatMap(post => /^-100\d+$/u.test(post.destinationId) && /^\d+$/u.test(post.messageId) ? [{
+    label:post.headline,url:`https://t.me/c/${post.destinationId.slice(4)}/${post.messageId}`,
+    primary:false,previousPublication:true,access:'public' as const,classification:'relevant' as const,
+  }] : []);
+  const ownUrls = new Set(sources.map(source => source.url));
+  const previousUrls = new Set(previous.map(source => source.url));
+  const combined = orderSources([...mergeSources([...sources, ...inherited].filter(source => !previousUrls.has(source.url))), ...previous]);
+  // Keep direct sources, primary sources and thread links ahead of inherited secondary sources.
+  while (combined.length > 90) {
+    let index = combined.findLastIndex(source => !ownUrls.has(source.url) && sourceGroup(source) === 'secondary');
+    if (index < 0) index = combined.findLastIndex(source => sourceGroup(source) === 'secondary');
+    if (index < 0) index = combined.findLastIndex(source => !source.previousPublication);
+    if (index < 0) index = combined.length - 1;
+    combined.splice(index, 1);
+  }
+  for (const source of combined) delete source.labels;
+  return { sources: combined, ...(thread.length && metadata?.earlierSummary ? { earlier: metadata.earlierSummary } : {}),
+    ...(metadata?.review ? { review: metadata.review } : {}) };
 }
 
+export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: StoryContent,
+  receiptId?: string): Promise<PublicationSnapshot> {
+  return publicationSnapshotSchema.parse({ headline: story.headline, score: story.interest_score,
+    details: story.researched ? story.summary : story.translated_excerpt, detailsKind: story.researched ? 'summary' : 'excerpt',
+    ...await snapshotSources(client, story, receiptId) });
+}

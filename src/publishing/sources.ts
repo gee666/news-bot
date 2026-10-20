@@ -4,7 +4,7 @@ export type SourceGroup = 'primary' | 'secondary' | 'previous';
 export const SOURCE_GROUPS: ReadonlyArray<{ kind: SourceGroup; heading: string }> = [
   { kind: 'primary', heading: 'Первоисточники' },
   { kind: 'secondary', heading: 'Вторичные источники' },
-  { kind: 'previous', heading: 'Предыдущая публикация' },
+  { kind: 'previous', heading: 'Предыдущие публикации' },
 ];
 function isTelegram(source: PublicationSource): boolean {
   const host = new URL(source.url).hostname.toLowerCase().replace(/^www\./u, '');

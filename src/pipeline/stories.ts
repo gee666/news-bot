@@ -147,7 +147,7 @@ async function finishStory(story: StoryWork, settings: AppSettings, judgments: J
   if (!await assessEligibility(id, settings, judgments, context)) return false;
   await rankStory(id, settings, judgments, context);
   await refreshEmbedding(id, vectors, context);
-  await researchStory(id, settings);
+  if (await researchStory(id, settings) === 'absorbed') return false;
   const checks = { ...await storyPostconditions(id, settings), generationCurrent: await generationIsCurrent(id, settings) };
   if (Object.values(checks).some(value => !value)) throw new StoryCompletionError(id, checks);
   await completeStories([id], settings, batchId);
