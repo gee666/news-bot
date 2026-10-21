@@ -36,6 +36,8 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
       WHERE p.id=$5 AND $1::text IS NOT NULL FOR UPDATE OF p`,
     [publication.destination_id,saved.minimumPublicationScore,saved.profileVersion,saved.modelVersion,publication.id])).rows[0];
     if (!row || row.canonical_story_id !== canonicalId || row.destination_id !== publication.destination_id || row.message_id !== publication.message_id
+      || row.bot_id !== publication.bot_id || row.delivery_kind !== publication.delivery_kind
+      || row.media_snapshot_id !== publication.media_snapshot_id
       || row.status !== publication.status || row.snapshot_id !== publication.snapshot_id || row.pending_snapshot_id !== publication.pending_snapshot_id
       || snapshotHash(row.content) !== snapshotHash(publication.content)) return deny('snapshot_changed');
     if ((await client.query('SELECT 1 FROM operational_state WHERE key=$1', [`publication_removal:${row.id}`])).rows.length) return deny('publication_removed');

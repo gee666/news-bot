@@ -162,3 +162,8 @@ describe('full publication rendering', () => {
     expect(() => render({ ...snapshot, score: 0 })).toThrow('publication_snapshot_invalid');
   });
 });
+
+
+it.each([0, -1, 4097, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid custom text limit %s', limit => {
+  expect(() => render(snapshot, { limit })).toThrow('Invalid publication text limit');
+});

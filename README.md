@@ -260,4 +260,4 @@ Run `npm audit` to check current advisories. Telegram's GramJS package is marked
 
 ### Images and videos
 
-Source photos and native video attachments are deduplicated before publishing. Summarization receives text and up to ten still images, configurable with `MEDIA_SUMMARY_MAX_IMAGES`. Media is temporary and expires within seven days if unpublished. See [media handling](docs/media.md) for comparison rules, Telegram delivery and cleanup.
+Source photos and native video attachments are deduplicated before publishing. New media posts use one album of up to ten attachments, with the news text in a caption capped at 1024 characters; text-only posts keep their normal limit. Summarization receives text and up to ten still images, configurable with `MEDIA_SUMMARY_MAX_IMAGES`. Media is temporary and expires within seven days if unpublished. See [media handling](docs/media.md) for comparison rules, Telegram delivery and cleanup.

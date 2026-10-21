@@ -43,6 +43,15 @@ async function spuriousFixture(){
   record.snapshotHash=approval.snapshotHash((await row(record.publicationId)).content);
   return record;
 }
+async function albumRemovalFixture(): Promise<ReviewedAction> {
+  const record = await spuriousFixture();
+  await database.db.query("UPDATE publications SET delivery_kind='album',media_status='complete' WHERE id=$1", [record.publicationId]);
+  const batchId = await one("INSERT INTO publication_media_batches(publication_id,batch_number,status) VALUES($1,0,'sent') RETURNING id", [record.publicationId]);
+  for (const ordinal of [0,1,2]) await database.db.query(`INSERT INTO publication_media_items(batch_id,ordinal,type,mime_type,digest,message_id)
+    VALUES($1,$2,'image','image/png',$3,$4)`, [batchId,ordinal,`synthetic${ordinal}`,String(178+ordinal)]);
+  await save(record);
+  return record;
+}
 async function save(record:ReviewedAction):Promise<void> { await store.saveState(approval.actionKey(record.approvalId),record); }
 async function row(id:string):Promise<Publication> {
   const result = (await database.db.query<Publication>(`${store.publicationEditSelect} WHERE p.id=$1`,[id])).rows[0];
@@ -170,4 +179,64 @@ describe.skipIf(!url)('bounded reviewed publication actions under pause',()=>{
     const updates = await import('./updates.js'); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect(BotApi.prototype.send).not.toHaveBeenCalled();
   });
+  it('resumes a partial album deletion after an explicit 429 under the same unexpired approval', async () => {
+    const record = await albumRemovalFixture();
+    const remove = vi.spyOn(BotApi.prototype,'delete').mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',120_000));
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(false);
+    expect(remove.mock.calls.map(call => call[1])).toEqual(['179','180']);
+    expect(await store.state(approval.actionKey(record.approvalId))).toMatchObject({state:'approved'});
+    expect(await store.state(`publication_removal:${record.publicationId}`)).toMatchObject({state:'retryable',approvalId:record.approvalId});
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(false); expect(remove).toHaveBeenCalledTimes(2);
+    await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
+    remove.mockResolvedValue(undefined);
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(true);
+    expect(remove.mock.calls.map(call => call[1])).toEqual(['179','180','180','178']);
+    expect((await database.db.query('SELECT deleted_at FROM publication_media_items')).rows.every(row => row.deleted_at)).toBe(true);
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(true); expect(remove).toHaveBeenCalledTimes(4);
+  });
+  it('retains retry authorization after a restart immediately following the atomic 429 failure commit', async () => {
+    const record = await albumRemovalFixture();
+    const remove = vi.spyOn(BotApi.prototype,'delete').mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',120_000));
+    const delivery = await import('./delivery.js');
+    const recordFailure = delivery.recordFailure;
+    const interruption = vi.spyOn(delivery,'recordFailure').mockImplementation(async (...args) => {
+      await recordFailure(...args);
+      throw new Error('Synthetic restart immediately after failure commit');
+    });
+    await expect(actions.executeReviewedAction(record.approvalId)).rejects.toThrow('Synthetic restart immediately after failure commit');
+    interruption.mockRestore();
+    expect((await database.db.query("SELECT status,error_code FROM request_attempts WHERE operation='delete'")).rows)
+      .toEqual([{status:'retryable',error_code:'telegram_rate_limit'}]);
+    expect(await store.state(approval.actionKey(record.approvalId))).toMatchObject({state:'approved'});
+    expect(await store.state(`publication_removal:${record.publicationId}`)).toMatchObject({state:'retryable',approvalId:record.approvalId});
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(false); expect(remove).toHaveBeenCalledTimes(2);
+    await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
+    remove.mockResolvedValue(undefined);
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(true);
+    expect(remove.mock.calls.map(call => call[1])).toEqual(['179','180','180','178']);
+    expect((await database.db.query('SELECT deleted_at FROM publication_media_items')).rows.every(row => row.deleted_at)).toBe(true);
+  });
+  it.each(['expired','snapshot'] as const)('does not resume a partially deleted album after approved %s drift', async mutation => {
+    const record = await albumRemovalFixture();
+    const remove = vi.spyOn(BotApi.prototype,'delete').mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',1000));
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(false);
+    await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
+    if (mutation === 'expired') {
+      record.expiresAt = new Date(Date.now()-1000).toISOString(); await save(record);
+    } else await database.db.query(`UPDATE publication_snapshots SET content=jsonb_set(content,'{details}','"Changed"'::jsonb) WHERE id=$1`, [record.priorSnapshotId]);
+    remove.mockResolvedValue(undefined);
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(false); expect(remove).toHaveBeenCalledTimes(2);
+  });
+  it('leaves an unknown partial album deletion for manual review rather than authorizing another request', async () => {
+    const record = await albumRemovalFixture();
+    const remove = vi.spyOn(BotApi.prototype,'delete').mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new BotError('telegram_transport_unknown','unknown'));
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(false);
+    expect(await store.state(approval.actionKey(record.approvalId))).toMatchObject({state:'uncertain'});
+    expect(await actions.executeReviewedAction(record.approvalId)).toBe(false); expect(remove).toHaveBeenCalledTimes(2);
+  });
+
 });

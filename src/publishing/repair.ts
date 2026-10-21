@@ -5,7 +5,7 @@ import { publicationSnapshotSchema } from '../types.js';
 import { BotApi, BotError } from './bot-api.js';
 import { publicationAdmission } from './freshness.js';
 import { beginAttempt, editPublication, recordFailure } from './delivery.js';
-import { deletePublicationMedia } from './media-delivery.js';
+import { deletePublicationMessages } from './media-delivery.js';
 import { canonicalPublications, prepareUpdates } from './updates.js';
 import { destination, eligible, locked, publicationEditSelect, publicationSelect, rateLimited, snapshotFor, state, type Publication, type StoryContent } from './store.js';
 import { editVerificationTest, repairEditBlocked, trackedVerificationTest, verifiedBotSchema } from './repair-test.js';
@@ -32,8 +32,7 @@ export async function retryReplacements(api: BotApi, settings: AppSettings, dest
       canonicalSnapshotId: replacement.canonical_snapshot_id },settings);
     if (!attemptId) continue;
     try {
-      await deletePublicationMedia(publication, api);
-      await api.delete(destinationId,publication.message_id);
+      await deletePublicationMessages(publication, api);
     }
     catch (error) {
       await recordFailure(attemptId,publication,'delete',error,settings);

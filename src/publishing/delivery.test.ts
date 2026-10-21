@@ -28,7 +28,11 @@ beforeEach(() => {
   vi.mocked(publicationMedia).mockReset().mockResolvedValue([]);
   vi.mocked(publicationAdmission).mockReset().mockResolvedValue({ allowed: true });
   vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({ id: 123,is_bot: true });
-  mocks.query.mockReset().mockResolvedValue({ rows: [{ id: 'attempt' }] });
+  mocks.query.mockReset().mockImplementation(async (sql: string) => ({ rows:
+    sql.includes('SELECT 1 FROM request_attempts') ? []
+      : sql.includes('SELECT * FROM publications') ? [publication]
+        : sql.includes('SELECT delivery_kind') ? [{ delivery_kind: 'text', media_status: 'none', media_snapshot_id: 'snap' }]
+          : sql.includes('INSERT INTO request_attempts') ? [{ id: 'attempt' }] : [] }));
   mocks.transaction.mockReset().mockImplementation(async (run: (client: Pick<PoolClient,'query'>) => Promise<unknown>) => run({ query: mocks.query }));
 });
 
@@ -73,11 +77,11 @@ describe('durable publication delivery', () => {
     const send = vi.spyOn(api, 'send');
     expect(await sendPrepared(publication, api, defaultSettings)).toBeNull();
     expect(send).not.toHaveBeenCalled();
-    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('publication_media_prepare_failed'))).toBe(true);
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('UPDATE publications SET status=$2'))).toBe(true);
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO request_attempts'))).toBe(false);
   });
 
-  it('keeps canonical text separate from media and does not report incomplete attachments as success', async () => {
+  it('retains legacy canonical text separate from media and does not report incomplete attachments as success', async () => {
     const api = new BotApi('123:synthetic');
     const events: string[] = [];
     vi.spyOn(mediaPlan, 'preparePublicationMedia').mockImplementation(async () => { events.push('prepare'); return true; });

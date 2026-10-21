@@ -256,6 +256,7 @@ it('passes still-image attachments to writing, review and corrective calls', asy
     .mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(passed));
   await researchStory(storyId, defaultSettings);
   expect(summaryImages).toHaveBeenCalledWith(storyId, defaultSettings);
+  expect(mocks.generate.mock.calls[0]?.[0].systemPrompt).toContain('summary не более 500 символов');
   expect(mocks.generate).toHaveBeenCalledTimes(4);
   for (const [request] of mocks.generate.mock.calls) expect(request.images).toEqual(images);
 });

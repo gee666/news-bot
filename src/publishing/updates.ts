@@ -6,6 +6,7 @@ import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js
 import { snapshotSources } from './content.js';
 import { BotApi } from './bot-api.js';
 import { editPublication } from './delivery.js';
+import { renderCaption } from './caption.js';
 import { PublicationRenderError, render } from './render.js';
 import { eligible, locked, publicationEditSelect, rateLimited, supersedeAttempts, type Publication, type StoryContent } from './store.js';
 
@@ -65,8 +66,8 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
     await invalidateStaleEdits(client,settings,destinationId,undefined,storyIds);
     if (options.cancelOnly) return;
     const rows = await client.query<StoryContent & { publication_id: string; old_content: unknown; pending_content: unknown;
-      format_version: number; pending_snapshot_id: string | null; desired_story_id: string | null }>(`SELECT s.*,p.id AS publication_id,
-      snap.content AS old_content,desired.content AS pending_content,p.format_version,p.pending_snapshot_id,
+      delivery_kind: 'text' | 'album'; format_version: number; pending_snapshot_id: string | null; desired_story_id: string | null }>(`SELECT s.*,p.id AS publication_id,
+      snap.content AS old_content,desired.content AS pending_content,p.delivery_kind,p.format_version,p.pending_snapshot_id,
       coalesce(desired.story_id,snap.story_id) AS desired_story_id
       FROM (${canonicalPublications}) chosen JOIN stories s ON s.id=chosen.canonical_story_id
       JOIN publications p ON p.id=chosen.id JOIN publication_snapshots snap ON snap.id=p.snapshot_id
@@ -80,7 +81,8 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
         const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
           summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, destinationId);
         content = publicationSnapshotSchema.parse({ ...sent, sources });
-        render(content);
+        if (story.delivery_kind === 'album') renderCaption(content);
+        else render(content);
       }
       catch (error) {
         if (!(error instanceof PublicationRenderError || error instanceof ZodError)) throw error;

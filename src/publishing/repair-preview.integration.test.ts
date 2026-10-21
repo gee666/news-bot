@@ -116,6 +116,20 @@ describe.skipIf(!url)('reviewed repair preview and registered verification test'
     expect(await pointers()).toEqual(before);
     for (const method of ['identity','send','edit','delete'] as const) expect(BotApi.prototype[method]).not.toHaveBeenCalled();
   }, 60_000);
+  it('previews album captions within 1024 while retaining the full source inventory', async () => {
+    const id = await story(); const post = await publication(id, '5'); await provenance(id, 0, 6);
+    await database.db.query("UPDATE publications SET delivery_kind='album' WHERE id=$1", [post]);
+    await database.db.query('UPDATE stories SET summary=$1 WHERE id=$2', ['Подробная новость. '.repeat(300), id]);
+    await acceptFixtureStories(settings);
+    const before = await pointers();
+    const plan = await preview.previewPublicationRepair();
+    expect(plan.allReady).toBe(true);
+    expect(plan.posts[0]).toMatchObject({ ready: true, issues: [], expectedSourceUrls: 7, missingSourceUrls: 0,
+      metrics: { sourceUrls: 7, allSnapshotLinksRendered: false } });
+    expect(plan.posts[0]?.metrics?.characters).toBeLessThanOrEqual(1024);
+    expect(await pointers()).toEqual(before);
+    for (const method of ['identity','send','edit','delete'] as const) expect(BotApi.prototype[method]).not.toHaveBeenCalled();
+  });
   it('enforces read-only SQL even if a snapshot reader accidentally attempts a write', async () => {
     const id = await story(); await publication(id,'5'); await provenance(id);
     vi.spyOn(store,'snapshotFor').mockImplementation(async client => {

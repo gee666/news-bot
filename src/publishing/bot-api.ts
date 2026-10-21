@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { RenderedMessage } from './render.js';
 
+export const MAX_ALBUM_MEDIA = 10;
+
 const messageSchema = z.object({ message_id: z.number().int().positive(), chat: z.object({ id: z.number().int() }) });
 const userSchema = z.object({ id: z.number().int().positive(), is_bot: z.boolean() });
 export class BotError extends Error {
@@ -54,7 +56,7 @@ export class BotApi {
     const value = parsed.data;
     if (value.ok) return value.result;
     if (value.error_code === 429) throw new BotError('telegram_rate_limit', 'retryable', (value.parameters?.retry_after ?? 60) * 1000);
-    if (method === 'editMessageText' && value.error_code === 400 && value.description?.includes('message is not modified')) return true;
+    if ((method === 'editMessageText' || method === 'editMessageCaption') && value.error_code === 400 && value.description?.includes('message is not modified')) return true;
     if (method === 'deleteMessage' && value.error_code === 400 && value.description?.includes('message to delete not found')) return true;
     // A server error may occur after the operation took effect.
     if (response.status >= 500 || (value.error_code ?? 0) >= 500) throw new BotError('telegram_server_unknown', 'unknown');
@@ -107,6 +109,52 @@ export class BotApi {
       throw new BotError('telegram_media_response_unknown', 'unknown');
     }
     return parsed.data.map(item => String(item.message_id));
+  }
+
+  /** One caption-bearing request, with the original bytes and no reply/follow-up sends. */
+  async sendAlbum(destinationId: string, message: RenderedMessage, media: PublicationMedia[]): Promise<string[]> {
+    if (!media.length || media.length > MAX_ALBUM_MEDIA || message.plainText.length > 1024
+      || media.some(item => !item.data.length || !['image', 'video'].includes(item.type))) {
+      throw new BotError('telegram_album_invalid', 'failed');
+    }
+    const uploads = media.map(mediaUploadType);
+    const documents = uploads.every(type => type === 'document');
+    if (!documents && uploads.includes('document')) throw new BotError('telegram_media_batch_invalid', 'failed');
+    const form = new FormData();
+    form.set('chat_id', destinationId);
+    const single = media.length === 1 ? media[0] : undefined;
+    media.forEach((item, index) => {
+      const field = single ? mediaUploadType(item) : `file${index}`;
+      form.set(field, new Blob([new Uint8Array(item.data)], { type: item.mimeType }), `${field}.${mediaExtension(item.mimeType)}`);
+    });
+    if (single) {
+      form.set('caption', message.text);
+      form.set('parse_mode', message.parse_mode);
+      if (documents) form.set('disable_content_type_detection', 'true');
+    } else form.set('media', JSON.stringify(media.map((item, index) => ({
+      type: mediaUploadType(item), media: `attach://file${index}`,
+      ...(index === 0 ? { caption: message.text, parse_mode: message.parse_mode } : {}),
+      ...(documents ? { disable_content_type_detection: true } : {}),
+    }))));
+    const method = !single ? 'sendMediaGroup' : documents ? 'sendDocument' : mediaUploadType(single) === 'photo' ? 'sendPhoto' : 'sendVideo';
+    const value = await this.call(method, form);
+    const parsed = z.array(messageSchema).safeParse(single ? [value] : value);
+    if (!parsed.success || parsed.data.length !== media.length || parsed.data.some(item => String(item.chat.id) !== destinationId)
+      || new Set(parsed.data.map(item => item.message_id)).size !== media.length) {
+      throw new BotError('telegram_album_response_unknown', 'unknown');
+    }
+    return parsed.data.map(item => String(item.message_id));
+  }
+
+  async editCaption(destinationId: string, messageId: string, message: RenderedMessage): Promise<void> {
+    if (message.plainText.length > 1024) throw new BotError('telegram_caption_invalid', 'failed');
+    const value = await this.call('editMessageCaption', { chat_id: destinationId, message_id: Number(messageId),
+      caption: message.text, parse_mode: message.parse_mode });
+    if (value === true) return;
+    const parsed = messageSchema.safeParse(value);
+    if (!parsed.success || String(parsed.data.chat.id) !== destinationId || String(parsed.data.message_id) !== messageId) {
+      throw new BotError('telegram_edit_response_unknown', 'unknown');
+    }
   }
 
   async edit(destinationId: string, messageId: string, message: RenderedMessage): Promise<void> {

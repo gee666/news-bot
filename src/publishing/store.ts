@@ -13,6 +13,7 @@ export interface Publication {
   snapshot_id: string; pending_snapshot_id: string | null; format_version: number; bot_id: string | null;
   status: 'prepared' | 'sending' | 'published' | 'uncertain' | 'failed';
   attempt_count: number; created_at: Date; next_retry_at: Date | null; content: unknown;
+  delivery_kind?: 'text' | 'album';
   media_status?: 'none' | 'pending' | 'complete' | 'failed' | 'unknown'; media_snapshot_id?: string | null;
 }
 export const publicationSelect = `SELECT p.*, s.content FROM publications p

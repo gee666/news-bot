@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
 import { defaultSettings } from '../settings.js';
 import { publicationMedia } from '../media/story-media.js';
-import { deduplicateMedia, expirePublicationMedia, partitionMedia, preparePublicationMedia, recoverPublicationMedia } from './media-plan.js';
+import { deduplicateMedia, expirePublicationMedia, partitionMedia, preparePublicationMedia, recoverPublicationMedia, selectAlbumMedia } from './media-plan.js';
 import type { Publication } from './store.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn() }));
-vi.mock('../db.js', () => ({ transaction: mocks.transaction }));
+vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: mocks.transaction }));
 vi.mock('../media/story-media.js', () => ({ publicationMedia: vi.fn() }));
 const publication: Publication = { id: 'publication', story_id: 'story', snapshot_id: 'snapshot', pending_snapshot_id: null,
   destination_id: '-100123', status: 'prepared', message_id: null, bot_id: '123', format_version: 1,
@@ -110,4 +110,27 @@ describe('original-format plan partitioning', () => {
       expect(args[5]).toBe(items[index]?.data);
     });
   });
+});
+
+
+describe('single album selection', () => {
+  it.each([0, 1, 10, 11])('bounds %i candidates to one album of at most ten original items', count => {
+    const items = Array.from({ length: count }, (_, index) => ({ type: 'image' as const, mimeType: 'image/png', data: Buffer.from(String(index)) }));
+    const selected = selectAlbumMedia(items);
+    expect(selected).toEqual(items.slice(0, 10));
+    selected.forEach((item, index) => expect(item.data).toBe(items[index]?.data));
+  });
+  it('prioritizes native JPEG/PNG/MP4, omitting incompatible documents and excess items', () => {
+    const items = ['image/webp', 'image/jpeg', 'video/webm', 'image/png', 'video/mp4'].map((mimeType, index) => ({
+      type: mimeType.startsWith('video') ? 'video' as const : 'image' as const, mimeType, data: Buffer.from(String(index)),
+    }));
+    expect(selectAlbumMedia(items)).toEqual([items[1], items[3], items[4]]);
+    expect(selectAlbumMedia([items[0]!, items[2]!])).toEqual([items[0], items[2]]);
+  });
+});
+
+it('leaves text-only publications untouched while preparing caption-first sends', async () => {
+  expect(await preparePublicationMedia(publication, defaultSettings, true)).toBe(false);
+  expect(mocks.transaction).not.toHaveBeenCalled();
+  expect(mocks.query.mock.calls.every(([sql]) => !/UPDATE|INSERT|DELETE/u.test(String(sql)))).toBe(true);
 });

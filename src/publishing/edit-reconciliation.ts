@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import { readMessageFingerprint } from './reconciliation.js';
+import { renderCaption } from './caption.js';
 import { render } from './render.js';
 import { contentFingerprint } from './reconciliation.js';
 import type { Publication } from './store.js';
@@ -19,7 +20,7 @@ export async function reconcileUnknownEdit(publication: Publication,
   const metadata = metadataSchema.safeParse(attempt.response_metadata);
   if (!metadata.success || metadata.data.snapshotId !== (publication.pending_snapshot_id ?? publication.snapshot_id)) return false;
   let expected: string;
-  try { const message = render(publication.content); expected = contentFingerprint(message.plainText,message.links); }
+  try { const message = publication.delivery_kind === 'album' ? renderCaption(publication.content) : render(publication.content); expected = contentFingerprint(message.plainText,message.links); }
   catch { return false; }
   if (metadata.data.fingerprint !== expected) return false;
   let observed: string | null;

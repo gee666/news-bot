@@ -23,7 +23,7 @@ async function finishMedia(publication: Publication): Promise<boolean> {
 
 /** Only explicit Telegram rejections may be retried. Unknown batches require manual review. */
 export async function deliverPublicationMedia(publication: Publication, api: BotApi, settings: AppSettings): Promise<boolean> {
-  if (!publication.message_id || publication.status !== 'published') return false;
+  if (publication.delivery_kind === 'album' || !publication.message_id || publication.status !== 'published') return false;
   const botId = String((await api.identity()).id);
   if (publication.bot_id !== botId) return false;
   const batches = (await db.query<Batch>(`SELECT * FROM publication_media_batches WHERE publication_id=$1 ORDER BY batch_number`,
@@ -88,7 +88,7 @@ export async function deliverPublicationMedia(publication: Publication, api: Bot
 }
 
 export async function retryPublicationMedia(api: BotApi, settings: AppSettings, destinationId: string): Promise<void> {
-  const pending = (await db.query<Publication>(`${publicationSelect} WHERE p.destination_id=$1 AND p.status='published'
+  const pending = (await db.query<Publication>(`${publicationSelect} WHERE p.destination_id=$1 AND p.delivery_kind='text' AND p.status='published'
     AND p.media_status='pending' AND (NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status<>'sent')
       OR EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id
         AND b.status IN ('prepared','retryable') AND (b.next_retry_at IS NULL OR b.next_retry_at<=now()))) ORDER BY p.created_at`,
@@ -106,10 +106,23 @@ export async function deletePublicationMedia(publication: Publication, api: BotA
   const items = (await db.query<Item>(`SELECT i.* FROM publication_media_items i JOIN publication_media_batches b ON b.id=i.batch_id
     WHERE b.publication_id=$1 AND i.message_id IS NOT NULL AND i.deleted_at IS NULL ORDER BY b.batch_number,i.ordinal`, [publication.id])).rows;
   for (const item of items) {
-    if (!item.message_id) continue;
+    // The caller deletes the canonical caption message exactly once, after its siblings.
+    if (!item.message_id || item.message_id === publication.message_id) continue;
     await api.delete(publication.destination_id, item.message_id);
     await db.query('UPDATE publication_media_items SET deleted_at=now(),data=NULL WHERE id=$1', [item.id]);
   }
   await db.query(`UPDATE publication_media_items SET data=NULL WHERE batch_id IN
     (SELECT id FROM publication_media_batches WHERE publication_id=$1)`, [publication.id]);
+}
+
+/** Delete siblings before the caption, retaining per-item progress for authorized retries. */
+export async function deletePublicationMessages(publication: Publication, api: BotApi): Promise<void> {
+  if (!publication.message_id) throw new BotError('publication_message_missing', 'failed');
+  await deletePublicationMedia(publication, api);
+  const deleted = (await db.query(`SELECT 1 FROM publication_media_items i JOIN publication_media_batches b ON b.id=i.batch_id
+    WHERE b.publication_id=$1 AND i.message_id=$2 AND i.deleted_at IS NOT NULL`, [publication.id, publication.message_id])).rows.length > 0;
+  if (deleted) return;
+  await api.delete(publication.destination_id, publication.message_id);
+  await db.query(`UPDATE publication_media_items i SET deleted_at=now(),data=NULL FROM publication_media_batches b
+    WHERE b.id=i.batch_id AND b.publication_id=$1 AND i.message_id=$2`, [publication.id, publication.message_id]);
 }

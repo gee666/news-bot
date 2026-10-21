@@ -1,8 +1,9 @@
+import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import { getSettings } from '../settings.js';
-import { BotApi } from './bot-api.js';
+import { BotApi, BotError } from './bot-api.js';
 import { editPublication, recordFailure } from './delivery.js';
-import { deletePublicationMedia } from './media-delivery.js';
+import { deletePublicationMessages } from './media-delivery.js';
 import { actionKey, loadAction, snapshotHash } from './approval.js';
 import { locked, publicationEditSelect, rateLimited, type Publication } from './store.js';
 
@@ -51,25 +52,35 @@ export async function executeReviewedAction(id: string, api = new BotApi()): Pro
           || owned.status !== 'published' || owned.bot_id !== publication.bot_id) return null;
         if (await rateLimited(client)) return null;
         if ((await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND status IN ('running','unknown')`,[owned.id])).rows.length) return null;
-        if ((await client.query('SELECT 1 FROM operational_state WHERE key=$1',[`publication_removal:${owned.id}`])).rows.length) return null;
+        const removal = (await client.query<{ value: unknown }>('SELECT value FROM operational_state WHERE key=$1 FOR UPDATE',
+          [`publication_removal:${owned.id}`])).rows[0];
+        if (removal) {
+          const retry = z.object({ state: z.literal('retryable'), approvalId: z.string(), snapshotId: z.string(), messageId: z.string() }).safeParse(removal.value);
+          if (!retry.success || retry.data.approvalId !== id || retry.data.snapshotId !== owned.snapshot_id || retry.data.messageId !== owned.message_id) return null;
+        }
         const attempt = (await client.query<{ id: string }>(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status,response_metadata)
           SELECT $1,'telegram-bot','delete',coalesce(max(attempt_number),0)+1,'running',$2 FROM request_attempts WHERE publication_id=$1 RETURNING id`,
         [owned.id,JSON.stringify({ approvalId:id,snapshotId:action.priorSnapshotId,reason:'coordinator_approved_spurious_event' })])).rows[0];
         if (!attempt) throw new Error('Removal attempt insert failed');
-        await client.query(`INSERT INTO operational_state(key,value) VALUES($1,$2)`,[`publication_removal:${owned.id}`,
+        await client.query(`INSERT INTO operational_state(key,value) VALUES($1,$2)
+          ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`,[`publication_removal:${owned.id}`,
           JSON.stringify({ publicationId:owned.id,messageId:owned.message_id,approvalId:id,snapshotId:owned.snapshot_id,state:'running' })]);
         await client.query(`UPDATE operational_state SET value=value||'{"state":"running"}'::jsonb,updated_at=now() WHERE key=$1`,[actionKey(id)]);
         return attempt.id;
       });
       if (!attemptId) return false;
       try {
-        await deletePublicationMedia(publication, api);
-        await api.delete(publication.destination_id,action.messageId);
+        await deletePublicationMessages(publication, api);
       }
       catch (error) {
-        await recordFailure(attemptId,publication,'delete',error,settings);
-        await db.query(`UPDATE operational_state SET value=value||'{"state":"uncertain"}'::jsonb,updated_at=now() WHERE key=$1`,[`publication_removal:${publication.id}`]);
-        await finishAction(id,'uncertain');
+        const retryable = error instanceof BotError && error.outcome === 'retryable' && error.code === 'telegram_rate_limit';
+        // The rejection and retry authorization must survive a restart together.
+        await recordFailure(attemptId,publication,'delete',error,settings,async client => {
+          await client.query(`UPDATE operational_state SET value=value||jsonb_build_object('state',$2::text),updated_at=now() WHERE key=$1`,
+            [`publication_removal:${publication.id}`, retryable ? 'retryable' : 'uncertain']);
+          await client.query(`UPDATE operational_state SET value=value||jsonb_build_object('state',$2::text),updated_at=now() WHERE key=$1`,
+            [actionKey(id), retryable ? 'approved' : 'uncertain']);
+        });
         return false;
       }
       await transaction(async client => {

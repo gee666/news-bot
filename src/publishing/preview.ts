@@ -8,6 +8,7 @@ import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js
 import type { RepairOptions } from './repair.js';
 import { repairEditBlocked, trackedVerificationTest, verifiedBotSchema } from './repair-test.js';
 import { expectedSourceUrls } from './preview-sources.js';
+import { renderCaption } from './caption.js';
 import { PublicationRenderError, render } from './render.js';
 import { sourceGroup } from './sources.js';
 import { eligible, rateLimited, snapshotFor, type StoryContent } from './store.js';
@@ -30,7 +31,7 @@ interface DuplicatePreview {
 interface TestPreview { publicationId: string | null; messageId: string | null; ready: boolean; issues: string[]; metrics: Metrics | null; storedFormatVersion: number | null }
 interface StoryRow extends StoryContent {
   publication_id: string; message_id: string; bot_id: string | null; is_eligible: boolean;
-  old_content: unknown; pending_content: unknown; pending_snapshot_id: string | null; snapshot_id: string; format_version: number;
+  delivery_kind?: 'text' | 'album'; old_content: unknown; pending_content: unknown; pending_snapshot_id: string | null; snapshot_id: string; format_version: number;
 }
 export interface RepairPreview {
   destinationId: string; verifiedBotId: string; identityCheck: 'persisted_only'; publishingEnabled: boolean;
@@ -39,12 +40,13 @@ export interface RepairPreview {
   proposedDuplicateDeletions: DuplicatePreview[]; unaccountedTrackedMessages: Array<{ publicationId: string; messageId: string }>;
 }
 function hash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
-function metrics(snapshot: PublicationSnapshot): Metrics {
-  const message = render(snapshot);
+function metrics(snapshot: PublicationSnapshot, deliveryKind: 'text' | 'album' = 'text'): Metrics {
+  const message = deliveryKind === 'album' ? renderCaption(snapshot) : render(snapshot);
   const expected = new Set(snapshot.sources.map(source => source.url));
   const rendered = new Set(message.links.map(link => link.url));
   return { characters: message.plainText.length,detailCharacters: snapshot.details.length,sourceUrls: expected.size,
-    entities: 1 + message.links.length + new Set(snapshot.sources.map(sourceGroup)).size,
+    entities: deliveryKind === 'album' ? message.links.length + (message.text.match(/<b>/gu)?.length ?? 0)
+      : 1 + message.links.length + new Set(snapshot.sources.map(sourceGroup)).size,
     snapshotSha256: hash(JSON.stringify(snapshot)),detailsSha256: hash(snapshot.details),
     allSnapshotLinksRendered: expected.size === rendered.size && [...expected].every(url => rendered.has(url)) };
 }
@@ -61,7 +63,7 @@ async function previewStory(client: PoolClient, row: StoryRow, botId: string, co
   try {
     if (!await generationIsCurrent(row.id,settings,client.query.bind(client))) preview.issues.push('current_generation_missing');
     const snapshot = await snapshotFor(client,row);
-    preview.metrics = metrics(snapshot);
+    preview.metrics = metrics(snapshot, row.delivery_kind);
     if (snapshot.headline !== row.headline || snapshot.score !== row.interest_score
       || snapshot.details !== (row.researched ? row.summary : row.translated_excerpt)
       || snapshot.detailsKind !== (row.researched ? 'summary' : 'excerpt')) preview.issues.push('canonical_content_mismatch');
@@ -71,7 +73,7 @@ async function previewStory(client: PoolClient, row: StoryRow, botId: string, co
     preview.expectedSourceUrls = expected.size;
     preview.missingSourceUrls = [...expected].filter(url => !actual.has(url)).length;
     if (preview.missingSourceUrls) preview.issues.push('supporting_sources_missing');
-    if (!preview.metrics.allSnapshotLinksRendered) preview.issues.push('rendered_sources_missing');
+    if (row.delivery_kind !== 'album' && !preview.metrics.allSnapshotLinksRendered) preview.issues.push('rendered_sources_missing');
     const previous = publicationSnapshotSchema.safeParse(row.pending_snapshot_id ? row.pending_content : row.old_content);
     preview.wouldStageSnapshot = !(previous.success && JSON.stringify(previous.data) === JSON.stringify(snapshot)
       && (row.pending_snapshot_id !== null || row.format_version === 1));
@@ -98,7 +100,7 @@ export async function previewPublicationRepair(options: RepairOptions = {}): Pro
     if (verified.destinationId !== destinationId) throw new Error('Preview destination verification mismatch');
     const botId = String(verified.botId);
     const cooldown = await rateLimited(client);
-    const rows = (await client.query<StoryRow>(`SELECT s.*,p.id AS publication_id,p.message_id,p.bot_id,p.format_version,
+    const rows = (await client.query<StoryRow>(`SELECT s.*,p.id AS publication_id,p.message_id,p.bot_id,p.format_version,p.delivery_kind,
       p.snapshot_id,p.pending_snapshot_id,snap.content AS old_content,desired.content AS pending_content,(${eligible}) AS is_eligible
       FROM (${canonicalPublications}) chosen JOIN stories s ON s.id=chosen.canonical_story_id
       JOIN publications p ON p.id=chosen.id JOIN publication_snapshots snap ON snap.id=p.snapshot_id

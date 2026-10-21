@@ -37,6 +37,12 @@ const editorialPrompt = `Напиши понятную русскую новос
 Верни JSON с headline, summary и source_urls. В source_urls укажи ссылки на использованные источники из переданного материала, обычно 1–3 основных источника.
 Не выдумывай ссылки. Ссылки будут показаны отдельно, не включай их, HTML, Markdown или номера сносок в summary.`;
 
+const captionPrompt = `
+Новость с изображениями будет опубликована одним альбомом с подписью, не отдельным текстовым сообщением.
+Общий лимит подписи Telegram составляет 1024 символа вместе с заголовком, оценкой и ссылками на источники.
+Оставь место для служебных строк и источников: headline не более 110 символов, summary не более 500 символов.
+Сохрани главные факты и существенную неопределённость. Не обрывай предложения. Для продолжения earlier_summary не более 100 символов.`;
+
 const followupPrompt = `
 Это продолжение темы, которую читатель уже получил в previous_posts (от старых к новым).
 Сначала реши new_information: есть ли в новых материалах существенные факты, которых нет в previous_posts: результаты, цифры, сроки, цены, доступность, официальные подтверждения или опровержения, последствия. Повторы, пересказы другими словами, мелкие детали и сообщения об отсутствии подтверждений новыми сведениями не являются.
@@ -111,9 +117,10 @@ export async function researchStory(storyId: string, settings: AppSettings, forc
     ...(thread.length ? { previous_posts:thread.map(post=>({headline:post.headline,summary:post.details,
       ...(post.earlier ? { earlier:post.earlier } : {})})) } : {}) };
   const images = await summaryImages(storyId, settings);
+  const presentationPrompt = editorialPrompt + (images.length ? captionPrompt : '');
   const write = (prompt: unknown, operation: string, signal?: AbortSignal): Promise<Draft> => thread.length
-    ? generateOnce(generator, followupSchema, editorialPrompt + followupPrompt, prompt, operation, signal, images)
-    : generateOnce(generator, editorialSchema, editorialPrompt, prompt, operation, signal, images);
+    ? generateOnce(generator, followupSchema, presentationPrompt + followupPrompt, prompt, operation, signal, images)
+    : generateOnce(generator, editorialSchema, presentationPrompt, prompt, operation, signal, images);
   const absorb = async (): Promise<'absorbed'> => {
     const previous = thread.at(-1);
     if (!previous) throw new Error('Follow-up has no published thread');

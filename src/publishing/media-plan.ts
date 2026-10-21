@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { transaction } from '../db.js';
+import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { publicationMedia } from '../media/story-media.js';
-import { BotError, mediaUploadType, type PublicationMedia } from './bot-api.js';
+import { BotError, MAX_ALBUM_MEDIA, mediaUploadType, type PublicationMedia } from './bot-api.js';
 import type { Publication } from './store.js';
 
 export function deduplicateMedia(media: PublicationMedia[]): Array<PublicationMedia & { digest: string }> {
@@ -43,27 +43,39 @@ export function partitionMedia<T extends PublicationMedia>(media: T[]): T[][] {
   return batches;
 }
 
+/** Prefer one native photo/video group. Other formats stay unmodified as documents. */
+export function selectAlbumMedia<T extends PublicationMedia>(media: T[]): T[] {
+  const native = media.filter(item => mediaUploadType(item) !== 'document');
+  return (native.length ? native : media).slice(0, MAX_ALBUM_MEDIA);
+}
+
 /** Download and commit the entire upload plan before the canonical Telegram request. */
-export async function preparePublicationMedia(publication: Publication, settings: AppSettings): Promise<boolean> {
+export async function preparePublicationMedia(publication: Publication, settings: AppSettings, captionFirst = false): Promise<boolean> {
   if (!publication.story_id) return false;
-  if (publication.media_snapshot_id === publication.snapshot_id) {
+  // Once a send was authorized, its byte selection never changes, including after a 429.
+  const attempted = captionFirst && (await db.query(`SELECT 1 FROM request_attempts
+    WHERE publication_id=$1 AND operation='send' LIMIT 1`, [publication.id])).rows.length > 0;
+  if (publication.media_snapshot_id === publication.snapshot_id || attempted) {
     if (publication.media_status === 'failed' || publication.media_status === 'unknown') {
-      throw new BotError('publication_media_plan_unavailable', 'failed');
+      throw new BotError('publication_media_plan_unavailable', publication.media_status === 'unknown' ? 'unknown' : 'failed');
     }
-    return publication.media_status !== 'none';
+    return Boolean(publication.media_snapshot_id) && publication.media_status !== 'none';
   }
-  const media = deduplicateMedia(await publicationMedia(publication.story_id, settings));
+  const downloaded = deduplicateMedia(await publicationMedia(publication.story_id, settings));
+  const media = captionFirst ? selectAlbumMedia(downloaded) : downloaded;
   if (!media.length && !publication.media_snapshot_id) return false;
   await transaction(async client => {
     const current = (await client.query<Publication>('SELECT * FROM publications WHERE id=$1 FOR UPDATE', [publication.id])).rows[0];
     if (!current || current.status !== 'prepared' || current.message_id || current.snapshot_id !== publication.snapshot_id) {
-      throw new BotError('publication_media_plan_changed', 'failed');
+      throw new BotError('publication_media_plan_changed', 'retryable');
     }
+    if ((await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND operation='send' LIMIT 1`,
+      [publication.id])).rows.length) throw new BotError('publication_media_plan_changed', 'retryable');
     const previous = (await client.query<{ digest: string; expires_at: Date }>(`SELECT i.digest,i.expires_at
       FROM publication_media_items i JOIN publication_media_batches b ON b.id=i.batch_id WHERE b.publication_id=$1`, [publication.id])).rows;
     const deadlines = new Map(previous.map(item => [item.digest, item.expires_at.getTime()]));
     await client.query('DELETE FROM publication_media_batches WHERE publication_id=$1', [publication.id]);
-    for (const [batchNumber, batch] of partitionMedia(media).entries()) {
+    for (const [batchNumber, batch] of (captionFirst && media.length ? [media] : partitionMedia(media)).entries()) {
       const batchId = randomUUID();
       await client.query('INSERT INTO publication_media_batches(id,publication_id,batch_number) VALUES($1,$2,$3)',
         [batchId, publication.id, batchNumber]);
@@ -75,8 +87,8 @@ export async function preparePublicationMedia(publication: Publication, settings
         [batchId, ordinal, item.type, item.mimeType, item.digest, item.data, deadline]);
       }
     }
-    await client.query(`UPDATE publications SET media_snapshot_id=$2,media_status=$3,updated_at=now() WHERE id=$1`,
-      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none']);
+    await client.query(`UPDATE publications SET media_snapshot_id=$2,media_status=$3,delivery_kind=$4,updated_at=now() WHERE id=$1`,
+      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none', captionFirst && media.length ? 'album' : 'text']);
   });
   return media.length > 0;
 }
