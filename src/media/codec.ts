@@ -116,10 +116,36 @@ export async function compressModelImage(data: Buffer, options: MediaCodecOption
   const output = await createMediaRunner(options)('ffmpeg', [
     '-v', 'error', '-threads', '1', '-filter_threads', '1', '-i', 'pipe:0', '-map', '0:v:0', '-frames:v', '1',
     '-vf', modelImageScale, '-map_metadata', '-1', '-c:v', 'libwebp', '-threads', '1',
-    '-quality', '90', '-preset', 'text', '-compression_level', '6', '-lossless', '0', '-f', 'webp', 'pipe:1',
+    // The WebP muxer seeks to rewrite RIFF size. On FFmpeg 5, pipe output over
+    // its IO buffer keeps size zero and appends the rewrite at EOF. Emit the encoder's complete packet instead.
+    '-quality', '90', '-preset', 'text', '-compression_level', '6', '-lossless', '0', '-f', 'image2pipe', 'pipe:1',
   ], data);
   requireOutput(output);
+  requireWebpContainer(output);
   return output;
+}
+
+/** Reject malformed encoder output before an image can reach model dispatch. */
+function requireWebpContainer(output: Buffer): void {
+  const invalid = () => { throw new Error('Media encoder produced an invalid WebP container'); };
+  if (output.length < 20 || output.toString('ascii', 0, 4) !== 'RIFF'
+    || output.toString('ascii', 8, 12) !== 'WEBP' || output.readUInt32LE(4) !== output.length - 8) invalid();
+  let offset = 12;
+  let images = 0;
+  while (offset < output.length) {
+    if (offset + 8 > output.length) invalid();
+    const kind = output.toString('ascii', offset, offset + 4);
+    const size = output.readUInt32LE(offset + 4);
+    const end = offset + 8 + size;
+    const paddedEnd = end + size % 2;
+    if (paddedEnd > output.length || (size % 2 && output[end] !== 0)) invalid();
+    if (kind === 'VP8 ' || kind === 'VP8L') {
+      if (!size) invalid();
+      images++;
+    }
+    offset = paddedEnd;
+  }
+  if (images !== 1) invalid();
 }
 
 /** Some MP4 containers need a seekable input. Only that fallback writes to disk. */

@@ -1,3 +1,4 @@
+import { convertToPng } from '@earendil-works/pi-coding-agent';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
@@ -8,16 +9,34 @@ const exec = promisify(execFile);
 const ppm = (width: number, height: number, pixels = Buffer.alloc(width * height * 3, 100)) =>
   Buffer.concat([Buffer.from(`P6\n${width} ${height}\n255\n`), pixels]);
 
+const webp = Buffer.from('UklGRnAAAABXRUJQVlA4IGQAAAAQBwCdASqAAIAAPjEYi0SiIaEQRAAgAwS0t3C6TLgPwA/AAAC1YSrOcgjYgqOe2IvEFRz2xF4gqOe2IvEFRz2wuAD+/zwb//+xmP2jP8kr//+DMfwZj+DMf/CfGxI0QAAAAAAA', 'base64');
+
+function expectWebpContainer(output: Buffer): void {
+  expect(output.toString('ascii', 0, 4)).toBe('RIFF');
+  expect(output.toString('ascii', 8, 12)).toBe('WEBP');
+  expect(output.readUInt32LE(4)).toBe(output.length - 8);
+  let offset = 12;
+  while (offset < output.length) {
+    expect(offset + 8).toBeLessThanOrEqual(output.length);
+    const size = output.readUInt32LE(offset + 4);
+    const end = offset + 8 + size;
+    expect(end + size % 2).toBeLessThanOrEqual(output.length);
+    if (size % 2) expect(output[end]).toBe(0);
+    offset = end + size % 2;
+  }
+  expect(offset).toBe(output.length);
+}
+
 describe('compressModelImage', () => {
   it('uses quality 90, the text preset, Lanczos, and secure input limits without modifying the source', async () => {
     const source = Buffer.from('original');
-    const run = vi.fn<MediaCommandRunner>(async () => Buffer.from('webp'));
-    expect(await compressModelImage(source, { run })).toEqual(Buffer.from('webp'));
+    const run = vi.fn<MediaCommandRunner>(async () => Buffer.from(webp));
+    expect(await compressModelImage(source, { run })).toEqual(webp);
     const args = run.mock.calls[0]?.[1] ?? [];
     for (const [option, value] of [
       ['-protocol_whitelist', 'pipe,file'], ['-max_pixels', '40000000'], ['-i', 'pipe:0'],
       ['-c:v', 'libwebp'], ['-quality', '90'], ['-preset', 'text'], ['-compression_level', '6'],
-      ['-lossless', '0'], ['-frames:v', '1'], ['-f', 'webp'], ['-threads', '1'],
+      ['-lossless', '0'], ['-frames:v', '1'], ['-f', 'image2pipe'], ['-threads', '1'],
     ]) expect(args[args.indexOf(option ?? '') + 1]).toBe(value);
     expect(args.indexOf('-max_pixels')).toBeLessThan(args.indexOf('-i'));
     expect(args).toContain('-xerror');
@@ -28,6 +47,29 @@ describe('compressModelImage', () => {
     expect(args.at(-1)).toBe('pipe:1');
     expect(run.mock.calls[0]?.[2]).toBe(source);
     expect(source.toString()).toBe('original');
+  });
+
+  it('rejects malformed RIFF sizes, truncated chunks, missing padding and missing image data', async () => {
+    const zeroRiff = Buffer.from(webp);
+    zeroRiff.writeUInt32LE(0, 4);
+    const appendedRewrite = Buffer.concat([zeroRiff, webp.subarray(4, 8)]);
+    const truncatedChunk = webp.subarray(0, -2);
+    const missingPadding = Buffer.concat([webp, Buffer.from('JUNK'), Buffer.from([1, 0, 0, 0, 7])]);
+    missingPadding.writeUInt32LE(missingPadding.length - 8, 4);
+    const nonzeroPadding = Buffer.concat([missingPadding, Buffer.from([1])]);
+    nonzeroPadding.writeUInt32LE(nonzeroPadding.length - 8, 4);
+    const noImage = Buffer.from(webp);
+    noImage.write('JUNK', 12);
+    const chunkTooLong = Buffer.from(webp);
+    chunkTooLong.writeUInt32LE(0xffffffff, 16);
+    for (const output of [Buffer.from('webp'), zeroRiff, appendedRewrite, truncatedChunk,
+      missingPadding, nonzeroPadding, noImage, chunkTooLong]) {
+      await expect(compressModelImage(Buffer.from('source'), { run: async () => output }))
+        .rejects.toThrow('invalid WebP container');
+    }
+    const paddedChunk = Buffer.from(nonzeroPadding);
+    paddedChunk[paddedChunk.length - 1] = 0;
+    expect(await compressModelImage(Buffer.from('source'), { run: async () => paddedChunk })).toEqual(paddedChunk);
   });
 
   it('keeps comparison images and video frames at the same 2560-pixel bound', async () => {
@@ -70,8 +112,7 @@ describe.skipIf(!hasTools.every(Boolean))('real model image compression', () => 
     const source = ppm(width, height);
     const original = Buffer.from(source);
     const output = await compressModelImage(source);
-    expect(output.subarray(0, 4).toString()).toBe('RIFF');
-    expect(output.subarray(8, 12).toString()).toBe('WEBP');
+    expectWebpContainer(output);
     const metadata = await createMediaRunner({})('ffprobe', [
       '-v', 'error', '-show_entries', 'stream=codec_name,width,height', '-of', 'json', 'pipe:0',
     ], output);
@@ -79,6 +120,31 @@ describe.skipIf(!hasTools.every(Boolean))('real model image compression', () => 
     expect(parsed).toMatchObject({ streams: [{ codec_name: 'webp', width: expectedWidth, height: expectedHeight }] });
     expect(source.equals(original)).toBe(true);
     expect(output.length).toBeLessThan(source.length);
+  });
+
+  it.each([794, 795])('keeps complete RIFF lengths for noisy %i x 1280 WebP beyond the muxer IO buffer', async width => {
+    const height = 1280;
+    const pixels = Buffer.alloc(width * height * 3);
+    let seed = 12345;
+    for (let index = 0; index < pixels.length; index++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      pixels[index] = seed >>> 24;
+    }
+    const source = ppm(width, height, pixels);
+    const original = Buffer.from(source);
+    const output = await compressModelImage(source);
+    expect(output.length).toBeGreaterThan(64 * 1024);
+    expectWebpContainer(output);
+    // Decode through Pi's independent Photon library as well as checking the container.
+    // Photon and ffprobe alone tolerate the old zero-length RIFF bug.
+    const converted = await convertToPng(output.toString('base64'), 'image/webp');
+    expect(converted).not.toBeNull();
+    if (!converted) throw new Error('Pi could not decode the WebP');
+    expect(converted.mimeType).toBe('image/png');
+    const png = Buffer.from(converted.data, 'base64');
+    expect(png.readUInt32BE(16)).toBe(width);
+    expect(png.readUInt32BE(20)).toBe(height);
+    expect(source.equals(original)).toBe(true);
   });
 
   it('preserves thin text strokes and high contrast through real WebP decoding', async () => {

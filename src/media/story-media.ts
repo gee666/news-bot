@@ -10,6 +10,8 @@ import { downloadMedia, mediaDescriptor } from './download.js';
 import { deduplicateMedia, compressModelImage, sweepComparisonTemps, type MediaCandidate } from './comparison.js';
 import { judgeMedia } from './judgment.js';
 
+// Codec changes must invalidate selections made while visual comparisons were rejected.
+const preparationVersion = 'media-v2-webp-container';
 const cache = new MediaCache();
 const active = new Map<string, Promise<MediaCandidate[]>>();
 const sourceSchema = z.object({ revision_id: z.string(), metadata: z.record(z.string(), z.unknown()),
@@ -38,7 +40,7 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
   });
   if (!descriptors.length) return [];
   await requireInferenceApproval(sources.map(source => source.access), `media:${storyId}`);
-  const fingerprint = createHash('sha256').update(JSON.stringify(descriptors)).digest('hex');
+  const fingerprint = createHash('sha256').update(JSON.stringify({ version: preparationVersion, descriptors })).digest('hex');
   const cached = await cache.load(storyId, fingerprint);
   if (cached) return cached;
   const candidates: MediaCandidate[] = [];
