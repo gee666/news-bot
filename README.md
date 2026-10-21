@@ -257,3 +257,7 @@ News history defaults to 14 days by original publication time or first collectio
 Use npm and `package-lock.json`; there is no separate pnpm lockfile. `npm run pi:update` updates both Pi packages together in isolated staging and accepts the lockfile only after typecheck, lint, tests and build pass. It does not deploy or restart production. See [scheduling and recovery](docs/pi-updates.md).
 
 Run `npm audit` to check current advisories. Telegram's GramJS package is marked deprecated upstream.
+
+### Images and videos
+
+Source photos and native video attachments are deduplicated before publishing. Summarization receives text and up to ten still images, configurable with `MEDIA_SUMMARY_MAX_IMAGES`. Media is temporary and expires within seven days if unpublished. See [media handling](docs/media.md) for comparison rules, Telegram delivery and cleanup.

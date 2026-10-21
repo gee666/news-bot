@@ -8,6 +8,8 @@ import { checkPublicationAdmission } from './admission.js';
 import { retryEdits } from './updates.js';
 import { prepareReadyStories } from './ready.js';
 import { retryReplacements } from './repair.js';
+import { recoverPublicationMedia } from './media-plan.js';
+import { retryPublicationMedia } from './media-delivery.js';
 import { adoptPreparedPublications, destination, locked, publicationSelect, rateLimited, refreshPrepared, state, tryLocked, unsafeSendAttempt, type Publication } from './store.js';
 
 const verificationSchema = z.object({ verified: z.literal(true), destinationId: z.string(), botId: z.number().int().positive() });
@@ -45,12 +47,16 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   if (!verification.success || verification.data.destinationId !== destinationId) return;
   await recoverSends(destinationId);
   await recoverEdits(destinationId);
+  await recoverPublicationMedia(destinationId);
   if (await rateLimited()) return;
   if (!selectNewStories) {
     const row = (await db.query<{ pending: boolean }>(`SELECT EXISTS(SELECT 1 FROM publications p WHERE p.destination_id=$1
       AND ${due} AND ((p.status='prepared' AND (p.story_id IS NOT NULL
         OR EXISTS(SELECT 1 FROM story_publication_aliases pa WHERE pa.publication_id=p.id))) OR (p.status='uncertain' AND ${reviewExcluded})
-        OR (p.status='published' AND p.pending_snapshot_id IS NOT NULL)
+        OR (p.status='published' AND (p.pending_snapshot_id IS NOT NULL OR (p.media_status='pending' AND (
+          NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status<>'sent')
+          OR EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status IN ('prepared','retryable')
+            AND (b.next_retry_at IS NULL OR b.next_retry_at<=now()))))))
         OR EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id AND r.status='pending'
           AND (r.next_retry_at IS NULL OR r.next_retry_at<=now()))
         OR EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
@@ -69,6 +75,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   await adoptPreparedPublications(current,destinationId);
   await retryEdits(api,current,destinationId);
   await retryReplacements(api,current,destinationId);
+  await retryPublicationMedia(api,current,destinationId);
   const prepared = await db.query<Publication>(`${publicationSelect} JOIN stories news ON news.id=p.story_id WHERE p.destination_id=$1 AND p.story_id IS NOT NULL
     AND p.status='prepared' AND ${due}
     AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=p.story_id)

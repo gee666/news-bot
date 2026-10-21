@@ -1,3 +1,4 @@
+import { messageMedia, type TelegramMedia } from "./media.js";
 import { Api } from "telegram";
 import { parseID } from "telegram/Utils.js";
 import { extractLinks, normalizeText, type UrlEntity } from "./links.js";
@@ -51,7 +52,8 @@ export function messageItem(message: Api.Message, source: TelegramSource): Colle
     editedAt: message.editDate ? new Date(message.editDate * 1000) : null,
     originalUrl: publicUrl ?? privateUrl,
     links: extractLinks(message.message, entities),
-    metadata: { messageId: message.id, access: publicUrl ? "public" : "restricted", hasMedia: !!message.media },
+    metadata: { messageId: message.id, access: publicUrl ? "public" : "restricted", hasMedia: !!message.media, media: messageMedia(message, source),
+      ...(message.groupedId ? { groupedId: message.groupedId.toString() } : {}) },
   };
 }
 
@@ -65,6 +67,17 @@ export class TelegramHistory implements HistoryReader {
   async *recent(source: TelegramSource, since: Date, cutoff: Date, limit?: number): AsyncGenerator<HistoryEntry> {
     // Revisit the rolling window for edits; minId would hide edits behind the cursor.
     // GetHistory does not acknowledge reads or increment message views.
+    // Telegram returns album members together in descending history order. Buffer one album so
+    // a captioned revision also references uncaptioned siblings, without extra API requests.
+    let group: { id: string; entries: HistoryEntry[]; media: TelegramMedia[] } | null = null;
+    function flush(): HistoryEntry[] {
+      if (!group) return [];
+      const entries = group.entries;
+      const media = group.media.sort((a, b) => a.telegramMessageId - b.telegramMessageId);
+      for (const entry of entries) if (entry.item) entry.item.metadata.media = media;
+      group = null;
+      return entries;
+    }
     for await (const message of this.client.iterMessages(peer(source), {
       offsetDate: Math.floor(cutoff.getTime() / 1000) + 1,
       ...(limit === undefined ? {} : { limit }),
@@ -72,11 +85,20 @@ export class TelegramHistory implements HistoryReader {
       const publishedAt = new Date(message.date * 1000);
       if (publishedAt < since) break;
       if (publishedAt > cutoff) continue;
-      yield {
+      const groupedId = message.groupedId?.toString();
+      if (group && group.id !== groupedId) yield* flush();
+      const entry: HistoryEntry = {
         sequence: message.id, publishedAt,
         editedAt: message.editDate ? new Date(message.editDate * 1000) : null,
         item: messageItem(message, source),
       };
+      if (groupedId) {
+        group ??= { id: groupedId, entries: [], media: [] };
+        group.entries.push(entry);
+        // A sibling edited after the snapshot must not leak future media into this revision.
+        if (!entry.editedAt || entry.editedAt <= cutoff) group.media.push(...messageMedia(message, source));
+      } else yield entry;
     }
+    yield* flush();
   }
 }

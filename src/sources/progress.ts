@@ -1,3 +1,4 @@
+import { validatedMedia } from './media.js';
 import { primaryCursorSchema, publisherArticle, type PrimaryCursor, type PrimarySource,
   type PublisherBacklogEntry } from './config.js';
 import type { PublisherEntry } from './feed.js';
@@ -41,6 +42,7 @@ export function discoverPublisherEntries(cursor: PrimaryCursor, index: Publisher
     const previous = backlog.get(entry.id);
     backlog.set(entry.id, { id: entry.id, url: entry.url, title: entry.title?.slice(0, 500) ?? null,
       publishedAt: entry.publishedAt?.toISOString() ?? null,
+      media: validatedMedia(entry.media ?? previous?.media, entry.url),
       discoveredAt: previous?.discoveredAt ?? cutoff.toISOString(), failures: previous?.failures ?? 0,
       nextAttemptAt: previous?.nextAttemptAt ?? null, lastErrorCode: previous?.lastErrorCode ?? null });
   }
@@ -63,7 +65,7 @@ export function discoverPublisherEntries(cursor: PrimaryCursor, index: Publisher
     && !(entry.nextAttemptAt && Date.parse(entry.nextAttemptAt) > cutoff.getTime())
     && !((!entry.publishedAt || source.feedDateRole === 'submission') && (cursor.unknownIds.includes(entry.id)
       || (source.unknownPublication === 'skip' && cursor.skippedUnknownIds.includes(entry.id)))))
-    .map(entry => ({ id: entry.id, url: entry.url, title: entry.title,
+    .map(entry => ({ id: entry.id, url: entry.url, title: entry.title, media: validatedMedia(entry.media, entry.url),
       publishedAt: entry.publishedAt ? new Date(entry.publishedAt) : null }));
 }
 

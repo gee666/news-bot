@@ -34,3 +34,11 @@ Collection scans the rolling window again to find edits behind the high-water ma
 All link spans use UTF-16 code units in original_text, not normalized_text. URLs are retained as evidence, including non-HTTP targets; downstream fetching and rendering must enforce their own scheme policy. Telegram provider identity and access data belong in metadata or the source cursor, not mandatory source-item columns. Restricted Telegram origins use access-restricted t.me/c links; they are not public links.
 
 This module makes no model calls and sends no Telegram messages. Destination bot send/edit verification and enabling publication remain separate steps.
+
+## Media discovery
+
+Captioned items and revisions store `metadata.media` as `{type:'image'|'video',telegramMessageId:number,telegramPeer:string,groupedId?:string}[]`. `telegramPeer` is the stable marked channel ID from `sources.external_id`, not a username or URL. `groupedId` is a decimal string to preserve Telegram's 64-bit album identity. Photos, image documents and video documents are supported; stickers, audio, files of other types and web-page previews are excluded.
+
+History buffers each contiguous album and attaches all eligible sibling descriptors to its captioned items, including empty-caption siblings. Empty siblings still advance the history cursor. Messages and sibling edits beyond the fixed cutoff are excluded. Capped reads only describe members actually visited, and do not issue extra requests to complete a partially visited album. Standalone media-only messages and albums without any caption remain skipped.
+
+Consumers can join a revision through its item to the source, then call `client.getMessages(telegramPeer,{ids:[telegramMessageId]})` and download media on demand. Numeric peer lookup needs the user session's entity cache; source metadata also provides `channelId` and `accessHash` to construct `InputPeerChannel` if needed. Descriptors never contain credentials, expiring file references or local paths. Ingestion does not download media.

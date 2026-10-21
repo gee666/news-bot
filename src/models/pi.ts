@@ -2,17 +2,20 @@ import { codexUsage, sdkUsage, type CallUsage } from './usage.js';
 import type { Usage } from "@earendil-works/pi-ai";
 import { createAgentSession, createExtensionRuntime, SessionManager, SettingsManager,
   type ResourceLoader } from "@earendil-works/pi-coding-agent";
-import { classifyProviderError, faultFromError, providerRetryTime, RequestFault, retryTime } from "./errors.js";
+import { classifyProviderError, faultFromError, providerRetryTime, RequestFault, retryTime, UnsupportedVisionFault } from "./errors.js";
 import { providerDiagnostics } from "./provider-diagnostics.js";
 import { isObject, piStreamFailure } from "./pi-failure.js";
 import { infer, type InferenceOptions, type RequestContext } from "./inference.js";
 import { CODEX_MODEL, CODEX_PROVIDER, type PiRuntime } from "./pi-runtime.js";
+
+import { modelImagesSchema, type ModelImage } from "./images.js";
 
 export interface ResponseSchema { name: string; schema: Record<string, unknown> }
 export interface PiRequest {
   systemPrompt: string;
   prompt: string;
   responseSchema?: ResponseSchema;
+  images?: readonly ModelImage[];
 }
 export interface PiConfig extends InferenceOptions {
   runtime: PiRuntime;
@@ -66,6 +69,8 @@ export class PiGenerator {
       if (!request.systemPrompt.trim() || !request.prompt.trim()) {
         throw new RequestFault("invalid_request", { outcome: "not_submitted" });
       }
+      const images = modelImagesSchema.safeParse(request.images ?? []);
+      if (!images.success) throw new RequestFault("invalid_request", { outcome: "not_submitted" });
       const provider = this.config.provider ?? CODEX_PROVIDER;
       const modelId = this.config.model ?? CODEX_MODEL;
       if (provider !== CODEX_PROVIDER) throw new RequestFault("invalid_request", { outcome: "not_submitted" });
@@ -76,6 +81,7 @@ export class PiGenerator {
       }
       const model = runtime.getModel(provider, modelId);
       if (!model) throw new RequestFault("model_unavailable", { outcome: "not_submitted" });
+      if (images.data.length && !model.input.includes("image")) throw new UnsupportedVisionFault();
       const cwd = this.config.runtime.agentDir;
       const { session } = await createAgentSession({
         cwd, agentDir: cwd, modelRuntime: runtime, model, thinkingLevel: "off",
@@ -92,12 +98,21 @@ export class PiGenerator {
       // A rogue tool-call response must not trigger another paid turn in this no-tools session.
       session.agent.finishTurn = () => ({ action: 'end' });
       const stream = session.agent.streamFunction;
-      session.agent.streamFunction = (model, input, options) => stream(model, input, { ...options,
-        fetch: (url, init) => {
-          dispatch.submitted();
-          return globalThis.fetch(url, init);
-        },
-      });
+      session.agent.streamFunction = (model, input, options) => {
+        const user = input.messages.findLast(message => message.role === "user");
+        const attached = Array.isArray(user?.content) ? user.content.filter(block => block.type === "image").length : 0;
+        // Pi may omit an attachment that cannot be decoded/resized. Never pay for a text-only substitute.
+        if (attached !== images.data.length) {
+          providerFailure = new RequestFault("invalid_request", { outcome: "not_submitted" });
+          throw providerFailure;
+        }
+        return stream(model, input, { ...options,
+          fetch: (url, init) => {
+            dispatch.submitted();
+            return globalThis.fetch(url, init);
+          },
+        });
+      };
       let status: number | undefined;
       let retryAt: number | undefined;
       let requestId: string | undefined;
@@ -139,7 +154,8 @@ export class PiGenerator {
       dispatch.signal.addEventListener("abort", abort, { once: true });
       try {
         dispatch.signal.throwIfAborted();
-        await session.prompt(request.prompt, { expandPromptTemplates: false });
+        await session.prompt(request.prompt, { expandPromptTemplates: false,
+          ...(images.data.length ? { images: images.data.map(image => ({ type: "image" as const, ...image })) } : {}) });
         const assistant = session.messages.findLast((message) => message.role === "assistant");
         if (assistant?.role === 'assistant' && ['stop', 'length', 'toolUse'].includes(assistant.stopReason)) {
           dispatch.completed(reportedUsage ? sdkUsage(assistant.usage) ?? reportedUsage : undefined,

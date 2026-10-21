@@ -1,3 +1,4 @@
+import { webMediaSchema } from './media.js';
 import { z } from 'zod';
 import { publicUrl, resolvePublicAddress } from '../pipeline/research-fetch.js';
 
@@ -30,6 +31,7 @@ export type PrimarySourceInput = z.infer<typeof primarySourceInput>;
 export const publisherBacklogEntrySchema = z.object({
   id: z.string().min(1).max(4096), url: z.string().max(4096), title: z.string().max(500).nullable(),
   publishedAt: z.string().datetime().nullable(), discoveredAt: z.string().datetime(),
+  media: z.array(webMediaSchema).max(100).optional(),
   failures: z.number().int().min(0).max(10).default(0),
   nextAttemptAt: z.string().datetime().nullable().default(null),
   lastErrorCode: z.string().max(100).regex(/^primary_[a-z0-9_]+$/u).nullable().default(null),

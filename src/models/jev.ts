@@ -1,11 +1,13 @@
 import { z } from "zod";
-import { RequestFault } from "./errors.js";
+import { RequestFault, UnsupportedVisionFault } from "./errors.js";
 import { ModelHttp, numericHeader, type HttpConfig } from "./http.js";
 import { infer, type InferenceOptions, type RequestContext } from "./inference.js";
 import { jevTemplates, type JevQuestion, type JevTemplate } from "./templates.js";
 import { measureJevContext, requireJevContext } from './jev-context.js';
 import type { JevContextBudget } from './jev-budget.js';
 import { prepareJevState, referenceInstructions } from './jev-state.js';
+
+import type { ModelImage } from "./images.js";
 
 const probability = z.number().finite().min(0).max(1);
 const distribution = z.record(z.string(), probability);
@@ -61,8 +63,12 @@ export class JevClient {
     this.http = new ModelHttp(httpConfig);
   }
 
-  judge(template: JevTemplate, state: unknown, context: RequestContext): Promise<JevResult> {
+  /** The local System One transport has no supported image attachment protocol. */
+  readonly supportsImages = false;
+
+  judge(template: JevTemplate, state: unknown, context: RequestContext, images?: readonly ModelImage[]): Promise<JevResult> {
     return infer("jev", this.timeoutMs, context, this.config.recordFailure, async (dispatch) => {
+      if (images?.length) throw new UnsupportedVisionFault();
       if (!(typeof state === "string" || (typeof state === "object" && state !== null))
         || !isJson(state)) throw new RequestFault("invalid_request", { outcome: "not_submitted" });
       if (!this.config.apiKey) throw new RequestFault("authentication", { outcome: "not_submitted" });

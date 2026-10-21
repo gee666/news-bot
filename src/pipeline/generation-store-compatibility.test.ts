@@ -19,8 +19,8 @@ const legacyRow = (role: 'primary' | 'supporting' | 'candidate') => ({
 });
 const oldHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
-it('pins the research hash for the thread-aware generation policy', () => {
-  expect(generationHash(storyInput(), defaultSettings)).toBe('799ab22a64431130f04ada990dd14cbb5ee720d38af575ced23dd36081a11382');
+it('pins the research hash for the image-aware generation policy', () => {
+  expect(generationHash(storyInput(), defaultSettings)).toBe('b3ea602cb33e25bdee46f82c780fc7446f0f95f1a255af97df1913f2d2895feb');
 });
 
 it.each([
@@ -110,7 +110,7 @@ it('invalidates legacy generation receipts for the calibrated policy without cha
   }));
   expect(await alreadyGenerated(input, defaultSettings)).toBe(false);
   expect(mocks.query).toHaveBeenCalledOnce();
-  expect(mocks.query.mock.calls[0]?.[0]).toContain("prompt_version = 'generation-v11'");
+  expect(mocks.query.mock.calls[0]?.[0]).toContain("prompt_version = 'generation-v12-media'");
   expect(mocks.query.mock.calls[0]?.[1]?.[2]).toBe(current);
   mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT result FROM judgments') ? [receipt] : [] }));
   expect(await alreadyGenerated(input, defaultSettings)).toBe(true);
@@ -118,3 +118,15 @@ it('invalidates legacy generation receipts for the calibrated policy without cha
   expect(mocks.query.mock.calls.every(([sql]) => String(sql).startsWith('SELECT'))).toBe(true);
 });
 
+
+
+it('invalidates cached summaries when media locations or the image cap change', () => {
+  const input = storyInput();
+  const baseline = generationHash(input, defaultSettings);
+  input.mentions[0]!.media = [{ type: 'image', url: 'https://example.org/new.png' }];
+  expect(generationHash(input, defaultSettings)).not.toBe(baseline);
+  const withImage = generationHash(input, defaultSettings);
+  vi.stubEnv('MEDIA_SUMMARY_MAX_IMAGES', '2');
+  try { expect(generationHash(input, defaultSettings)).not.toBe(withImage); }
+  finally { vi.unstubAllEnvs(); }
+});

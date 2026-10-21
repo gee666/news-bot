@@ -9,6 +9,8 @@ import { publicationAdmission } from './freshness.js';
 import { checkPublicationAdmission, recordAdmissionDenial } from './admission.js';
 import type { DeliveryAuthorization } from './approval.js';
 import { reconcileUnknownEdit } from './edit-reconciliation.js';
+import { preparePublicationMedia } from './media-plan.js';
+import { deliverPublicationMedia } from './media-delivery.js';
 export { readSentMessage } from './reconciliation.js';
 
 export async function recordFailure(attemptId: string, publication: Publication, operation: 'send' | 'edit' | 'delete', error: unknown,
@@ -88,6 +90,13 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     await recordFailure(attemptId, publication, 'send', new BotError(error.code, 'failed'), settings);
     return null;
   }
+  let hasMedia: boolean;
+  try { hasMedia = await preparePublicationMedia(publication, settings); }
+  catch {
+    await db.query(`UPDATE publications SET error_code='publication_media_prepare_failed',next_retry_at=$2,updated_at=now()
+      WHERE id=$1 AND status='prepared'`, [publication.id, new Date(Date.now() + settings.retryBaseMs)]);
+    return null;
+  }
   const bot = await api.identity();
   if (publication.bot_id && publication.bot_id !== String(bot.id)) throw new Error('Publication bot ownership changed');
   const attemptId = await beginAttempt(publication, 'send', { ...sendMetadata(message),botId:String(bot.id) }, settings, authorization);
@@ -99,8 +108,11 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     await client.query(`UPDATE request_attempts SET status='succeeded',finished_at=now(),response_metadata=$1 WHERE id=$2`,
       [JSON.stringify({ ...sendMetadata(message), messageId }),attemptId]);
     await client.query(`UPDATE publications SET status='published',message_id=$1,published_at=now(),updated_at=now(),
-      next_retry_at=NULL,error_code=NULL,format_version=1 WHERE id=$2`, [messageId,publication.id]);
+      next_retry_at=NULL,error_code=CASE WHEN media_status='pending' THEN 'publication_media_pending' ELSE NULL END,
+      format_version=1 WHERE id=$2`, [messageId,publication.id]);
   });
+  if (hasMedia && !await deliverPublicationMedia({ ...publication, status: 'published', message_id: messageId,
+    bot_id: String(bot.id) }, api, settings)) return null;
   return messageId;
 }
 
@@ -149,7 +161,8 @@ export async function reconcile(publication: Publication, settings: AppSettings,
   }
   await transaction(async client => {
     await client.query(`UPDATE publications SET status='published',message_id=$1,published_at=coalesce(published_at,now()),
-      next_retry_at=NULL,error_code=NULL,format_version=1,updated_at=now() WHERE id=$2`, [messageId,publication.id]);
+      next_retry_at=NULL,error_code=CASE WHEN media_status='pending' THEN 'publication_media_pending' ELSE NULL END,
+      format_version=1,updated_at=now() WHERE id=$2`, [messageId,publication.id]);
     await client.query(`UPDATE request_attempts SET status='succeeded',finished_at=now(),next_retry_at=NULL,
       response_metadata=response_metadata || $1::jsonb WHERE publication_id=$2 AND operation='send' AND status IN ('running','unknown')`,
       [JSON.stringify({ messageId, reconciled: true }),publication.id]);

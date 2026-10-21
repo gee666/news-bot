@@ -1,3 +1,4 @@
+import { discoverMedia, mergeMedia, validatedMedia } from './media.js';
 import type { AppSettings } from '../settings.js';
 import { db } from '../db.js';
 import { fetchPublic } from '../pipeline/research-fetch.js';
@@ -94,6 +95,8 @@ export async function collectPublisher(reader: PrimaryReader, store: PrimaryStor
                 : publishedAt ? 'article_front_matter' : 'unknown_collect_once',
             feedEntryPublishedAt: source.kind === 'feed' ? entry.publishedAt?.toISOString() ?? null : null,
             submittedAt: submissionDate?.toISOString() ?? null,
+            media: mergeMedia(validatedMedia(entry.media, entry.url), validatedMedia(page.metadata.media, page.canonicalUrl),
+              discoverMedia(page.content, page.canonicalUrl, page.metadata.contentFormat === 'html' ? 'html' : 'markdown')),
             canonicalUrl: page.canonicalUrl } });
       }
       const nextCursor: PrimaryCursor = { ...cursor,

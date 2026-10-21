@@ -1,3 +1,4 @@
+import { prepareArticleMedia, discoverMedia } from './media.js';
 import type { CleanArticle } from './article.js';
 import { arxivAddress } from './arxiv-address.js';
 import { separateTableBlocks } from './article-dom.js';
@@ -18,8 +19,9 @@ export function researchArticle(document: Document, url: string, markdown: (html
     // Markdown conversion does not retain MathML. Keep its presentation text once, not duplicate TeX annotations.
     for (const math of article.querySelectorAll('math')) math.replaceWith(document.createTextNode(math.textContent?.trim() ?? ''));
     separateTableBlocks(document);
+    prepareArticleMedia(article, url);
     const content = markdown(article.outerHTML);
-    return content ? { title, byline: authors, publishedAt: null, content, cleaning: 'arxiv_full_text',
+    return content ? { title, media: discoverMedia(content, url), byline: authors, publishedAt: null, content, cleaning: 'arxiv_full_text',
       paper: { id: address.id, version: versionLink.version, extent: 'full_text' } } : null;
   }
   if (address.kind !== 'abs') return null;

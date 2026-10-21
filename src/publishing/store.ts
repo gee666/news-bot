@@ -13,6 +13,7 @@ export interface Publication {
   snapshot_id: string; pending_snapshot_id: string | null; format_version: number; bot_id: string | null;
   status: 'prepared' | 'sending' | 'published' | 'uncertain' | 'failed';
   attempt_count: number; created_at: Date; next_retry_at: Date | null; content: unknown;
+  media_status?: 'none' | 'pending' | 'complete' | 'failed' | 'unknown'; media_snapshot_id?: string | null;
 }
 export const publicationSelect = `SELECT p.*, s.content FROM publications p
   JOIN publication_snapshots s ON s.id = p.snapshot_id`;
@@ -43,7 +44,8 @@ export async function destination(): Promise<string> {
 }
 export async function rateLimited(client: Pick<PoolClient, 'query'> = db): Promise<boolean> {
   const row = (await client.query<{ waiting: boolean }>(`SELECT EXISTS(SELECT 1 FROM request_attempts
-    WHERE provider='telegram-bot' AND error_code='telegram_rate_limit' AND next_retry_at>now()) AS waiting`)).rows[0];
+    WHERE provider='telegram-bot' AND error_code='telegram_rate_limit' AND next_retry_at>now())
+    OR EXISTS(SELECT 1 FROM publication_media_batches WHERE error_code='telegram_rate_limit' AND next_retry_at>now()) AS waiting`)).rows[0];
   return row?.waiting ?? false;
 }
 export async function state(key: string): Promise<unknown> {

@@ -7,9 +7,13 @@ import { PublicationRenderError } from './render.js';
 import type { Publication } from './store.js';
 import { publicationSnapshotSchema } from '../types.js';
 import { publicationAdmission } from './freshness.js';
+import { publicationMedia } from '../media/story-media.js';
+import * as mediaPlan from './media-plan.js';
+import * as mediaDelivery from './media-delivery.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: mocks.transaction }));
+vi.mock('../media/story-media.js', () => ({ publicationMedia: vi.fn().mockResolvedValue([]), releaseStoryMedia: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('./freshness.js', () => ({ publicationAdmission: vi.fn().mockResolvedValue({ allowed: true }) }));
 vi.mock('./edit-reconciliation.js', () => ({ reconcileUnknownEdit: vi.fn().mockResolvedValue(null) }));
 const publication: Publication = {
@@ -21,6 +25,7 @@ const publication: Publication = {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.mocked(publicationMedia).mockReset().mockResolvedValue([]);
   vi.mocked(publicationAdmission).mockReset().mockResolvedValue({ allowed: true });
   vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({ id: 123,is_bot: true });
   mocks.query.mockReset().mockResolvedValue({ rows: [{ id: 'attempt' }] });
@@ -60,6 +65,33 @@ describe('durable publication delivery', () => {
     expect(await sendPrepared(publication,api,defaultSettings)).toBe('9');
     expect(send).toHaveBeenCalledOnce();
     expect(mocks.query.mock.calls.some(call => String(call[0]).includes("status='published'"))).toBe(true);
+  });
+
+  it('does not send text when media preparation fails', async () => {
+    vi.mocked(publicationMedia).mockRejectedValue(new Error('download failed'));
+    const api = new BotApi('123:synthetic');
+    const send = vi.spyOn(api, 'send');
+    expect(await sendPrepared(publication, api, defaultSettings)).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('publication_media_prepare_failed'))).toBe(true);
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO request_attempts'))).toBe(false);
+  });
+
+  it('keeps canonical text separate from media and does not report incomplete attachments as success', async () => {
+    const api = new BotApi('123:synthetic');
+    const events: string[] = [];
+    vi.spyOn(mediaPlan, 'preparePublicationMedia').mockImplementation(async () => { events.push('prepare'); return true; });
+    const send = vi.spyOn(api, 'send').mockImplementation(async () => { events.push('text'); return '9'; });
+    vi.spyOn(mediaDelivery, 'deliverPublicationMedia').mockImplementation(async (canonical) => {
+      events.push('media');
+      expect(canonical).toMatchObject({ message_id: '9', status: 'published', bot_id: '123' });
+      expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes("status='published'"))).toBe(true);
+      return false;
+    });
+    const long = { ...publication, content: { headline: 'News', details: 'word '.repeat(600), score: 7, detailsKind: 'summary', sources: [] } };
+    expect(await sendPrepared(long, api, defaultSettings)).toBeNull();
+    expect(events).toEqual(['prepare', 'text', 'media']);
+    expect(send.mock.calls[0]?.[1].plainText.length).toBeGreaterThan(1024);
   });
 
   it('sends a review-failed summary with a warning and commits it as published', async () => {

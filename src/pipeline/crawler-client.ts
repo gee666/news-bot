@@ -159,7 +159,7 @@ async function fetchOnce(input: string, settings: CrawlerSettings, signal: Abort
     if (articleFailure) return { ...unavailable(input, articleFailure === 'restricted' ? 'crawler_restricted' : 'crawler_render_failed', status), access: articleFailure };
     return { url: input, canonicalUrl, title: usefulSourceTitle(article?.title ?? title, content, canonicalUrl), content, access: 'public',
       publishedAt: articleDate(result.metadata?.['article:published_time']) ?? articleDate(article?.publishedAt),
-      metadata: { status, ...(article ? { cleaning: article.cleaning ?? 'readability', byline: article.byline,
+      metadata: { status, ...(article ? { media: article.media ?? [], cleaning: article.cleaning ?? 'readability', byline: article.byline,
         ...(article.followupLinks ? { followupLinks: article.followupLinks } : {}),
         ...(article.paper ? { paper: article.paper } : {}) } : {}) } };
   } catch (error) {

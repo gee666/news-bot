@@ -7,6 +7,8 @@ import type { Publication } from './store.js';
 const mocks = vi.hoisted(() => ({ query: vi.fn(), getSettings: vi.fn(), destination: vi.fn(), state: vi.fn(),
   prepare: vi.fn(), ready: vi.fn(), refresh: vi.fn(), send: vi.fn(), reconcile: vi.fn(), edit: vi.fn(), saveState: vi.fn(), testPublication: vi.fn(), tryLock: vi.fn(), adopt: vi.fn(), retryEdits: vi.fn(), retryReplacements: vi.fn(), admission: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
+vi.mock('./media-plan.js', () => ({ recoverPublicationMedia: vi.fn(), expirePublicationMedia: vi.fn() }));
+vi.mock('./media-delivery.js', () => ({ retryPublicationMedia: vi.fn() }));
 vi.mock('../settings.js', async importOriginal => {
   const original = await importOriginal<typeof import('../settings.js')>();
   return { ...original, getSettings: mocks.getSettings };

@@ -1,3 +1,4 @@
+import { cleanupMedia } from './media/story-media.js';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
@@ -16,6 +17,7 @@ export async function startServer(): Promise<() => Promise<void>> {
   const host = process.env.HOST ?? '0.0.0.0';
   const usageRetryMs = usageRecoveryInterval();
   await migrate();
+  await cleanupMedia();
   await getSettings();
   const runtime = await openPiRuntime(resolve(process.env.PI_AUTH_PATH ?? 'tmp/models-private-auth/auth.json'));
   await initializeUsageOutbox();
@@ -39,10 +41,15 @@ export async function startServer(): Promise<() => Promise<void>> {
     startPublicationMaintenance().then(stop => { stopBot = stop; }).catch(() => { backgroundHealthy=false; console.error('Telegram publication maintenance failed to start; health is degraded.'); }),
     pipeline.start().catch(() => { backgroundHealthy=false; console.error('Processing service failed to start; health is degraded. Check saved processing status.'); }),
   ]);
+  const mediaCleanup = setInterval(() => { void cleanupMedia().catch(() => {
+    console.error('Temporary media cleanup failed.');
+  }); }, 60 * 60 * 1000);
+  mediaCleanup.unref();
   let stopping = false;
   return async () => {
     if (stopping) return;
     stopping = true;
+    clearInterval(mediaCleanup);
     const closed = new Promise<void>(resolveClosed => { server.close(() => resolveClosed()); });
     server.closeIdleConnections();
     const stoppingWork = Promise.allSettled([oauth.cancel(), operations.stop(), pipeline.stop()]);

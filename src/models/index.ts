@@ -7,3 +7,5 @@ export { PiGenerator, type PiConfig, type PiRequest, type PiResult, type Respons
 export { openPiRuntime, CODEX_MODEL, CODEX_PROVIDER, type PiRuntime } from "./pi-runtime.js";
 export { generateStructured, type StructuredRequest, type TextGenerator } from "./structured.js";
 export { jevTemplates, type JevTemplate } from "./templates.js";
+export { type ModelImage } from "./images.js";
+export { MEDIA_IDENTITY_EVIDENCE_VERSION, compareMediaIdentity, type MediaIdentityResult, type MediaVisualEvidence } from "./media-identity.js";

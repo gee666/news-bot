@@ -16,6 +16,7 @@ export interface ResearchPage {
   updatedAt?: string | null;
   fetchedAt?: string;
   metadata: {
+    media?: Array<{ type: 'image' | 'video'; url: string }>;
     status?: number; error?: string; truncated?: boolean;
     method?: 'crawl4ai' | 'http'; contentFormat?: 'markdown' | 'html' | 'text' | 'json';
     publishedAt?: string | null; updatedAt?: string | null; fetchedAt?: string;
@@ -129,6 +130,7 @@ async function fetchReadPage(url: string): Promise<ResearchPage> {
     const dates = html ? publisherDates(response.text) : { publishedAt: null, updatedAt: null };
     if (!dates.publishedAt && article?.publishedAt) dates.publishedAt = explicitDate(article.publishedAt);
     if (article) {
+      metadata.media = article.media ?? [];
       metadata.contentFormat = 'markdown'; metadata.cleaning = article.cleaning ?? 'readability'; metadata.byline = article.byline;
       if (article.followupLinks) metadata.followupLinks = article.followupLinks;
       if (article.paper) metadata.paper = article.paper;

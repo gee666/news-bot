@@ -1,3 +1,4 @@
+import { discoverMedia, prepareArticleMedia, type WebMedia } from './media.js';
 import { Readability } from '@mozilla/readability';
 import { researchArticle } from './research-article.js';
 import { isSocialPost, socialPost } from './social-post.js';
@@ -14,6 +15,7 @@ const markdown = unified().use(rehypeParse, { fragment: true }).use(rehypeRemark
 export interface CleanArticle {
   content: string; title: string | null; byline: string | null; publishedAt: string | null;
   followupLinks?: ArticleFollowup[];
+  media?: WebMedia[];
   cleaning?: 'social_post' | 'arxiv_abstract' | 'arxiv_full_text';
   paper?: { id: string; version: string | null; extent: 'abstract' | 'full_text' };
 }
@@ -35,11 +37,12 @@ export function cleanArticle(html: string, url: string): CleanArticle | null {
     for (const node of document.querySelectorAll('nav,footer,aside,[role="navigation"],[role="contentinfo"],[itemprop="comment"],[itemtype$="/Comment"]')) node.remove();
     removeAnimatedCopies(document);
     separateTableBlocks(document);
+    prepareArticleMedia(document, url);
     const followupLinks = articleFollowups(document, url);
     const article = new Readability(document, { charThreshold: 0, maxElemsToParse: 100_000 }).parse();
     if (!article?.content || !article.textContent?.trim()) return null;
     const content = String(markdown.processSync(article.content)).trim();
-    return content ? { content, title: article.title?.trim() || null, byline: article.byline?.trim() || null,
+    return content ? { content, media: discoverMedia(content, url), title: article.title?.trim() || null, byline: article.byline?.trim() || null,
       publishedAt: article.publishedTime || null, ...(followupLinks.length ? { followupLinks } : {}) } : null;
   } catch { return null; }
   finally { dom.window.close(); }

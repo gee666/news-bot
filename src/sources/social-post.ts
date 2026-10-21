@@ -1,3 +1,4 @@
+import { elementMedia } from './media.js';
 import type { CleanArticle } from './article.js';
 import { articleLink, type ArticleFollowup } from './article-followups.js';
 
@@ -80,6 +81,8 @@ export function socialPost(document: Document, url: string): CleanArticle | null
   if (!target) return null;
   const text = postText(target);
   if (!text) return null;
+  const media = elementMedia(target, url, node => belongsToPost(node, target));
+  const mediaContent = media.map(item => item.type === 'image' ? `![](${item.url})` : `[Video](${item.url} "video")`).join('\n\n');
   const byline = author(target, requested);
   const followupLinks = postFollowups(target, requested.url);
   // Same-author thread posts supply explicit involved-party context, never a reputation badge.
@@ -93,6 +96,6 @@ export function socialPost(document: Document, url: string): CleanArticle | null
   }
   const time = [...target.querySelectorAll('time[datetime]')].find(node => node.closest('article') === target)?.getAttribute('datetime') ?? null;
   return { title: `${byline}: ${text.slice(0, 180)}`, byline, publishedAt: time, cleaning: 'social_post',
-    content: [`# Post by ${byline}`, requested.url, text, ...context].join('\n\n'),
+    media, content: [`# Post by ${byline}`, requested.url, text, mediaContent, ...context].filter(Boolean).join('\n\n'),
     ...(followupLinks.length ? { followupLinks } : {}) };
 }

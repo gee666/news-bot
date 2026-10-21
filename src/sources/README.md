@@ -27,3 +27,9 @@ Five seed endpoints were publicly verified on2026-10-01. OpenAI/Anthropic websit
 For retained-item repairs, `refreshPublisherItem(itemId,batchId)` requires the caller's pipeline lease and a parked failed/waiting batch. It uses the original public article URL and shared revision store, preserves publication/retention/cursors/completed-source state, and enrolls changed content in that same batch. Operator lookup SQL and exact lease-held invocation are in `tmp/primary-publisher-refresh-api.md`. No automatic repair or startup writes.
 
 Proof and handoff: tmp/primary-sources-api.md and tmp/primary-sources-report.md. Unit regression tests and disposable database tests cover partial progress, nullable timestamps, revisions, cursor completion, source failures and Telegram coexistence.
+
+## Media discovery
+
+Collected items and revisions store `metadata.media` as an array of `{type:'image'|'video',url:string}`. Discovery reads selected article images, lazy images, picture/srcset sources, native video sources, Markdown images/references and direct video links. Feed entries also retain typed RSS/Atom enclosures, Media RSS content/thumbnails and embedded content images/videos. Feed media survives rotating indexes through the existing JSON backlog. Publisher collection and operator refresh merge adapter metadata with content discoveries. Media-only changes create revisions.
+
+URLs resolve against the article URL and pass the existing public HTTP(S) URL policy. CDN hosts are allowed. Discovery removes duplicates and keeps at most 100 descriptors per item. It does not download media, execute scripts, inspect video players, or persist files. Navigation, author avatars, logos, tracking pixels, video posters and unrelated social posts are not content media. Blob/data URLs and iframe-only players have no retrievable descriptor; no guessed URL or site-wide Open Graph preview is substituted.

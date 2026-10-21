@@ -24,6 +24,8 @@ async function serve(handler: (req: IncomingMessage, res: ServerResponse) => voi
     }
     handler(req, res);
   });
+  // Cold tokenizer loading can outlast Node's default keep-alive window under parallel test load.
+  server.keepAliveTimeout = 60_000;
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("Missing test port");
@@ -46,6 +48,24 @@ function countResponse(choice = "1", inputTokens = 42, outputTokens = 0): unknow
 }
 
 describe("model HTTP adapters", () => {
+  it("dispatches media visual evidence using the versioned same/different template", async () => {
+    const state = { left: { subject: 'A bridge' }, right: { subject: 'The same bridge with a border' },
+      correspondences: ['Matching cables and boat'], differences: ['Border'], limitations: [] };
+    const baseUrl = await serve((req, res) => {
+      void body(req).then(value => {
+        expect(value).toMatchObject({ state, questions: jevTemplates.media_identity.questions });
+        expect(value).not.toHaveProperty('images');
+        res.end(JSON.stringify({ model: 'autojev-27b-q4_k_m', usage: { input_tokens: 50, output_tokens: 0 },
+          answers: { relation: { type: 'choice', choice: 'same', probabilities: { same: 0.99, different: 0.01 }, confidence: 0.99 } } }));
+      });
+    });
+    const client = new JevClient({ baseUrl, apiKey: 'test-key', contextTokens: 12288, recordFailure: async () => {} });
+    cleanups.push(() => client.close());
+    expect(await client.judge('media_identity', state, { operationId: 'media-evidence' })).toMatchObject({
+      template: 'media_identity', promptVersion: 'media-identity-visual-evidence-v1', answers: { relation: { choice: 'same' } },
+    });
+  });
+
   it("sends stable question prefixes with changing state and captures cache headers", async () => {
     const sent: unknown[] = [];
     const baseUrl = await serve((req, res) => {

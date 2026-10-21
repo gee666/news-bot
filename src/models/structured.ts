@@ -29,6 +29,7 @@ export async function generateStructured<T>(
         (request.responseSchema && !generator.supportsNativeSchema ? "\nJSON schema: " + JSON.stringify(request.responseSchema.schema) : ""),
       prompt: attempt === 0 ? request.prompt
         : request.prompt + "\nThe previous response failed JSON or record validation. Return ONE corrected complete JSON object, never several variants.\nPrevious output:\n" + (last?.text ?? ""),
+      ...(request.images ? { images: request.images } : {}),
       ...(request.responseSchema ? { responseSchema: request.responseSchema } : {}),
     }, { ...context, operationId: context.operationId + (attempt ? ":repair" : ""),
       ...(context.stage ? { stage: context.stage + (attempt ? ":repair" : "") } : {}) });

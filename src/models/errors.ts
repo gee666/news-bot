@@ -35,6 +35,11 @@ export class RequestFault extends Error {
   ) { super(kind); }
 }
 
+/** Image bytes must never be silently discarded or serialized as text evidence. */
+export class UnsupportedVisionFault extends RequestFault {
+  constructor() { super("invalid_request", { outcome: "not_submitted" }); }
+}
+
 export class ModelRequestError extends Error {
   constructor(readonly metadata: ModelFailure) {
     super(metadata.message);
@@ -151,7 +156,9 @@ export function failureMetadata(
     ? 300_000 : Math.min(300_000, 5000 * 2 ** Math.min(attempt - 1, 6));
   const next = retryable ? Math.max(now + delay, fault.detail.retryAt ?? 0) : null;
   return {
-    operationId, service, kind, message: fault.detail.jevContextBudget && kind === 'context_limit'
+    operationId, service, kind, message: fault instanceof UnsupportedVisionFault
+      ? "This model transport does not support image input. Use a vision-capable Pi generator to extract visual evidence before JEV judgment."
+      : fault.detail.jevContextBudget && kind === 'context_limit'
       ? 'The complete JEV prompt cannot fit the safe context budget. Leave the decision unresolved pending bounded full-input evaluation.'
       : messages[kind], attempt, durationMs,
     failedAt: new Date(now).toISOString(),

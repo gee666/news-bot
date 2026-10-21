@@ -135,3 +135,39 @@ it('does not recrawl an unknown collect_once item on subsequent batches', async 
     unknownPublication: 'collect_once', cursor: { ...source.cursor, unknownIds: ['unknown'] } }, cutoff)).toBe(0);
   expect(reader.article).not.toHaveBeenCalled();
 });
+
+it.each(['website', 'feed'] as const)('persists article media from %s ingestion', async kind => {
+  vi.mocked(reader.article).mockResolvedValue({ ...page,
+    content: 'Article body ![Chart](/chart.png) [Video](/stream "video") ![Chart](/chart.png)' });
+  await collectPublisher(reader, { commitProgress }, 'batch', { ...source, kind }, cutoff);
+  expect(commitProgress.mock.calls.flatMap(call => call[2])[0]?.metadata.media).toEqual([
+    { type: 'image', url: 'https://example.org/chart.png' },
+    { type: 'video', url: 'https://example.org/stream' },
+  ]);
+});
+
+it('retains feed attachments through a durable backlog when an entry rotates out of the index', async () => {
+  const media = [{ type: 'image' as const, url: 'https://cdn.example.org/figure.jpg' }];
+  vi.mocked(reader.index).mockResolvedValue([{ id: 'guid1', url: page.url, title: 'Release', publishedAt: cutoff, media }]);
+  await collectPublisher(reader, { commitProgress }, 'discover', source, cutoff, 48, 0);
+  const cursor = primaryCursorSchema.parse(commitProgress.mock.calls.at(-1)?.[3]);
+  expect(cursor.backlog[0]?.media).toEqual(media);
+  vi.mocked(reader.index).mockResolvedValue([]);
+  vi.mocked(reader.article).mockResolvedValue({ ...page, content: 'Body ![same](https://cdn.example.org/figure.jpg)' });
+  commitProgress.mockClear();
+  await collectPublisher(reader, { commitProgress }, 'later', { ...source, cursor }, new Date(cutoff.getTime() + 3600000));
+  expect(commitProgress.mock.calls.flatMap(call => call[2])[0]?.metadata.media).toEqual(media);
+});
+
+it('validates and merges adapter-provided media with article discoveries', async () => {
+  vi.mocked(reader.article).mockResolvedValue({ ...page, content: 'Body ![Chart](/chart.png)',
+    metadata: { ...page.metadata, media: [
+      { type: 'image', url: '/chart.png' }, { type: 'video', url: 'https://cdn.example.org/stream' },
+      { type: 'image', url: 'http://127.0.0.1/private.png' },
+    ] } });
+  await collectPublisher(reader, { commitProgress }, 'batch', source, cutoff);
+  expect(commitProgress.mock.calls.flatMap(call => call[2])[0]?.metadata.media).toEqual([
+    { type: 'image', url: 'https://example.org/chart.png' },
+    { type: 'video', url: 'https://cdn.example.org/stream' },
+  ]);
+});

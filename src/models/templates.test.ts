@@ -13,3 +13,12 @@ it('keeps news eligibility separate from personal interest scoring and versioned
   expect(Object.isFrozen(jevTemplates.news_eligibility.questions.eligible.criteria)).toBe(true);
   expect(Object.isFrozen(jevTemplates.news_eligibility.questions.eligible)).toBe(true);
 });
+
+it('freezes a visual-evidence identity template with a final same/different relation', () => {
+  const template = jevTemplates.media_identity;
+  expect(template.version).toBe('media-identity-visual-evidence-v1');
+  expect(Object.keys(template.questions.relation.criteria)).toEqual(['same', 'different']);
+  expect(template.questions.relation.instructions).toContain('You cannot see the images');
+  expect(template.questions.relation.instructions).not.toContain('Use only supplied text');
+  expect(Object.isFrozen(template.questions.relation)).toBe(true);
+});

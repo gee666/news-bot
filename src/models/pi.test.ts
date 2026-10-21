@@ -73,6 +73,42 @@ describe("isolated Pi generation", () => {
       type: "json_schema", strict: true, name: "test_result" } } });
   });
 
+  it("sends ordered image content through the SDK and rejects unsupported or malformed images before dispatch", async () => {
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify("openai-codex", async () =>
+      ({ type: "oauth", access: "fake", refresh: "fake", expires: Date.now() + 3600_000 }));
+    const runtime = await ModelRuntime.create({ credentials, modelsPath: null, refreshOnCreate: false });
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+    const images = [{ data: png, mimeType: "image/png" }, { data: png, mimeType: "image/png" }];
+    const stream = vi.spyOn(runtime, "streamSimple").mockImplementation((_model, input) => {
+      const user = input.messages.find(message => message.role === 'user');
+      expect(user?.content).toEqual([{ type: 'text', text: 'Compare attachments' },
+        ...images.map(image => ({ type: 'image', ...image }))]);
+      const output = new AssistantMessageEventStream();
+      output.push({ type: 'done', reason: 'stop', message: assistant('ok') });
+      output.end();
+      return output;
+    });
+    const recordFailure = vi.fn();
+    const generator = new PiGenerator({ runtime: { modelRuntime: runtime,
+      authPath: resolve('tmp/fake-auth/auth.json'), agentDir: resolve('tmp/fake-auth') }, recordFailure });
+    const request = { systemPrompt: 'Inspect images', prompt: 'Compare attachments', images };
+    await generator.generate(request, { operationId: 'images' });
+    await expect(generator.generate({ ...request, images: [{ data: 'data:image/png;base64,aA==', mimeType: 'image/png' }] },
+      { operationId: 'malformed' })).rejects.toMatchObject({ metadata: { kind: 'invalid_request', outcome: 'not_submitted' } });
+    await expect(generator.generate({ ...request, images: [{ data: 'bm90LWFuLWltYWdl', mimeType: 'image/png' }] },
+      { operationId: 'undecodable' })).rejects.toMatchObject({ metadata: { kind: 'invalid_request', outcome: 'not_submitted' } });
+    const model = runtime.getModel('openai-codex', 'gpt-6-luna');
+    if (!model) throw new Error('Missing test model');
+    vi.spyOn(runtime, 'getModel').mockReturnValue({ ...model, input: ['text'] });
+    await expect(generator.generate(request, { operationId: 'text-only' })).rejects.toMatchObject({
+      metadata: { kind: 'invalid_request', outcome: 'not_submitted', message: expect.stringContaining('does not support image input') },
+    });
+    expect(stream).toHaveBeenCalledOnce();
+    expect(recordFailure).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(recordFailure.mock.calls)).not.toContain(images[0]?.data);
+  });
+
   it("applies configured retry limits to generation and connection tests", async () => {
     const runtime = await ModelRuntime.create({
       credentials: new InMemoryCredentialStore(), modelsPath: null, refreshOnCreate: false,

@@ -2,6 +2,7 @@ import { db, transaction } from '../db.js';
 import { getSettings } from '../settings.js';
 import { BotApi } from './bot-api.js';
 import { editPublication, recordFailure } from './delivery.js';
+import { deletePublicationMedia } from './media-delivery.js';
 import { actionKey, loadAction, snapshotHash } from './approval.js';
 import { locked, publicationEditSelect, rateLimited, type Publication } from './store.js';
 
@@ -61,7 +62,10 @@ export async function executeReviewedAction(id: string, api = new BotApi()): Pro
         return attempt.id;
       });
       if (!attemptId) return false;
-      try { await api.delete(publication.destination_id,action.messageId); }
+      try {
+        await deletePublicationMedia(publication, api);
+        await api.delete(publication.destination_id,action.messageId);
+      }
       catch (error) {
         await recordFailure(attemptId,publication,'delete',error,settings);
         await db.query(`UPDATE operational_state SET value=value||'{"state":"uncertain"}'::jsonb,updated_at=now() WHERE key=$1`,[`publication_removal:${publication.id}`]);

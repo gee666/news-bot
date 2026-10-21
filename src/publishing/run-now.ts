@@ -7,6 +7,8 @@ import { recoverEdits, recoverSends } from './digest.js';
 import { checkPublicationAdmission } from './admission.js';
 import { guardDigestEligibility } from '../pipeline/eligibility.js';
 import { prepareUpdates, retryEdits } from './updates.js';
+import { retryPublicationMedia } from './media-delivery.js';
+import { recoverPublicationMedia } from './media-plan.js';
 import { destination, prepareDigest, publicationSelect, rateLimited, refreshPrepared, state, type Publication } from './store.js';
 
 export interface ManualPublicationResult {
@@ -20,7 +22,7 @@ const selectionSchema = z.object({ ids: z.array(z.uuid()), destinationId: z.stri
 async function deliveryCounts(selection: z.infer<typeof selectionSchema> | undefined, createdAt: string) {
   if (!selection) return { published: 0, updated: 0 };
   const published = await db.query<{ count: number }>(`SELECT count(*)::int AS count FROM publications
-    WHERE id=ANY($1::uuid[]) AND status='published'`, [selection.ids]);
+    WHERE id=ANY($1::uuid[]) AND status='published' AND media_status IN ('none','complete')`, [selection.ids]);
   const edited = await db.query<{ count: number }>(`SELECT count(DISTINCT a.publication_id)::int AS count FROM request_attempts a
     WHERE a.operation='edit' AND a.status='succeeded' AND a.finished_at>=$2 AND EXISTS(
       SELECT 1 FROM jsonb_to_recordset($1::jsonb) target("publicationId" uuid,"snapshotId" uuid)
@@ -64,6 +66,7 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   for (const row of prior.rows) report.reasons[`existing_publication_${row.status}`] = row.count;
   // Selection commits before any network send. Retry/restart always uses these same IDs.
   await recoverSends(destinationId, ids);
+  await recoverPublicationMedia(destinationId);
   const selected = await db.query<Publication & { error_code: string | null }>(`${publicationSelect}
     WHERE p.id=ANY($1::uuid[]) AND p.destination_id=$2 ORDER BY p.created_at,p.id`, [ids, destinationId]);
   const withheld = new Set<string>();
@@ -106,11 +109,16 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   await prepareUpdates(current, destinationId, storyIds, { runId });
   const receipt = selectionSchema.parse(await state(`run_now_publications:${runId}`));
   if (!await rateLimited()) await retryEdits(api, current, destinationId, storyIds);
-  const outcomes = await db.query<{ id: string; status: string; error_code: string | null }>(`SELECT id,status,error_code
+  if (!await rateLimited()) await retryPublicationMedia(api, current, destinationId);
+  const outcomes = await db.query<{ id: string; status: string; error_code: string | null; media_status?: string }>(`SELECT id,status,error_code,media_status
     FROM publications WHERE id=ANY($1::uuid[])`, [ids]);
   for (const row of outcomes.rows) {
     if (row.status === 'uncertain' && row.error_code !== 'send_not_found_requires_review' || row.status === 'sending'
       || row.status === 'prepared' && !withheld.has(row.id)) report.waiting = true;
+    if (row.status === 'published' && row.media_status && !['none', 'complete'].includes(row.media_status)) {
+      report.reasons[row.error_code ?? 'publication_media_pending'] = (report.reasons[row.error_code ?? 'publication_media_pending'] ?? 0) + 1;
+      if (row.media_status === 'pending') report.waiting = true;
+    }
     if (row.status !== 'published' && !withheld.has(row.id)) {
       const reason = row.error_code ?? row.status;
       report.reasons[reason] = (report.reasons[reason] ?? 0) + 1;

@@ -1,8 +1,10 @@
+import { feedMedia } from './feed-media.js';
+import type { WebMedia } from './media.js';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { z } from 'zod';
 import { publisherArticle, type PrimarySourceInput } from './config.js';
 
-export interface PublisherEntry { id: string; url: string; title: string | null; publishedAt: Date | null }
+export interface PublisherEntry { id: string; url: string; title: string | null; publishedAt: Date | null; media?: WebMedia[] }
 const field = z.union([z.string(), z.object({ '#text': z.string().optional() })]);
 function text(input: unknown): string | null {
   const parsed = field.safeParse(input);
@@ -34,6 +36,9 @@ const entry = z.object({
   title: z.unknown().optional(), link: z.unknown().optional(), guid: z.unknown().optional(),
   id: z.unknown().optional(), pubDate: z.unknown().optional(), published: z.unknown().optional(),
   date: z.unknown().optional(),
+  enclosure: z.unknown().optional(), content: z.unknown().optional(), encoded: z.unknown().optional(),
+  description: z.unknown().optional(), summary: z.unknown().optional(),
+  group: z.unknown().optional(), thumbnail: z.unknown().optional(),
 });
 const root = z.object({
   rss: z.object({ channel: z.object({ item: z.array(entry).default([]) }) }).optional(),
@@ -60,7 +65,8 @@ export function parseFeed(xml: string, source: PrimarySourceInput): PublisherEnt
     if (!url) continue;
     const id = text(item.guid)?.trim() || text(item.id)?.trim() || url;
     if (id.length > 4096) throw new Error('feed_id_limit');
-    results.set(id, { id, url, title: text(item.title)?.slice(0, 500) ?? null,
+    const media = feedMedia(item, url, text);
+    results.set(id, { id, url, ...(media.length ? { media } : {}), title: text(item.title)?.slice(0, 500) ?? null,
       publishedAt: publisherDate(text(item.pubDate) ?? text(item.published) ?? text(item.date)) });
   }
   return [...results.values()];

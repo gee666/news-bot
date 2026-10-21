@@ -1,3 +1,4 @@
+import { discoverMedia, mergeMedia, validatedMedia } from './media.js';
 import { z } from 'zod';
 import { db } from '../db.js';
 import { publicUrl } from '../pipeline/research-fetch.js';
@@ -25,6 +26,8 @@ Promise<{ itemId: string; revisionId: string; changed: boolean }> {
     publishedAt: state.item.published_at === null ? null : new Date(state.item.published_at), editedAt: null,
     links: extractMarkdownLinks(text, page.canonicalUrl),
     metadata: { ...state.item.metadata, title: page.title, byline: page.metadata.byline ?? null,
+      media: mergeMedia(validatedMedia(page.metadata.media, page.canonicalUrl),
+        discoverMedia(page.content, page.canonicalUrl, page.metadata.contentFormat === 'html' ? 'html' : 'markdown')),
       cleaning: page.metadata.cleaning ?? null, canonicalUrl: page.canonicalUrl },
   });
 }

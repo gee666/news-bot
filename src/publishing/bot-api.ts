@@ -13,6 +13,23 @@ const envelopeSchema = z.object({
   parameters: z.object({ retry_after: z.number().nonnegative().optional() }).optional(),
 });
 
+export interface PublicationMedia { type: 'image' | 'video'; data: Buffer; mimeType: string; expiresAt?: number }
+
+export function mediaUploadType(item: Pick<PublicationMedia, 'type' | 'mimeType'>): 'photo' | 'video' | 'document' {
+  const mime = item.mimeType.toLowerCase();
+  if (item.type === 'image' && ['image/jpeg', 'image/png'].includes(mime)) return 'photo';
+  if (item.type === 'video' && mime === 'video/mp4') return 'video';
+  return 'document';
+}
+
+function mediaExtension(mimeType: string): string {
+  const extensions: Record<string, string> = {
+    'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/avif': 'avif',
+    'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'video/x-matroska': 'mkv',
+  };
+  return extensions[mimeType.toLowerCase()] ?? 'bin';
+}
+
 export class BotApi {
   constructor(private readonly token = process.env.TELEGRAM_BOT_TOKEN?.trim(), private readonly fetcher = fetch) {
     if (!token || !/^\d+:[A-Za-z0-9_-]+$/u.test(token)) throw new BotError('bot_token_missing_or_invalid', 'failed');
@@ -20,11 +37,13 @@ export class BotApi {
 
   private botIdentity: { id: number; is_bot: boolean } | undefined;
 
-  private async call(method: string, payload: object): Promise<unknown> {
+  private async call(method: string, payload: object | FormData): Promise<unknown> {
     let response: Response;
     try {
       response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+        method: 'POST', ...(payload instanceof FormData
+          ? { body: payload }
+          : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }),
         signal: AbortSignal.timeout(30_000),
       });
     } catch { throw new BotError('telegram_transport_unknown', 'unknown'); }
@@ -57,6 +76,37 @@ export class BotApi {
     const parsed = messageSchema.safeParse(value);
     if (!parsed.success || String(parsed.data.chat.id) !== destinationId) throw new BotError('telegram_send_response_unknown', 'unknown');
     return String(parsed.data.message_id);
+  }
+
+  /** Text stays in the canonical message, so attachments never truncate it to a caption. */
+  async sendMedia(destinationId: string, replyTo: string, media: PublicationMedia[]): Promise<string[]> {
+    if (!media.length || media.length > 10 || !/^\d+$/u.test(replyTo)
+      || media.some(item => !item.data.length || !(item.type === 'image' || item.type === 'video'))) {
+      throw new BotError('telegram_media_invalid', 'failed');
+    }
+    const uploads = media.map(mediaUploadType);
+    const documents = uploads.every(type => type === 'document');
+    if (!documents && uploads.includes('document')) throw new BotError('telegram_media_batch_invalid', 'failed');
+    const form = new FormData();
+    form.set('chat_id', destinationId);
+    form.set('reply_parameters', JSON.stringify({ message_id: Number(replyTo), allow_sending_without_reply: false }));
+    const single = media.length === 1 ? media[0] : undefined;
+    media.forEach((item, index) => {
+      const field = single ? mediaUploadType(item) : `file${index}`;
+      form.set(field, new Blob([new Uint8Array(item.data)], { type: item.mimeType }), `${field}.${mediaExtension(item.mimeType)}`);
+    });
+    if (single && documents) form.set('disable_content_type_detection', 'true');
+    if (!single) form.set('media', JSON.stringify(media.map((item, index) => ({
+      type: mediaUploadType(item), media: `attach://file${index}`, ...(documents ? { disable_content_type_detection: true } : {}),
+    }))));
+    const method = !single ? 'sendMediaGroup' : documents ? 'sendDocument' : mediaUploadType(single) === 'photo' ? 'sendPhoto' : 'sendVideo';
+    const value = await this.call(method, form);
+    const parsed = z.array(messageSchema).safeParse(single ? [value] : value);
+    if (!parsed.success || parsed.data.length !== media.length || parsed.data.some(item => String(item.chat.id) !== destinationId)
+      || new Set(parsed.data.map(item => item.message_id)).size !== media.length) {
+      throw new BotError('telegram_media_response_unknown', 'unknown');
+    }
+    return parsed.data.map(item => String(item.message_id));
   }
 
   async edit(destinationId: string, messageId: string, message: RenderedMessage): Promise<void> {

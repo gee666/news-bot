@@ -2,12 +2,15 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { PiRequest, RequestContext } from '../models/index.js';
 import { defaultSettings } from '../settings.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
+import { summaryImages } from '../media/story-media.js';
 import { researchStory } from './generation.js';
 import { publishedStory, alreadyGenerated, saveGenerations } from './generation-store.js';
 import { publishedThread, absorbIntoPublished, rebaseFollowup } from './publication-thread.js';
 import { refreshPublishedSources } from '../publishing/updates.js';
 import { generationClient } from './generation-model.js';
 import { evidenceDocument, modelResult, storyId, storyInput } from './generation.test-helpers.js';
+
+vi.mock('../media/story-media.js', () => ({ summaryImages: vi.fn(async () => []) }));
 
 const mocks = vi.hoisted(() => ({ input: vi.fn(), generate: vi.fn() }));
 vi.mock('./generation-store.js', () => ({
@@ -243,4 +246,16 @@ it('never regenerates a published story, even when forced', async () => {
   await researchStory(storyId,defaultSettings,true);
   expect(mocks.generate).not.toHaveBeenCalled();
   expect(mocks.input).not.toHaveBeenCalled();
+});
+
+
+it('passes still-image attachments to writing, review and corrective calls', async () => {
+  const images = [{ data: 'aW1hZ2U=', mimeType: 'image/png' }];
+  vi.mocked(summaryImages).mockResolvedValueOnce(images);
+  mocks.generate.mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(failed))
+    .mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(passed));
+  await researchStory(storyId, defaultSettings);
+  expect(summaryImages).toHaveBeenCalledWith(storyId, defaultSettings);
+  expect(mocks.generate).toHaveBeenCalledTimes(4);
+  for (const [request] of mocks.generate.mock.calls) expect(request.images).toEqual(images);
 });

@@ -45,6 +45,7 @@ export function publicUrl(input: string): URL {
 }
 
 export interface FetchLimits { timeoutMs: number; maxBytes: number; maxRedirects: number; allowXml?: boolean }
+export interface FetchedBinary { url: string; status: number; contentType: string; data: Buffer }
 export interface FetchedResponse { url: string; status: number; contentType: string; text: string }
 export type AddressResolver = (host: string) => Promise<{ address: string; family: number }[]>;
 
@@ -88,8 +89,8 @@ async function beforeDeadline<T>(promise: Promise<T>, signal: AbortSignal): Prom
 }
 
 /** Resolve once per hop and pin the validated address while preserving Host and TLS SNI. */
-export async function fetchPublic(input: string, limits: FetchLimits = fetchLimits(),
-  headers: Record<string, string> = {}): Promise<FetchedResponse> {
+async function fetchContent(input: string, limits: FetchLimits,
+  headers: Record<string, string>, media: boolean): Promise<FetchedBinary> {
   const signal = AbortSignal.timeout(limits.timeoutMs);
   let url = publicUrl(input);
   try {
@@ -114,7 +115,7 @@ export async function fetchPublic(input: string, limits: FetchLimits = fetchLimi
           continue;
         }
         const contentType = (response.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase() ?? '';
-        const allowed = ['text/html', 'application/xhtml+xml', 'text/plain', 'application/json'].includes(contentType)
+        const allowed = media ? /^(image\/(jpeg|png|webp|gif)|video\/(mp4|webm|quicktime))$/u.test(contentType) : ['text/html', 'application/xhtml+xml', 'text/plain', 'application/json'].includes(contentType)
           || (limits.allowXml && ['application/rss+xml', 'application/atom+xml', 'application/xml', 'text/xml'].includes(contentType));
         if (!allowed) {
           await response.body?.cancel();
@@ -140,7 +141,7 @@ export async function fetchPublic(input: string, limits: FetchLimits = fetchLimi
           } finally { await reader.cancel(); reader.releaseLock(); }
         }
         return { url: url.href, status: response.status, contentType,
-          text: Buffer.concat(chunks).toString('utf8') };
+          data: Buffer.concat(chunks) };
       } finally { await dispatcher.destroy(); }
     }
     throw new ResearchFetchError('blocked_url');
@@ -148,4 +149,15 @@ export async function fetchPublic(input: string, limits: FetchLimits = fetchLimi
     if (error instanceof ResearchFetchError) throw error;
     throw new ResearchFetchError('fetch_failed');
   }
+}
+
+export async function fetchPublic(input: string, limits: FetchLimits = fetchLimits(),
+  headers: Record<string, string> = {}): Promise<FetchedResponse> {
+  const { data, ...response } = await fetchContent(input, limits, headers, false);
+  return { ...response, text: data.toString('utf8') };
+}
+
+/** Binary media uses the same pinned DNS, redirect and streaming size checks as research. */
+export function fetchPublicMedia(input: string, maxBytes: number): Promise<FetchedBinary> {
+  return fetchContent(input, { timeoutMs: 60_000, maxBytes, maxRedirects: 3 }, {}, true);
 }

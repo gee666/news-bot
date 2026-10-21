@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { summaryImages } from '../media/story-media.js';
 import { ModelRequestError, type TextGenerator } from '../models/index.js';
 import type { AppSettings } from '../settings.js';
 import { generationReviewSchema } from '../types.js';
@@ -53,14 +54,14 @@ const reviewPrompt = `Проверь русский заголовок и пер
 
 /** One request, with local validation only. Invalid JSON is retried later with the story, not repaired in another turn. */
 async function generateOnce<T>(generator: TextGenerator, schema: z.ZodType<T>, systemPrompt: string,
-  material: unknown, operationId: string, signal?: AbortSignal): Promise<T> {
+  material: unknown, operationId: string, signal?: AbortSignal, images?: Array<{ data: string; mimeType: string }>): Promise<T> {
   const jsonSchema = z.toJSONSchema(schema, { override: ({ jsonSchema }) => {
     // Codex rejects URI format; the unchanged Zod schema still validates URLs locally.
     if (jsonSchema.format === 'uri') delete jsonSchema.format;
   } });
   const response = await generator.generate({
     systemPrompt: systemPrompt + '\nВерни только JSON по схеме: ' + JSON.stringify(jsonSchema),
-    prompt: JSON.stringify(material), responseSchema: { name: 'story_output', schema: jsonSchema },
+    prompt: JSON.stringify(material), ...(images?.length ? { images } : {}), responseSchema: { name: 'story_output', schema: jsonSchema },
   }, { operationId, ...(signal ? { signal } : {}) });
   let json: unknown;
   try { json = JSON.parse(response.text); } catch {
@@ -71,8 +72,8 @@ async function generateOnce<T>(generator: TextGenerator, schema: z.ZodType<T>, s
   return parsed.data;
 }
 
-async function reviewDraft(generator: TextGenerator, material: unknown, operationId: string): Promise<z.infer<typeof generationReviewSchema>> {
-  const { remarks } = await generateOnce(generator, reviewSchema, reviewPrompt, material, operationId, AbortSignal.timeout(processingSliceMs()));
+async function reviewDraft(generator: TextGenerator, material: unknown, operationId: string, images?: Array<{ data: string; mimeType: string }>): Promise<z.infer<typeof generationReviewSchema>> {
+  const { remarks } = await generateOnce(generator, reviewSchema, reviewPrompt, material, operationId, AbortSignal.timeout(processingSliceMs()), images);
   return { supported: remarks.length === 0, reason: remarks.join('; ') };
 }
 
@@ -109,9 +110,10 @@ export async function researchStory(storyId: string, settings: AppSettings, forc
     primary_sources:primarySourceUrls,
     ...(thread.length ? { previous_posts:thread.map(post=>({headline:post.headline,summary:post.details,
       ...(post.earlier ? { earlier:post.earlier } : {})})) } : {}) };
+  const images = await summaryImages(storyId, settings);
   const write = (prompt: unknown, operation: string, signal?: AbortSignal): Promise<Draft> => thread.length
-    ? generateOnce(generator, followupSchema, editorialPrompt + followupPrompt, prompt, operation, signal)
-    : generateOnce(generator, editorialSchema, editorialPrompt, prompt, operation, signal);
+    ? generateOnce(generator, followupSchema, editorialPrompt + followupPrompt, prompt, operation, signal, images)
+    : generateOnce(generator, editorialSchema, editorialPrompt, prompt, operation, signal, images);
   const absorb = async (): Promise<'absorbed'> => {
     const previous = thread.at(-1);
     if (!previous) throw new Error('Follow-up has no published thread');
@@ -124,12 +126,12 @@ export async function researchStory(storyId: string, settings: AppSettings, forc
   if (draft.new_information === false) return absorb();
   let review: z.infer<typeof generationReviewSchema>;
   try {
-    review = await reviewDraft(generator, { material, draft }, `${operationId}:review`);
+    review = await reviewDraft(generator, { material, draft }, `${operationId}:review`, images);
     if (!review.supported) {
       draft = await write({ material, draft, review, instruction: 'Исправь пересказ один раз по исходным материалам. Замечание проверки не является новым источником фактов.' },
         `${operationId}:rewrite`, AbortSignal.timeout(processingSliceMs()));
       if (draft.new_information === false) return absorb();
-      review = await reviewDraft(generator, { material, draft }, `${operationId}:re-review`);
+      review = await reviewDraft(generator, { material, draft }, `${operationId}:re-review`, images);
     }
   } catch (error) {
     if (!(error instanceof ModelRequestError)) throw error;

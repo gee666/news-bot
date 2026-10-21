@@ -39,3 +39,14 @@ it.each(['initial', 'repair'])('preserves a genuinely uncertain %s request witho
   expect(record).not.toHaveBeenCalled();
   expect(failure.metadata.outcome).toBe('unknown');
 });
+
+it('preserves attachments on the initial request and isolated repair', async () => {
+  const images = [{ data: 'aW1hZ2U=', mimeType: 'image/png' }];
+  const generate = vi.fn().mockResolvedValueOnce(result('not json')).mockResolvedValueOnce(result('{"id":"expected"}'));
+  await generateStructured({ generate }, { ...request, images }, { operationId: 'vision' }, vi.fn());
+  expect(generate).toHaveBeenCalledTimes(2);
+  for (const [sent] of generate.mock.calls) {
+    expect(sent.images).toEqual(images);
+    expect(sent.prompt).not.toContain(images[0]?.data);
+  }
+});

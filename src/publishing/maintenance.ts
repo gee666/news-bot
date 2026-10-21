@@ -3,13 +3,21 @@ import { z } from 'zod';
 import { getSettings } from '../settings.js';
 import { resumePublications } from './digest.js';
 import { saveState } from './store.js';
+import { expirePublicationMedia } from './media-plan.js';
 
 export async function startPublicationMaintenance(): Promise<() => Promise<void>> {
   const intervalMs = z.coerce.number().int().min(1000).max(60000).parse(process.env.PUBLICATION_READY_INTERVAL_MS ?? 5000);
   const controller = new AbortController();
   const done = (async () => {
+    let cleanupAt = 0;
     while (!controller.signal.aborted) {
-      try { await resumePublications(await getSettings()); }
+      try {
+        if (Date.now() >= cleanupAt) {
+          await expirePublicationMedia();
+          cleanupAt = Date.now() + 60 * 60 * 1000;
+        }
+        await resumePublications(await getSettings());
+      }
       catch {
         console.error('Telegram publication maintenance failed; retrying on the next maintenance tick.');
         await saveState('telegram_publication_maintenance', { status: 'waiting', errorCode: 'publication_resume_failed',

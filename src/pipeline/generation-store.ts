@@ -1,3 +1,4 @@
+import { envInteger } from './research-fetch.js';
 import { evidenceLinkSql } from '../sources/link-policy.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -13,9 +14,10 @@ const storySchema = z.object({
   headline: z.string().nullable(), summary: z.string().nullable(), researched: z.boolean(),
   translated_excerpt: z.string().nullable(), content_version: z.number().int(), meaningful_hash: z.string().nullable(),
 });
-export const GENERATION_VERSION = 'generation-v11';
+export const GENERATION_VERSION = 'generation-v12-media';
 const timestampSchema = z.union([z.date().transform(value => value.toISOString()), z.iso.datetime({ offset: true })]);
 const mentionSchema = z.object({ id: z.uuid(), text: z.string(), access: accessSchema, original_url: z.string().nullable(),
+  media: z.array(z.unknown()).nullish(),
   source_name: z.string().optional(), connector_type: z.string().optional(),
   published_at: timestampSchema.nullable().optional(), collected_at: timestampSchema.nullable().optional(),
   referent_context: z.array(z.string().max(300)).max(3).optional() });
@@ -27,6 +29,7 @@ const linkSchema = z.object({ url: z.string(), classification: z.enum(['relevant
   access: accessSchema.optional(), original_url: z.string().nullable().optional(), source_name: z.string().optional() });
 export type Story = z.infer<typeof storySchema>;
 const supplementaryReportSchema = z.object({
+  media: z.array(z.unknown()).nullish(),
   source_id: z.uuid(), revision_id: z.uuid(), text: z.string(), source_name: z.string(),
   original_url: z.string().nullable(), access: accessSchema,
   published_at: timestampSchema.nullable(), collected_at: timestampSchema.nullable(),
@@ -57,7 +60,7 @@ export async function loadStoryWithQuery(id: string, query: typeof db.query): Pr
   const stories = await query('SELECT id, chosen_excerpt, interest_score, headline, summary, researched, translated_excerpt, content_version, meaningful_hash FROM stories WHERE id = $1', [id]);
   const story = storySchema.parse(stories.rows[0]);
   const mentions = await query(`SELECT m.id, m.text, s.access, s.name AS source_name, s.connector_type, i.original_url, i.published_at, i.collected_at,
-    m.metadata, r.original_text AS parent_text FROM story_mentions m
+    m.metadata, r.metadata->'media' AS media, r.original_text AS parent_text FROM story_mentions m
     JOIN item_revisions r ON r.id = m.revision_id JOIN source_items i ON i.current_revision_id = r.id
     JOIN sources s ON s.id = i.source_id WHERE m.story_id = $1 ORDER BY m.created_at, m.id`, [id]);
   const links = await query(`SELECT DISTINCT l.url, ml.classification, so.access, i.original_url, so.name AS source_name FROM story_mentions m
@@ -72,7 +75,7 @@ export async function loadStoryWithQuery(id: string, query: typeof db.query): Pr
     WHERE sl.story_id=$1 AND sl.classification='relevant' AND ${evidenceLinkSql}
     ORDER BY classification, url`, [id]);
   const reports = await query(`SELECT DISTINCT so.id AS source_id, r.id AS revision_id,
-      r.original_text AS text, so.name AS source_name, i.original_url, so.access, i.published_at, i.collected_at
+      r.metadata->'media' AS media, r.original_text AS text, so.name AS source_name, i.original_url, so.access, i.published_at, i.collected_at
     FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
     JOIN item_revisions r ON r.id=l.revision_id
     JOIN source_items i ON i.current_revision_id=r.id JOIN sources so ON so.id=i.source_id
@@ -88,13 +91,14 @@ export async function loadStoryWithQuery(id: string, query: typeof db.query): Pr
     const source = { id: mention.id, text: mention.text, access: mention.access, original_url: mention.original_url,
       source_name: mention.source_name, connector_type: mention.connector_type, published_at: mention.published_at, collected_at: mention.collected_at };
     const context = mentionReferentContext(source.text, parent_text, metadata);
-    return { ...source, ...(context.length ? { referent_context: context } : {}) };
+    return { ...source, ...(mention.media?.length ? { media: mention.media } : {}), ...(context.length ? { referent_context: context } : {}) };
   }), links: z.array(linkSchema).parse(links.rows) };
 }
 
 export function generationHash(input: StoryInput, settings: AppSettings): string {
   return createHash('sha256').update(JSON.stringify({ stage: 'research', promptVersion: GENERATION_VERSION, researchPolicy: 'summary-review-v1',
     representativeVersion: jevTemplates.representative.version,
+    mediaPolicy: { maxImages: envInteger('MEDIA_SUMMARY_MAX_IMAGES', 10, 10) },
     model: [settings.piProvider, settings.piModel, settings.modelVersion], contentVersion: input.story.content_version,
     content: input.story.meaningful_hash ?? { mentions: input.mentions.map(mention => mention.text) },
     links: input.links.map(link => [link.url, link.classification, link.access, link.original_url, link.source_name]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
@@ -102,7 +106,7 @@ export function generationHash(input: StoryInput, settings: AppSettings): string
     excerpt: input.story.chosen_excerpt,
     headlineContext: [...new Set(input.mentions.map(mention => JSON.stringify({
       id: mention.id, text: mention.text, access: mention.access, source: mention.source_name, connector: mention.connector_type, url: mention.original_url,
-      publishedAt: mention.published_at, collectedAt: mention.collected_at, referents: mention.referent_context ?? [],
+      publishedAt: mention.published_at, collectedAt: mention.collected_at, media: mention.media, referents: mention.referent_context ?? [],
     })))].sort(),
     depth: { threshold: settings.researchThreshold,
       deep: (input.story.interest_score ?? 0) >= settings.researchThreshold,
