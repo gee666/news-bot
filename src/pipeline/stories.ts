@@ -1,4 +1,5 @@
 import { unpublished } from './generation-store.js';
+import { refreshPublishedSources } from '../publishing/updates.js';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import { interestScore } from '../models/jev.js';
@@ -117,6 +118,7 @@ export async function finishBatchStories(batchId: string, settings: AppSettings,
     await db.query(`UPDATE stage_state SET status='skipped',next_retry_at=NULL,updated_at=now()
       WHERE batch_id=$1 AND story_id=$2 AND status IN ('pending','waiting','running')`, [batchId,id]);
   };
+  const visited: string[] = [];
   try {
     for (const story of candidates) {
       // A newer completed display supersedes this batch's shared-story work, not its input snapshot.
@@ -125,6 +127,7 @@ export async function finishBatchStories(batchId: string, settings: AppSettings,
         && ((story.profile_version ?? 0)>settings.profileVersion || (story.model_version ?? 0)>settings.modelVersion)) {
         await skipStages(story.id); report.skippedStories++; continue;
       }
+      visited.push(story.id);
       const outcome = await storyWork(story.id, settings, batchId, async () => {
         if (await needsRefresh(story, settings)) return finishStory(story, settings, judgments, vectors, batchId);
         await skipStages(story.id);
@@ -134,7 +137,7 @@ export async function finishBatchStories(batchId: string, settings: AppSettings,
       countStoryOutcome(report, outcome);
       if (outcome === 'completed' && onReady) await onReady(story.id);
     }
-  } finally { await prepareStoryFailureUpdates(settings, manual.success ? candidates.map(story => story.id) : undefined, manual.success); }
+  } finally { await prepareStoryFailureUpdates(settings, visited, manual.success); }
   return report;
 }
 
@@ -182,9 +185,9 @@ async function pinRefresh(ids: string[]): Promise<void> {
 export async function refreshDigest(settings: AppSettings, judgments: Judgments, storyIds?: readonly string[]): Promise<StoryWorkReport> {
   const selectedIds = storyIds === undefined ? null : z.array(z.uuid()).max(1000).parse(storyIds);
   await db.query(`DELETE FROM operational_state o WHERE key LIKE 'digest_refresh:%' AND NOT EXISTS(
-    SELECT 1 FROM stories s WHERE s.id::text=o.value->>'storyId' AND s.status<>'rejected' AND EXISTS(
+    SELECT 1 FROM stories s WHERE s.id::text=o.value->>'storyId' AND (NOT (${unpublished('s')}) OR (s.status<>'rejected' AND EXISTS(
       SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
-      JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=s.id))`);
+      JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=s.id))))`);
   // A scoped replay can yield after merges enqueue refreshes but before its story cap is pinned.
   const result = await db.query<Candidate>(`WITH RECURSIVE ${blockedStoriesCte} SELECT s.id,s.content_version,s.status,s.interest_stale,s.profile_version,s.model_version FROM stories s
     WHERE ${unpublished('s')}
@@ -207,15 +210,27 @@ export async function refreshDigest(settings: AppSettings, judgments: Judgments,
     [settings.profileVersion, settings.modelVersion, selectedIds]);
   const report: StoryWorkReport = { completedStories: 0, failedStories: 0, skippedStories: 0 };
   const vectors = new Vectors(await getActiveEmbeddingConfig(), settings);
+  const visited: string[] = [];
   try {
     for (const story of result.rows) {
       checkProcessingSlice();
+      visited.push(story.id);
       countStoryOutcome(report, await storyWork(story.id, settings, null, async () => {
         if (!await needsRefresh(story, settings)) return true;
         await pinRefresh([story.id]);
         return finishStory(story, settings, judgments, vectors, null);
       }));
     }
-  } finally { await vectors.close(); await prepareStoryFailureUpdates(settings); }
+    // Published text/rank stays immutable. Drain source-only changes without reranking it.
+    const published = await db.query<{ id: string; key: string }>(`SELECT s.id,o.key FROM operational_state o
+      JOIN stories s ON s.id::text=o.value->>'storyId'
+      WHERE o.key LIKE 'digest_refresh:%' AND NOT (${unpublished('s')})
+        AND ($1::uuid[] IS NULL OR s.id=ANY($1)) ORDER BY o.updated_at,o.key`, [selectedIds]);
+    for (const story of published.rows) {
+      checkProcessingSlice();
+      await refreshPublishedSources(settings, [story.id]);
+      await db.query('DELETE FROM operational_state WHERE key=$1', [story.key]);
+    }
+  } finally { await vectors.close(); await prepareStoryFailureUpdates(settings, visited); }
   return report;
 }

@@ -20,9 +20,9 @@ export const publicationSelect = `SELECT p.*, s.content FROM publications p
   JOIN publication_snapshots s ON s.id = p.snapshot_id`;
 export const publicationEditSelect = `SELECT p.*, s.content FROM publications p
   JOIN publication_snapshots s ON s.id = coalesce(p.pending_snapshot_id,p.snapshot_id)`;
-// Retryable sends are definitely unsent only after Telegram's explicit 429 rejection.
+// Explicit 429 rejections and proven connection failures cannot have sent a message.
 export const unsafeSendAttempt = `(a.status IN ('running','unknown','succeeded')
-  OR (a.status='retryable' AND a.error_code IS DISTINCT FROM 'telegram_rate_limit')
+  OR (a.status='retryable' AND coalesce(a.error_code,'') NOT IN ('telegram_rate_limit','telegram_connect_failed'))
   OR coalesce(a.error_code,'') LIKE '%unknown%')`;
 export async function supersedeAttempts(client: Pick<PoolClient,'query'>, ids: string[], operation: 'send' | 'edit'): Promise<void> {
   if (!ids.length) return;

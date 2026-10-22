@@ -141,6 +141,20 @@ describe.skipIf(!url)('caption-first album PostgreSQL lifecycle', () => {
     expect(send).toHaveBeenCalledOnce(); expect(api.sendMedia).not.toHaveBeenCalled();
   });
 
+  it('keeps a proven pre-request connection failure retryable across recovery', async () => {
+    const publication = await fixture();
+    const send = vi.spyOn(api, 'sendAlbum').mockRejectedValueOnce(new BotError('telegram_connect_failed', 'retryable')).mockResolvedValue(ids(2));
+    expect(await delivery.sendPrepared(publication, api, settings)).toBeNull();
+    expect(await load(publication.id)).toMatchObject({ status: 'prepared', media_status: 'pending' });
+    await (await import('./digest.js')).recoverSends('-100123');
+    await plans.recoverPublicationMedia('-100123');
+    expect(await load(publication.id)).toMatchObject({ status: 'prepared' });
+    await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
+    await database.db.query("UPDATE publication_media_batches SET next_retry_at=now()-interval '1 second'");
+    expect(await delivery.sendPrepared(await load(publication.id), api, settings)).toBe('100');
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
   it('retries an explicit 429 only after cooldown using the frozen original bytes', async () => {
     const publication = await fixture();
     const send = vi.spyOn(api, 'sendAlbum').mockRejectedValueOnce(new BotError('telegram_rate_limit', 'retryable', 120_000)).mockResolvedValue(ids(2));

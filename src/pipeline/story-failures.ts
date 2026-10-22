@@ -49,10 +49,15 @@ export async function storyWork(id: string, settings: AppSettings, batchId: stri
   }
 }
 
-export async function prepareStoryFailureUpdates(settings: AppSettings, storyIds?: string[], cancelOnly = false): Promise<void> {
-  const destinations = await db.query<{ destination_id: string }>(`SELECT DISTINCT destination_id FROM publications
-    WHERE status='published' AND pending_snapshot_id IS NOT NULL`);
-  for (const row of destinations.rows) await prepareUpdates(settings, row.destination_id, storyIds, { cancelOnly });
+export async function prepareStoryFailureUpdates(settings: AppSettings, storyIds: readonly string[], cancelOnly = false): Promise<void> {
+  if (!storyIds.length) return;
+  const ids = [...new Set(storyIds)];
+  const destinations = await db.query<{ destination_id: string }>(`SELECT DISTINCT p.destination_id FROM publications p
+    LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id
+    LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id
+    WHERE p.status='published' AND p.pending_snapshot_id IS NOT NULL
+      AND coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id)=ANY($1::uuid[])`, [ids]);
+  for (const row of destinations.rows) await prepareUpdates(settings, row.destination_id, ids, { cancelOnly });
 }
 
 export function countStoryOutcome(report: StoryWorkReport, outcome: Awaited<ReturnType<typeof storyWork>>): void {

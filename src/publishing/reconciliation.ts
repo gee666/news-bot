@@ -19,9 +19,14 @@ export interface AlbumReceipt { messageId: string; messageIds: string[] }
 const albumRequestSchema = z.object({ deliveryKind: z.literal('album'), itemIds: z.array(z.string()).min(1).max(10),
   uploadTypes: z.array(z.enum(['photo','video','document'])).min(1).max(10), botId: z.string() });
 interface SendWindow { dispatched_at: Date; response_metadata: unknown }
-// Bot API HTTP timeout is 30 seconds. Allow clock skew, never scan an unbounded publication lifetime.
+// Legacy attempts used 30 seconds. New sends persist their actual timeout.
 const BEFORE_MS = 30_000;
 const AFTER_MS = 90_000;
+const timeoutSchema = z.object({ requestTimeoutMs: z.number().int().min(1000).max(900_000).optional() });
+function sendWindowAfter(metadata: unknown): number {
+  const parsed = timeoutSchema.safeParse(metadata);
+  return (parsed.success ? parsed.data.requestTimeoutMs ?? 30_000 : 30_000) + 60_000;
+}
 
 export async function readMessageFingerprint(publication: Publication): Promise<string | null> {
   if (!publication.message_id) return null;
@@ -57,7 +62,7 @@ export async function readSentPublication(publication: Publication): Promise<Alb
       throw new ReconciliationReviewError('Album request metadata missing');
     }
     return { album: album?.success ? album.data : null, fingerprint: parsed.data.fingerprint, start: attempt.dispatched_at.getTime() - BEFORE_MS,
-      end: attempt.dispatched_at.getTime() + AFTER_MS };
+      end: attempt.dispatched_at.getTime() + sendWindowAfter(attempt.response_metadata) };
   });
   if (!windows.length) throw new ReconciliationReviewError('Send attempt missing');
   const others = (await db.query<{ message_id: string | null; media_ids: string[]; dispatched_at: Date | null; response_metadata: unknown }>(`
@@ -68,7 +73,7 @@ export async function readSentPublication(publication: Publication): Promise<Alb
   for (const other of others) {
     const parsed = fingerprintSchema.safeParse(other.response_metadata);
     if (parsed.success && other.dispatched_at && windows.some(window => window.fingerprint === parsed.data.fingerprint &&
-        other.dispatched_at !== null && other.dispatched_at.getTime() + AFTER_MS >= window.start && other.dispatched_at.getTime() - BEFORE_MS <= window.end)) {
+        other.dispatched_at !== null && other.dispatched_at.getTime() + sendWindowAfter(other.response_metadata) >= window.start && other.dispatched_at.getTime() - BEFORE_MS <= window.end)) {
       throw new ReconciliationReviewError('Overlapping identical sends require review');
     }
   }

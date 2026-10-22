@@ -11,12 +11,22 @@ import { approveRemoteInput } from './privacy.js';
 import { hash, stage, type StageContext } from './state.js';
 import { itemWork } from './item-failures.js';
 import { eventSemanticHash } from './consolidation-input.js';
+import { unpublished } from './generation-store.js';
 
 const LINK_VERSION = 'item-links-v1';
 const sourceStageName = (catalogue:string,settings:AppSettings) => `source_links:${LINK_VERSION}:${catalogue}:m${settings.modelVersion}`;
 
 /** Revisit source-only references when new stories arrive, without a second queue or retry tracker. */
 export async function associateSourceLinks(settings: AppSettings): Promise<void> {
+  // Reclassifying every recap against the changing catalogue is optional enrichment.
+  // Finish unextracted intake first instead of competing with it on every recovery sweep.
+  const intake = await db.query<{ pending: boolean }>(`SELECT EXISTS(SELECT 1 FROM batch_items b
+    JOIN processing_batches p ON p.id=b.batch_id JOIN item_revisions r ON r.id=b.revision_id
+    JOIN source_items i ON i.current_revision_id=r.id
+    WHERE b.status IN ('pending','processing') AND p.completed_at IS NULL
+      AND b.disposition_reason IS DISTINCT FROM 'outside_collection_window'
+      AND NOT (r.metadata ? 'pipelineExtraction')) AS pending`);
+  if (intake.rows[0]?.pending) return;
   const catalogue = eventSemanticHash(...await retainedStories(settings));
   const rows = await db.query<{ revision_id: string; batch_id: string }>(`SELECT r.id AS revision_id,
     (SELECT b.batch_id FROM batch_items b JOIN processing_batches p ON p.id=b.batch_id
@@ -95,17 +105,24 @@ export async function classifyItemLinks(revisionId: string, settings: AppSetting
       await client.query(`INSERT INTO source_link_processing(revision_id,processing_key,role)
         VALUES($1,$2,'source_only') ON CONFLICT(revision_id) DO UPDATE SET processing_key=EXCLUDED.processing_key,
           role=EXCLUDED.role,processed_at=now()`, [revisionId,sourceStageName(eventSemanticHash(...stories),settings)]);
-      const removed = await client.query<{ story_id: string }>(`DELETE FROM story_link_sources sl USING item_links l
-        WHERE sl.link_id=l.id AND l.revision_id=$1 RETURNING sl.story_id`, [revisionId]);
-      const changed = new Set(removed.rows.map(row => row.story_id));
+      const previous = await client.query<{ link_id: string; story_id: string; classification: string }>(`SELECT sl.link_id,sl.story_id,sl.classification
+        FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id WHERE l.revision_id=$1`, [revisionId]);
+      const oldPairs = new Map(previous.rows.map(pair => [`${pair.link_id}:${pair.story_id}`, pair]));
+      const nextPairs = new Map(result.value.associations.map(pair => [`${pair.linkId}:${pair.targetId}`, pair]));
+      const changed = new Set<string>();
+      for (const [key, pair] of oldPairs) {
+        if (nextPairs.get(key)?.classification !== pair.classification) changed.add(pair.story_id);
+      }
+      await client.query(`DELETE FROM story_link_sources sl USING item_links l
+        WHERE sl.link_id=l.id AND l.revision_id=$1`, [revisionId]);
       for (const pair of result.value.associations) {
         await client.query(`INSERT INTO story_link_sources(link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
           VALUES($1,$2,$3,$4,$5,$6,$7)`, [pair.linkId,pair.targetId,pair.classification,
         `${settings.piProvider}/${settings.piModel}`, settings.modelVersion,LINK_VERSION,hash({ revisionId,pair })]);
-        changed.add(pair.targetId);
+        if (oldPairs.get(`${pair.linkId}:${pair.targetId}`)?.classification !== pair.classification) changed.add(pair.targetId);
       }
       if (changed.size) {
-        await client.query('UPDATE stories SET interest_stale=true,updated_at=now() WHERE id=ANY($1::uuid[])', [[...changed]]);
+        await client.query(`UPDATE stories s SET interest_stale=true,updated_at=now() WHERE id=ANY($1::uuid[]) AND ${unpublished('s')}`, [[...changed]]);
         await client.query(`INSERT INTO operational_state(key,value)
           SELECT 'digest_refresh:'||id::text,jsonb_build_object('storyId',id) FROM stories WHERE id=ANY($1::uuid[])
           ON CONFLICT(key) DO NOTHING`, [[...changed]]);

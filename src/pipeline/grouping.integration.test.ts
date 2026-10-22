@@ -213,6 +213,14 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT story_id,classification FROM story_link_sources WHERE link_id=$1',[link])).rows)
       .toEqual([{story_id:compiler,classification:'relevant'}]);
     expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
+    await database.db.query('UPDATE stories SET interest_stale=false WHERE id=$1', [compiler]);
+    await database.db.query('DELETE FROM operational_state WHERE key=$1', [`digest_refresh:${compiler}`]);
+    await (await import('./source-links.js')).classifyItemLinks(revision, settings, {
+      id: currentStage, attempt: 1, batchId: recap, revisionId: revision, storyId: null,
+    });
+    expect((await database.db.query('SELECT interest_stale FROM stories WHERE id=$1', [compiler])).rows)
+      .toEqual([{ interest_stale: false }]);
+    expect((await database.db.query('SELECT 1 FROM operational_state WHERE key=$1', [`digest_refresh:${compiler}`])).rows).toHaveLength(0);
     const text=(await database.db.query<{text:string}>('SELECT text FROM story_mentions WHERE story_id=$1',[compiler])).rows[0]?.text;
     if (!text) throw new Error('Missing compiler report');
     await database.db.query("UPDATE story_mentions SET text='Different product announcement.' WHERE story_id=$1",[compiler]);
@@ -220,7 +228,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT story_id FROM story_link_sources WHERE link_id=$1',[link])).rows).toHaveLength(0);
     await database.db.query('UPDATE story_mentions SET text=$2 WHERE story_id=$1',[compiler,text]);
     await associateSourceLinks(settings); await associateSourceLinks(settings);
-    expect(model.linksCalls).toBe(3);
+    expect(model.linksCalls).toBe(4);
     expect((await database.db.query('SELECT story_id FROM story_link_sources WHERE link_id=$1',[link])).rows).toEqual([{story_id:compiler}]);
   });
   it('does not expose an unrelated private story or let it block public grouping', async () => {

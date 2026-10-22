@@ -93,6 +93,18 @@ describe('read-only album reconciliation', () => {
     expect(await readSentPublication(album)).toEqual({ messageId: '11', messageIds: ['11','12'] });
     expect(mocks.history.mock.calls[0]?.[1]).toEqual({ offsetDate: publication.created_at.getTime()/1000 + 181 });
   });
+  it('uses the persisted upload timeout for late albums, retaining the legacy window for old sends', async () => {
+    mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('p.id<>$2') ? [] : [{
+      dispatched_at: publication.created_at, response_metadata: { ...sendMetadata(caption), deliveryKind: 'album', botId: '123',
+        itemIds: ['item0', 'item1'], uploadTypes: ['photo', 'photo'], requestTimeoutMs: 300_000 },
+    }] }));
+    const first = photo(11, true); const second = photo(12);
+    first.date += 240; second.date += 240;
+    mocks.messages = [second, first];
+    expect(await readSentPublication(album)).toEqual({ messageId: '11', messageIds: ['11', '12'] });
+    request();
+    expect(await readSentPublication(album)).toBeNull();
+  });
   it('does not infer completion from a matching caption without every expected sibling', async () => {
     request(); mocks.messages = [photo(11, true)];
     await expect(readSentPublication(album)).rejects.toThrow('Incomplete or changed album requires review');

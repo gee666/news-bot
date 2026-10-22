@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { RenderedMessage } from './render.js';
+import { isTelegramPreconnectFailure, telegramTimeouts } from './telegram-transport.js';
 
 export const MAX_ALBUM_MEDIA = 10;
 
@@ -40,15 +41,21 @@ export class BotApi {
   private botIdentity: { id: number; is_bot: boolean } | undefined;
 
   private async call(method: string, payload: object | FormData): Promise<unknown> {
+    const { requestMs, uploadMs } = telegramTimeouts();
+    const timeoutMs = payload instanceof FormData ? uploadMs : requestMs;
     let response: Response;
     try {
       response = await this.fetcher(`https://api.telegram.org/bot${this.token}/${method}`, {
-        method: 'POST', ...(payload instanceof FormData
+        // Do not follow a response to another host, then mistake its connect failure for an unsent request.
+        redirect: 'error', method: 'POST', ...(payload instanceof FormData
           ? { body: payload }
           : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) }),
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
-    } catch { throw new BotError('telegram_transport_unknown', 'unknown'); }
+    } catch (error) {
+      if (isTelegramPreconnectFailure(error)) throw new BotError('telegram_connect_failed', 'retryable');
+      throw new BotError('telegram_transport_unknown', 'unknown');
+    }
     let body: unknown;
     try { body = await response.json(); } catch { throw new BotError('telegram_response_unknown', 'unknown'); }
     const parsed = envelopeSchema.safeParse(body);

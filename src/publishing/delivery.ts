@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { telegramTimeouts } from './telegram-transport.js';
 import type { PoolClient } from 'pg';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
@@ -117,7 +118,9 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
   }
   const bot = await api.identity();
   if (publication.bot_id && publication.bot_id !== String(bot.id)) throw new Error('Publication bot ownership changed');
-  const attemptId = await beginAttempt(publication, 'send', { ...sendMetadata(message), ...albumMetadata, botId:String(bot.id) }, settings, authorization);
+  const timeouts = telegramTimeouts();
+  const requestTimeoutMs = album ? timeouts.uploadMs : timeouts.requestMs;
+  const attemptId = await beginAttempt(publication, 'send', { ...sendMetadata(message), ...albumMetadata, requestTimeoutMs, botId:String(bot.id) }, settings, authorization);
   if (!attemptId) return null;
   let messageId: string;
   try {
