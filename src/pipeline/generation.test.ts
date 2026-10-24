@@ -278,3 +278,30 @@ it('passes still-image attachments to writing, review and corrective calls', asy
   expect(mocks.generate).toHaveBeenCalledTimes(4);
   for (const [request] of mocks.generate.mock.calls) expect(request.images).toEqual(images);
 });
+
+it('retains every prior source URL even when the writer omits them or the original rows were pruned', async () => {
+  const sources = Array.from({ length: 5 }, (_, index) => ({ label:`Источник ${index}`, url:`https://old.example/${index}`,
+    access:'public' as const, primary:false, classification:'relevant' as const }));
+  const input = { ...storyInput(), previous_posts:[{ ...previous, sources:[...sources,
+    {...sources[0]!,url:'https://t.me/c/123/8',previousPublication:true as const},
+    {...sources[0]!,url:'https://t.me/c/123/9',relatedPublication:true as const},
+    {...sources[0]!,url:'https://t.me/c/123/10',unverifiedPublication:true as const}],
+    earlier:'Исходный механизм и условие, уже отсутствующие в базе исходников.' }] };
+  mocks.input.mockResolvedValueOnce(input);
+  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, source_urls:['https://invented.example/'] }))
+    .mockResolvedValueOnce(modelResult(passed));
+  await researchStory(storyId,defaultSettings);
+  expect(publishedThread).not.toHaveBeenCalled();
+  const request = mocks.generate.mock.calls[0]?.[0];
+  const material = JSON.parse(request.prompt);
+  expect(material.retained_sources.map((source: { url: string }) => source.url)).toEqual(sources.map(source => source.url));
+  expect(material.previous_posts[0].earlier).toBe(input.previous_posts[0]?.earlier);
+  expect(request.systemPrompt).toContain('не теряй их только из-за отсутствия оригинала');
+  expect(request.systemPrompt).toContain('не подменяй им основной сюжет');
+  expect(request.systemPrompt).toContain('сохраняя исходного участника и действие');
+  const review = mocks.generate.mock.calls[1]?.[0];
+  expect(review.systemPrompt).toContain('исходного участника, действие и предмет действия');
+  expect(JSON.parse(review.prompt).material).toEqual(material);
+  expect(saveGenerations).toHaveBeenCalledWith([input],[expect.objectContaining({ sourceUrls:sources.map(source => source.url) })],defaultSettings);
+  expect(mocks.generate).toHaveBeenCalledTimes(2);
+});

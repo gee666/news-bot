@@ -5,6 +5,7 @@ import { getSettings, type AppSettings } from '../settings.js';
 import { BotApi } from './bot-api.js';
 import { reconcile, sendPrepared } from './delivery.js';
 import { checkPublicationAdmission } from './admission.js';
+import { recoverNavigationParts, retryNavigationParts } from './navigation-delivery.js';
 import { prepareThreadUpdates } from './thread-updates.js';
 import { recoverPublicationText, retryPublicationText } from './text-delivery.js';
 import { retryEdits } from './updates.js';
@@ -51,6 +52,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   await recoverEdits(destinationId);
   await recoverPublicationMedia(destinationId);
   await recoverPublicationText(destinationId);
+  await recoverNavigationParts(destinationId);
   await prepareThreadUpdates(destinationId);
   if (await rateLimited()) return;
   if (!selectNewStories) {
@@ -65,6 +67,8 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
           AND t.status IN ('prepared','retryable') AND (t.next_retry_at IS NULL OR t.next_retry_at<=now()))
         OR EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id AND r.status='pending'
           AND (r.next_retry_at IS NULL OR r.next_retry_at<=now()))
+        OR EXISTS(SELECT 1 FROM publication_navigation_parts n WHERE n.publication_id=p.id
+          AND n.status IN ('prepared','retryable','unknown') AND (n.next_retry_at IS NULL OR n.next_retry_at<=now()))
         OR EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
           AND a.status IN ('running','retryable','unknown') AND (a.next_retry_at IS NULL OR a.next_retry_at<=now()))))
       AS pending`, [destinationId])).rows[0];
@@ -80,6 +84,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   if (selectNewStories) await prepareReadyStories(current,destinationId);
   await adoptPreparedPublications(current,destinationId);
   await retryEdits(api,current,destinationId);
+  await retryNavigationParts(api,current,destinationId);
   await retryReplacements(api,current,destinationId);
   await retryPublicationText(api,current,destinationId);
   await retryPublicationMedia(api,current,destinationId);
@@ -101,6 +106,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   }
   await prepareThreadUpdates(destinationId);
   await retryEdits(api,current,destinationId);
+  await retryNavigationParts(api,current,destinationId);
 }
 
 export async function publishDigest(settings: AppSettings): Promise<void> {

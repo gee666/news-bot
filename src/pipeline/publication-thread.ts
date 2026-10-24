@@ -52,8 +52,18 @@ export async function rebaseFollowup(storyId: string): Promise<boolean> {
     const latest = await latestThreadStory(id);
     if (latest !== id && latest !== storyId) {
       await transaction(async client => {
-        const updated = await client.query(`INSERT INTO story_publication_threads(story_id,previous_story_id)
-          VALUES($1,$2) ON CONFLICT(story_id) DO UPDATE SET previous_story_id=EXCLUDED.previous_story_id
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
+        const conflict = await client.query(`SELECT 1 FROM story_relations
+          WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)
+            AND (relation<>'same' OR provenance->>'quarantined'='true')`, [storyId, latest]);
+        if (conflict.rows.length) return;
+        // An authorized reclassification may have quarantined this edge after the read.
+        const stillVerified = await client.query(`WITH ${publicationThreadEdges}
+          SELECT 1 FROM publication_thread_edges WHERE story_id=$1 AND previous_story_id=$2`, [storyId, id]);
+        if (!stillVerified.rows.length) return;
+        const updated = await client.query(`INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version)
+          VALUES($1,$2,'verified-rebase-v1') ON CONFLICT(story_id) DO UPDATE SET previous_story_id=EXCLUDED.previous_story_id,
+            classification_version=EXCLUDED.classification_version
           WHERE story_publication_threads.previous_story_id IS DISTINCT FROM EXCLUDED.previous_story_id RETURNING story_id`,
         [storyId, latest]);
         await client.query(`UPDATE story_mentions

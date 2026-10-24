@@ -13,18 +13,19 @@ import { MediaPairCache } from './pair-cache.js';
 import { generationThread } from '../pipeline/generation-context.js';
 
 // Codec changes must invalidate selections made while visual comparisons were rejected.
-const preparationVersion = 'media-v3-cumulative-resolved-pairs';
+const preparationVersion = 'media-v4-retained-ancestry';
 const cache = new MediaCache();
 const active = new Map<string, Promise<MediaCandidate[]>>();
 const sourceSchema = z.object({ revision_id: z.string(), metadata: z.record(z.string(), z.unknown()),
   source_metadata: z.record(z.string(), z.unknown()), access: z.string() });
 
 async function prepare(storyId: string, settings: AppSettings): Promise<MediaCandidate[]> {
+  // Retention owns source lifetime. Fetch/cache TTLs must not hide retained ancestor attachments.
   const result = await db.query(`${generationThread} SELECT DISTINCT r.id AS revision_id,r.metadata,s.metadata AS source_metadata,s.access
     FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
     JOIN source_items i ON i.id=r.item_id AND (m.story_id<>$1 OR i.current_revision_id=r.id)
     JOIN sources s ON s.id=i.source_id
-    WHERE m.story_id IN(SELECT id FROM generation_story_ids) AND i.collected_at>now()-interval '7 days'
+    WHERE m.story_id IN(SELECT id FROM generation_story_ids)
       AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
     UNION SELECT r.id AS revision_id,r.metadata,s.metadata AS source_metadata,s.access
@@ -32,12 +33,12 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
     JOIN item_revisions r ON r.id=l.revision_id
     JOIN source_items i ON i.id=r.item_id AND (sl.story_id<>$1 OR i.current_revision_id=r.id)
     JOIN sources s ON s.id=i.source_id WHERE sl.story_id IN(SELECT id FROM generation_story_ids) AND sl.classification='relevant' AND ${evidenceLinkSql}
-      AND i.collected_at>now()-interval '7 days' AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
+      AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
     UNION SELECT e.id AS revision_id,e.metadata,'{}'::jsonb AS source_metadata,e.access
     FROM story_evidence se JOIN evidence_documents e ON e.id=se.evidence_id
-    WHERE se.story_id IN(SELECT id FROM generation_story_ids) AND se.relevance='relevant' AND e.access='public' AND e.fetched_at>now()-interval '7 days'
-      AND se.superseded_at IS NULL AND e.expires_at>now()
+    WHERE se.story_id IN(SELECT id FROM generation_story_ids) AND se.relevance='relevant' AND e.access='public'
+      AND se.superseded_at IS NULL AND (se.story_id<>$1 OR e.expires_at>now())
     ORDER BY revision_id`, [z.uuid().parse(storyId)]);
   const sources = z.array(sourceSchema).parse(result.rows);
   const descriptors = sources.flatMap(source => {

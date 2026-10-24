@@ -20,7 +20,7 @@ const legacyRow = (role: 'primary' | 'supporting' | 'candidate') => ({
 const oldHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 it('pins the research hash for the cumulative generation policy', () => {
-  expect(generationHash(storyInput(), defaultSettings)).toBe('6647f7ec8f0b54ef9628577671521617e6ec881380b161c1a3793515c0393283');
+  expect(generationHash(storyInput(), defaultSettings)).toBe('eb3a9cc0ea8e251be8fe25b2781f9b382d513580b11c339d2e4a8d5147a7dd37');
 });
 
 it.each([
@@ -110,7 +110,7 @@ it('invalidates legacy generation receipts for the calibrated policy without cha
   }));
   expect(await alreadyGenerated(input, defaultSettings)).toBe(false);
   expect(mocks.query).toHaveBeenCalledOnce();
-  expect(mocks.query.mock.calls[0]?.[0]).toContain("prompt_version = 'generation-v13-cumulative'");
+  expect(mocks.query.mock.calls[0]?.[0]).toContain("prompt_version = 'generation-v14-retained-editions'");
   expect(mocks.query.mock.calls[0]?.[1]?.[2]).toBe(current);
   mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT result FROM judgments') ? [receipt] : [] }));
   expect(await alreadyGenerated(input, defaultSettings)).toBe(true);

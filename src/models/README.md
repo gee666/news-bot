@@ -102,7 +102,7 @@ JEV template names and state fields. The pipeline uses JEV for coherence, repres
 | --- | --- | --- |
 | story_count | message.text | count: choice none, 1 through 20, more |
 | link_relevance | story, link, anchor, surroundingText | relevance: relevant, irrelevant, uncertain |
-| duplicate | mention, candidate | relation: same, different |
+| duplicate | mention, candidate | relation: same, related, unrelated |
 | media_identity | detailed left/right visual evidence from Pi, correspondences, differences, limitations | relation: same, different |
 | interest | story, interestProfile | interest: score index 0 through 9 |
 | representative | story, left, right | best: left or right |

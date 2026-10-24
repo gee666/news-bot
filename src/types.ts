@@ -23,6 +23,9 @@ export const publicationSourceSchema = z.object({
   access: z.enum(['public', 'restricted', 'unavailable', 'unknown']),
   primary: z.boolean(),
   previousPublication: z.literal(true).optional(),
+  relatedPublication: z.literal(true).optional(),
+  unverifiedPublication: z.literal(true).optional(),
+  legacyPublication: z.literal(true).optional(),
   kind: sourceAuthorityKindSchema.optional(),
   classification: z.enum(['relevant', 'uncertain']),
 }).strict().transform(source => source.kind ? { ...source, primary: source.kind === 'primary' } : source);
@@ -31,11 +34,13 @@ export const publicationSnapshotSchema = z.object({
   headline: z.string().min(1),
   score: z.number().int().min(1).max(10),
   details: z.string(),
-  /** Combined summary of earlier posts in a follow-up thread; details then hold only the new information. */
+  /** Legacy history text retained verbatim, rendered as part of the complete body. */
   earlier: z.string().min(1).optional(),
   detailsKind: z.enum(['summary', 'excerpt']),
   sources: z.array(publicationSourceSchema),
   review: generationReviewSchema.optional(),
+  navigationVersion: z.literal(1).optional(),
+  navigationOverflow: z.literal(true).optional(),
   updatedTo: z.string().regex(/^https:\/\/t\.me\/c\/\d+\/[1-9]\d*$/u).optional(),
 }).strict();
 

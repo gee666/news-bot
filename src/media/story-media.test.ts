@@ -103,3 +103,11 @@ it('keeps all attachments above the old 100-item processing cap', async () => {
   expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(103);
   expect(mocks.download).toHaveBeenCalledTimes(103);
 });
+
+it('does not impose a second seven-day retention window on retained source rows or ancestor evidence', async () => {
+  await publicationMedia(randomUUID(),defaultSettings);
+  const sql = mocks.query.mock.calls[0]?.[0];
+  expect(sql).not.toContain("interval '7 days'");
+  expect(sql).toContain('se.story_id<>$1 OR e.expires_at>now()');
+  expect(sql).toContain('se.superseded_at IS NULL');
+});

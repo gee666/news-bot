@@ -40,7 +40,7 @@ async function invalidateStaleEdits(client: PoolClient, settings: AppSettings, d
       AND ($6::uuid[] IS NULL OR s.id=ANY($6))
       AND (p.pending_snapshot_id IS NOT NULL OR EXISTS(SELECT 1 FROM request_attempts a
         WHERE a.publication_id=p.id AND a.operation='edit' AND a.status IN ('running','unknown','retryable')))
-      AND NOT (desired.content ? 'updatedTo')
+      AND NOT (desired.content ? 'updatedTo' OR desired.content ? 'navigationVersion')
       AND (s.status IN ('failed','rejected') OR (((desired.content-'sources') IS DISTINCT FROM (sent.content-'sources'))
       AND ((${eligible}) IS NOT TRUE OR desired.content->>'headline' IS DISTINCT FROM s.headline
         OR desired.content->>'details' IS DISTINCT FROM CASE WHEN s.researched THEN s.summary ELSE s.translated_excerpt END

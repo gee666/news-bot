@@ -8,6 +8,8 @@ import type { ResearchPage } from './research-page.js';
 import { publicationSnapshotSchema, generationReviewSchema, type GenerationReview } from '../types.js';
 import { jevTemplates } from '../models/templates.js';
 import { generationThread } from './generation-context.js';
+import { publishedThread, type ThreadPost } from './publication-thread.js';
+import { generationHistory } from './generation-history.js';
 
 const accessSchema = z.enum(['public', 'restricted', 'unknown']);
 const storySchema = z.object({
@@ -15,7 +17,7 @@ const storySchema = z.object({
   headline: z.string().nullable(), summary: z.string().nullable(), researched: z.boolean(),
   translated_excerpt: z.string().nullable(), content_version: z.number().int(), meaningful_hash: z.string().nullable(),
 });
-export const GENERATION_VERSION = 'generation-v13-cumulative';
+export const GENERATION_VERSION = 'generation-v14-retained-editions';
 const timestampSchema = z.union([z.date().transform(value => value.toISOString()), z.iso.datetime({ offset: true })]);
 const mentionSchema = z.object({ id: z.uuid(), text: z.string(), access: accessSchema, original_url: z.string().nullable(),
   media: z.array(z.unknown()).nullish(),
@@ -39,6 +41,7 @@ export type SupplementaryReport = z.infer<typeof supplementaryReportSchema>;
 export interface StoryInput {
   story: Story; mentions: z.infer<typeof mentionSchema>[]; links: z.infer<typeof linkSchema>[];
   supplementary_reports?: SupplementaryReport[];
+  previous_posts?: ThreadPost[];
 }
 
 /** Preserve the generation context IDs by applying the same offsets, limits and deduplication everywhere. */
@@ -87,7 +90,8 @@ export async function loadStoryWithQuery(id: string, query: typeof db.query): Pr
       AND NOT EXISTS (SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
     ORDER BY i.published_at DESC NULLS LAST, i.collected_at DESC NULLS LAST, r.id`, [id]);
   const supplementaryReports = z.array(supplementaryReportSchema).parse(reports.rows);
-  return { story, ...(supplementaryReports.length ? { supplementary_reports: supplementaryReports } : {}),
+  const previousPosts = await publishedThread(id, query);
+  return { story, previous_posts: previousPosts, ...(supplementaryReports.length ? { supplementary_reports: supplementaryReports } : {}),
     mentions: z.array(storedMentionSchema).parse(mentions.rows).map(mention => {
     const { parent_text, metadata } = mention;
     const source = { id: mention.id, text: mention.text, access: mention.access, original_url: mention.original_url,
@@ -105,6 +109,7 @@ export function generationHash(input: StoryInput, settings: AppSettings): string
     content: input.story.meaningful_hash ?? { mentions: input.mentions.map(mention => mention.text) },
     links: input.links.map(link => [link.url, link.classification, link.access, link.original_url, link.source_name]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
     supplementaryReports: (input.supplementary_reports ?? []).map(report => JSON.stringify(report)).sort(),
+    previousPosts: generationHistory(input.previous_posts ?? []),
     excerpt: input.story.chosen_excerpt,
     headlineContext: [...new Set(input.mentions.map(mention => JSON.stringify({
       id: mention.id, text: mention.text, access: mention.access, source: mention.source_name, connector: mention.connector_type, url: mention.original_url,

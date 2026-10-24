@@ -42,3 +42,12 @@ it('refuses to commit a selection after a collector edit changes the current rep
   await expect(selectRepresentative('story', { judge: vi.fn() }, context)).rejects.toThrow('changed during selection');
   expect(mocks.query).toHaveBeenCalledTimes(3);
 });
+
+it('rejects a legacy discovery/shutdown aggregate before selecting a broad-topic representative', async () => {
+  mocks.query.mockResolvedValueOnce({ rows: rows(['OpenAI discovered a PHP vulnerability.', 'Alderon shut down its game because of that vulnerability.']) });
+  const judge = { judge: vi.fn().mockResolvedValue({ type: 'choice', choice: 'mixed', probabilities: {}, confidence: 1 }) };
+  await expect(selectRepresentative('story', judge, context)).rejects.toThrow('unconnected event reports');
+  expect(judge.judge).toHaveBeenCalledTimes(1);
+  expect(judge.judge.mock.calls[0]?.[0]).toBe('event_group_integrity');
+  expect(mocks.query).toHaveBeenCalledTimes(1);
+});

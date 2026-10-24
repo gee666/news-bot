@@ -31,8 +31,8 @@ describe('full publication rendering', () => {
   });
   it('renders new information and earlier history, with escaped text and correct link offsets', () => {
     const message=render({...snapshot,earlier:'Было <известно> [1]'});
-    expect(message.text).toContain('<b>Новое</b>\n'+escapeHtml(snapshot.details));
-    expect(message.text).toContain('<b>Ранее было опубликовано</b>\nБыло &lt;известно&gt;');
+    expect(message.text).toContain(escapeHtml(snapshot.details)+'\n\nБыло &lt;известно&gt;');
+    expect(message.text).not.toMatch(/Ранее было опубликовано|<b>Новое<\/b>/u);
     const link=message.links[0]!;
     expect(message.plainText.slice(link.offset,link.offset+link.length)).toContain('Канал <1>');
   });
@@ -45,10 +45,10 @@ describe('full publication rendering', () => {
     expect(message.links).toHaveLength(1);
     expect(render({...content,details:'😀'.repeat(5000)}).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
   });
-  it('counts both follow-up headings against the Telegram entity limit', () => {
+  it('legacy history needs no extra heading entities', () => {
     const sources=Array.from({length:97},()=>snapshot.sources[0]!);
     expect(()=>render({...snapshot,sources})).not.toThrow();
-    expect(()=>render({...snapshot,sources,earlier:'Прежние сведения'})).toThrow('publication_entity_limit');
+    expect(()=>render({...snapshot,sources,earlier:'Прежние сведения'})).not.toThrow();
   });
   it('renders a clean review with no remark block', () => {
     const message=render({...snapshot,review:{supported:true,reason:''}});

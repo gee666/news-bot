@@ -62,6 +62,12 @@ describe('generation source selection', () => {
     expect(render(await snapshotFor(client(), story)).text).not.toContain('Предыдущие публикации');
     expect((await snapshotFor(client({ receipt: { earlierSummary: 'Не продолжение' } }), story)).earlier).toBeUndefined();
   });
+  it('does not inherit related-story navigation as event sources', async () => {
+    const related={ ...source('https://t.me/c/123/88'),relatedPublication:true as const };
+    const snapshot=await snapshotFor(client({ posts:[post('1',[related,source('https://author.org/same')])] }),story);
+    expect(snapshot.sources.some(source=>source.url===related.url)).toBe(false);
+    expect(snapshot.sources.some(source=>source.url==='https://author.org/same')).toBe(true);
+  });
   it('does not let inherited legacy kinds downgrade a primary document', async () => {
     const snapshot=await snapshotFor(client({posts:[post('1',[{...source(reportUrl),kind:'journalism'}])]}),story);
     expect(snapshot.sources.find(source=>source.url===reportUrl)).toMatchObject({primary:true,kind:'primary'});

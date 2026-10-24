@@ -26,6 +26,8 @@ async function story(previous?: string) {
   await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
   const mention = await one(`INSERT INTO story_mentions(story_id,revision_id,text,ordinal,metadata)
     VALUES($1,$2,'Report',0,$3) RETURNING id`, [id, revision, JSON.stringify(previous ? { previous_story_id: previous } : {})]);
+  if (previous) await database.db.query(`INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version)
+    VALUES($1,$2,'fixture-verified')`, [id, previous]);
   return { id, revision, mention };
 }
 async function publish(id: string, message: string, earlier?: string, destination = '-100123') {

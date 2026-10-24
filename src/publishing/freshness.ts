@@ -7,7 +7,7 @@ import { generationIsCurrent } from '../pipeline/generation-freshness.js';
 import { eligible, snapshotFor, snapshotSources } from './content.js';
 import { loadAction, snapshotHash, type DeliveryAuthorization } from './approval.js';
 import { rateLimited,unsafeSendAttempt,type Publication } from './store.js';
-import { latestUpdateTarget, markerOnlyChange } from './thread-updates.js';
+import { desiredNavigation, navigationOnlyChange } from './navigation.js';
 import { lockAdmissionInputs } from './admission-locks.js';
 
 type Reason = 'settings_changed' | 'publishing_paused' | 'snapshot_changed' | 'story_ineligible'
@@ -75,8 +75,11 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
       const sent = publicationSnapshotSchema.parse((await client.query<{ content: unknown }>(
         'SELECT content FROM publication_snapshots WHERE id=$1', [row.snapshot_id])).rows[0]?.content);
       const desired = publicationSnapshotSchema.parse(row.content);
-      if (markerOnlyChange(sent,desired)) return await latestUpdateTarget(client,row.id) === desired.updatedTo
-        ? { allowed: true } : deny('snapshot_changed');
+      if (navigationOnlyChange(sent,desired)) {
+        const expected = await desiredNavigation(client,row,sent);
+        return snapshotHash({ ...expected,navigationOverflow:desired.navigationOverflow })===snapshotHash(desired)
+          ? { allowed:true } : deny('snapshot_changed');
+      }
     }
     if (!row.canonical_story_id || row.desired_story_id !== row.canonical_story_id) return deny('retained_provenance_unknown');
     const quarantined=await client.query(`WITH RECURSIVE ${blockedStoriesCte} SELECT 1 WHERE $1::text IN(SELECT id FROM blocked_stories)

@@ -2,7 +2,7 @@
 
 Collectors save media locations in revision metadata, not media bytes. Web articles, feed enclosures and Telegram albums supply images and native video attachments. Embedded players that expose only a player page, such as a YouTube iframe, are not downloadable video attachments.
 
-Each event edition gathers media from its current and ancestor reports, relevant supplementary sources and relevant research pages. Historical ancestor revisions remain available. Source validity, privacy approval and the seven-day media window still apply. Distinct attachments are retained across all sources, not just the latest report.
+Each event edition gathers media from its current and ancestor reports, relevant supplementary sources and relevant research pages. Only verified SAME-event ancestry contributes media, not RELATED events or unverified legacy edges. Historical ancestor revisions remain usable while their metadata is retained. Source validity and privacy approval still apply; there is no separate seven-day source-age cutoff. Distinct attachments are retained across all sources, not just the latest report.
 
 ## Duplicate detection and model calls
 
@@ -26,7 +26,7 @@ Explicit temporary Telegram rejections can retry their frozen plans. Unknown tex
 
 ## Temporary storage and limits
 
-Downloaded media is temporary. `tmp/media-cache/` contains per-story bytes, removed after confirmed attachment delivery. Files expire after seven days, checked at startup and hourly. Video decoding uses memory where possible and deletes seekable fallback files immediately; abandoned decoder files expire after 24 hours. Keep `tmp/` private. Media byte caches are not mounted as permanent Docker volumes. The separate persisted pair cache contains no media or source URLs. Source media older than seven days after collection is not downloaded again.
+Downloaded media is temporary. `tmp/media-cache/` contains per-story bytes, removed after confirmed attachment delivery. Files expire after seven days, checked at startup and hourly. Video decoding uses memory where possible and deletes seekable fallback files immediately; abandoned decoder files expire after 24 hours. Keep `tmp/` private. Media byte caches are not mounted as permanent Docker volumes. The separate persisted pair cache contains no media or source URLs. The seven-day deadline limits cached bytes, not the lifetime of retained source metadata. A later edition can download an older attachment again while its source descriptor remains in PostgreSQL. Metadata lifetime follows configured source/evidence retention and its cleanup rules, not the media cache clock. Expired retained ancestor research can still contribute attachments, just as it contributes historical text; current-draft research must remain unexpired. Superseded or irrelevant research is excluded in either case. Deleted descriptors cannot be reconstructed from text-only publication snapshots; inaccessible downloads fail preparation rather than silently omitting media.
 
 PostgreSQL temporarily spools upload bytes before dispatch for restart safety. Confirmed uploads erase those bytes immediately. Maintenance also erases unpublished or unresolved bytes after seven days. Telegram message IDs and hashes remain for audit and authorized deletion. Backups and WAL can retain prior temporary data according to the operator's database-retention policy.
 

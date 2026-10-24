@@ -69,8 +69,8 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
       VALUES('https://example.org/announcement','public',now()+interval '1 day') RETURNING id`);
     await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,assessment) VALUES($1,$2,'primary','Original assessment')`, [rumor, evidence]);
     const left = await current(rumor), right = await current(announcement);
-    expect(await merge(left, right, 'update')).toEqual({ canonicalId: announcement, mergedId: rumor });
-    expect(await merge(left, right, 'update')).toBeNull();
+    expect(await merge(left, right, 'same')).toEqual({ canonicalId: announcement, mergedId: rumor });
+    expect(await merge(left, right, 'same')).toBeNull();
     expect((await database.db.query('SELECT text FROM story_mentions WHERE story_id=$1', [announcement])).rows).toHaveLength(2);
     expect((await database.db.query(`SELECT ml.* FROM mention_links ml JOIN story_mentions m ON m.id=ml.mention_id WHERE m.story_id=$1`, [announcement])).rows).toHaveLength(2);
     expect((await database.db.query('SELECT * FROM story_evidence WHERE story_id=$1', [announcement])).rows).toHaveLength(1);
@@ -85,9 +85,9 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
       FROM publications p JOIN story_publication_aliases a ON a.publication_id=p.id WHERE a.original_story_id=$1`, [rumor])).rows[0];
     expect(retainedPublication).toMatchObject({ story_id: null, original_story_id: rumor, canonical_story_id: announcement });
     const plan = await story('Новый тариф дороже $200 с большими лимитами на том же DevDay.', [1, 0, 0]);
-    expect(await merge(await current(plan), await current(announcement), 'update')).toEqual({ canonicalId: announcement, mergedId: plan });
+    expect(await merge(await current(plan), await current(announcement), 'same')).toEqual({ canonicalId: announcement, mergedId: plan });
     const earlier = await story('Earlier announcement of the same tier', [1, 0, 0], '2026-09-30T14:00:00.000Z');
-    expect(await merge(await current(announcement), await current(earlier), 'update')).toEqual({ canonicalId: earlier, mergedId: announcement });
+    expect(await merge(await current(announcement), await current(earlier), 'same')).toEqual({ canonicalId: earlier, mergedId: announcement });
     expect(await canonicalStoryId(rumor)).toBe(earlier);
     expect(await canonicalStoryId(plan)).toBe(earlier);
     expect((await database.db.query('SELECT DISTINCT canonical_story_id FROM story_publication_aliases WHERE original_story_id=ANY($1::uuid[])',
@@ -111,8 +111,8 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
       WHERE m.story_id=$1 UNION SELECT DISTINCT l.url FROM story_mentions m JOIN mention_links ml ON ml.mention_id=m.id
       JOIN item_links l ON l.id=ml.link_id JOIN source_items i ON i.current_revision_id=m.revision_id
       WHERE m.story_id=$1 AND ml.classification='relevant' ORDER BY url`, [announcement])).rows.map(row => row.url);
-    await merge(await current(announcement), await current(rumor), 'update');
-    await merge(await current(announcement), await current(plan), 'update');
+    await merge(await current(announcement), await current(rumor), 'same');
+    await merge(await current(announcement), await current(plan), 'same');
     // Actual production groups 5/6/22 have four distinct origins and no assigned external URLs.
     expect(await retainedUrls()).toEqual([...new Set(origins)].sort());
 
@@ -182,7 +182,7 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
       expected.push({ link_id: link, classification: test.winner === 'left' ? test.left : test.right,
         model_key: test.winner, model_version: 7, prompt_version: test.winner, input_hash: test.winner });
     }
-    await merge(await current(canonical), await current(loser), 'update');
+    await merge(await current(canonical), await current(loser), 'same');
     const moved = (await database.db.query(`SELECT link_id,classification,model_key,model_version,prompt_version,input_hash
       FROM story_link_sources WHERE story_id=$1`, [canonical])).rows;
     expect(moved).toEqual(expect.arrayContaining(expected));
@@ -206,7 +206,7 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
       VALUES('https://example.org/old-diagnostic','unavailable',now()+interval '1 day') RETURNING id`);
     await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance,assessment,superseded_at)
       VALUES($1,$2,'candidate','uncertain','Failed original read',now())`, [sibling, evidence]);
-    await merge(await current(canonical), await current(sibling), 'update');
+    await merge(await current(canonical), await current(sibling), 'same');
     expect((await database.db.query('SELECT evidence_id FROM story_evidence WHERE story_id=$1 AND superseded_at IS NULL', [canonical])).rows).toEqual([]);
     expect((await database.db.query('SELECT assessment,superseded_at IS NOT NULL AS superseded FROM story_evidence WHERE story_id=$1 AND evidence_id=$2', [canonical, evidence])).rows)
       .toEqual([{ assessment: 'Failed original read', superseded: true }]);
@@ -229,6 +229,6 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
     await database.db.query(`UPDATE mention_links SET classification='irrelevant' WHERE mention_id IN(
       SELECT id FROM story_mentions WHERE story_id=$1)`, [hosted]);
     expect((await current(hosted)).fingerprint).not.toBe(right.fingerprint);
-    expect(await merge(left, right, 'update')).toBeNull();
+    expect(await merge(left, right, 'same')).toBeNull();
   });
 });

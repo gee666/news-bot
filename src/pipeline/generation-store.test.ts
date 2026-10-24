@@ -21,7 +21,7 @@ describe('generation database boundary', () => {
     const input = storyInput();
     mocks.query.mockResolvedValueOnce({ rows: [input.story] }).mockResolvedValueOnce({ rows: input.mentions })
       .mockResolvedValueOnce({ rows: input.links });
-    expect(await loadStory(storyId)).toEqual(input);
+    expect(await loadStory(storyId)).toEqual({ ...input, previous_posts: [] });
     expect(mocks.query.mock.calls[1]?.[0]).toContain('s.access');
     expect(mocks.query.mock.calls[1]?.[0]).toContain('JOIN sources s');
     for (const query of mocks.query.mock.calls.slice(1, 3)) {
@@ -189,7 +189,7 @@ describe('generation database boundary', () => {
     expect(await alreadyGenerated(input, defaultSettings)).toBe(true);
     expect(mocks.query.mock.calls[0]?.[0]).toContain("result->>'headline' = $5");
     expect(mocks.query.mock.calls[0]?.[0]).toContain('expires_at > now()');
-    expect(GENERATION_VERSION).toBe('generation-v13-cumulative');
+    expect(GENERATION_VERSION).toBe('generation-v14-retained-editions');
     expect(mocks.query.mock.calls[0]?.[0]).toContain(`prompt_version = '${GENERATION_VERSION}'`);
   });
 
@@ -259,4 +259,37 @@ describe('generation database boundary', () => {
     expect(generationHash(input, defaultSettings)).not.toBe(original);
   });
 
+});
+
+it('fingerprints retained published facts and sources even when raw ancestor material is gone', () => {
+  const input = storyInput();
+  const baseline = generationHash(input,defaultSettings);
+  input.previous_posts = [{ storyId:secondId, headline:'Первоначальное открытие',details:'Исходный участник и действие',
+    destinationId:'-100123',messageId:'1',sources:[] }];
+  const withAncestor = generationHash(input,defaultSettings);
+  expect(withAncestor).not.toBe(baseline);
+  input.previous_posts[0]!.earlier = 'Дополнительные прежние условия';
+  const withEarlier = generationHash(input,defaultSettings);
+  expect(withEarlier).not.toBe(withAncestor);
+  input.previous_posts[0]!.sources.push({label:'Автор',url:'https://example.org/old',access:'public',primary:true,classification:'relevant'});
+  expect(generationHash(input,defaultSettings)).not.toBe(withEarlier);
+});
+
+it('ignores publication navigation and destination IDs in freshness but not retained factual sources', () => {
+  const input = storyInput();
+  const source = {label:'Автор',url:'https://example.org/old',access:'public' as const,primary:true,classification:'relevant' as const};
+  input.previous_posts = [{ storyId:secondId,headline:'Открытие OpenAI для PHP',details:'Исходный участник и действие',
+    destinationId:'-100123',messageId:'1',sources:[source] }];
+  const baseline = generationHash(input,defaultSettings);
+  const post = input.previous_posts[0]!;
+  post.destinationId = '-100456'; post.messageId = '2';
+  post.sources.unshift({...source,url:'https://t.me/c/123/2',relatedPublication:true});
+  post.sources.push({...source,url:'https://t.me/c/123/3',previousPublication:true});
+  post.sources.push({...source,url:'https://t.me/c/123/4',unverifiedPublication:true});
+  expect(generationHash(input,defaultSettings)).toBe(baseline);
+  post.sources.push({...source,url:'https://example.org/second'});
+  const withSecondSource = generationHash(input,defaultSettings);
+  expect(withSecondSource).not.toBe(baseline);
+  post.sources.reverse();
+  expect(generationHash(input,defaultSettings)).toBe(withSecondSource);
 });

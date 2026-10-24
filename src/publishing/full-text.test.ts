@@ -11,7 +11,7 @@ describe('complete publication text', () => {
     const reason = 'Проверить точность формулировок '.repeat(30);
     const parts = renderFullText({ ...snapshot, details, earlier, review: { supported: false, reason } });
     expect(parts.length).toBeGreaterThan(5);
-    expect(parts.map(part => part.plainText).join('')).toBe(`••••••••◦◦\n${snapshot.headline}\n\nНовое\n${details}\n\nРанее было опубликовано\n${earlier}\n\nЗаметки проверяющего: ${reason.trim()}`);
+    expect(parts.map(part => part.plainText).join('')).toBe(`••••••••◦◦\n${snapshot.headline}\n\n${details}\n\n${earlier}\n\nЗаметки проверяющего: ${reason.trim()}`);
     for (const part of parts) {
       expect(part.plainText.length).toBeLessThanOrEqual(4096);
       expect(part.plainText).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u);

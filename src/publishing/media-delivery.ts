@@ -121,6 +121,15 @@ export async function deletePublicationMessages(publication: Publication, api: B
   if (!publication.message_id) throw new BotError('publication_message_missing', 'failed');
   const unknownText = await db.query(`SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND status IN ('running','unknown') LIMIT 1`, [publication.id]);
   if (unknownText.rows.length) throw new BotError('publication_text_requires_review','failed');
+  const unknownNavigation = await db.query(`SELECT 1 FROM publication_navigation_parts
+    WHERE publication_id=$1 AND status IN ('running','unknown') LIMIT 1`,[publication.id]);
+  if (unknownNavigation.rows.length) throw new BotError('publication_navigation_requires_review','failed');
+  const navigation = await db.query<{ slot:string; message_id:string }>(`SELECT slot,message_id FROM publication_navigation_parts
+    WHERE publication_id=$1 AND text_part_number IS NULL AND message_id IS NOT NULL AND deleted_at IS NULL ORDER BY slot`,[publication.id]);
+  for (const part of navigation.rows) {
+    await api.delete(publication.destination_id,part.message_id);
+    await db.query('UPDATE publication_navigation_parts SET deleted_at=now() WHERE publication_id=$1 AND slot=$2',[publication.id,part.slot]);
+  }
   const parts = (await db.query<{ part_number: number; message_id: string }>(`SELECT part_number,message_id FROM publication_text_parts
     WHERE publication_id=$1 AND part_number>0 AND message_id IS NOT NULL AND deleted_at IS NULL ORDER BY part_number`, [publication.id])).rows;
   for (const part of parts) {

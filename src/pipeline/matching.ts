@@ -10,9 +10,11 @@ import { mergeStories } from './consolidation-store.js';
 import { historicalEventInput } from './historical-input.js';
 import { publishedStory, unpublished } from './generation-store.js';
 import { latestThreadStory } from './publication-thread.js';
+import { recordStoryRelations, type StoryRelationDecision } from './story-relations.js';
 import { ProcessingYield } from './processing-slice.js';
 
 export interface Mention { id: string; revision_id: string; text: string; story_id: string | null }
+interface ClassifiedCandidate extends StoryRelationDecision { candidate: Candidate }
 interface Candidate { id: string; text: string; previous_revision_id: string | null; input?: EventInput; history?: HistoricalEventRef }
 async function candidates(mention: Mention, vector: number[], vectors: Vectors, settings: AppSettings, batchId: string): Promise<Candidate[]> {
   const result = await db.query<Candidate>(`WITH current_mentions AS MATERIALIZED (
@@ -120,14 +122,20 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
           if (!candidate.input) throw new Error('Story has no matching input');
           return candidate.input;
         });
-        const matches = await groupReport(incoming, inputs, settings, context);
+        const decisions = await groupReport(incoming, inputs, settings, context);
+        const classified: ClassifiedCandidate[] = decisions.map(decision => {
+          const candidate = available.find(candidate => candidate.id === decision.storyId);
+          if (!candidate) throw new Error('Grouping target changed');
+          return { ...decision, candidate };
+        });
+        const matches = decisions.filter(decision => decision.relation === 'same');
         // Reuse a matching draft before considering a separate post.
         const posted = new Map<string, Awaited<ReturnType<typeof publishedStory>>>();
         for (const match of matches) posted.set(match.storyId, await publishedStory(match.storyId));
         const drafts = matches.filter(match => !posted.get(match.storyId));
         const selected = drafts.length ? drafts : matches;
         let matched = available.find(candidate => candidate.id === selected[0]?.storyId);
-        const relation = selected.some(match => match.relation === 'update') ? 'update' : 'same';
+        const relation = 'same';
         const previous = matched ? posted.get(matched.id) : null;
         if (previous) {
           const latest = await latestThreadStory(previous.storyId);
@@ -136,7 +144,7 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
             ? { id: latest, text: latestInput.text, previous_revision_id: null, input: latestInput } : matched;
           // Grouping already established event identity. Every published match gets a new post,
           // including repeated coverage, without mutating the old story or its sources.
-          return attach(mention, incoming, vector, target, relation, vectors, context, latest, true);
+          return attach(mention, incoming, vector, target, relation, vectors, context, classified, latest, true);
         }
         for (const match of selected.slice(1)) {
           if (!matched) break;
@@ -144,7 +152,7 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
           const right = inputs.find(input => input.id===match.storyId);
           if (!left || !right) throw new Error('Grouping target changed');
           const rightCandidate=available.find(candidate=>candidate.id===match.storyId);
-          const merged = await mergeStories(left, right, 'update', {
+          const merged = await mergeStories(left, right, 'same', {
             ...(matched.history ? { left:matched.history } : {}),
             ...(rightCandidate?.history ? { right:rightCandidate.history } : {}),
           });
@@ -155,7 +163,7 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
           matched.input = mergedInput;
           matched.text = mergedInput.text;
         }
-        return attach(mention, incoming, vector, matched, relation, vectors, context);
+        return attach(mention, incoming, vector, matched, relation, vectors, context, classified);
       });
     } catch (error) {
       if (error instanceof ProcessingYield) throw error;
@@ -168,12 +176,23 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
 }
 
 async function attach(mention: Mention, incoming: EventInput, vector: number[], matched: Candidate | undefined, relation: string,
-  vectors: Vectors, context: StageContext, previousStoryId?: string, judgedPublication=false): Promise<string> {
+  vectors: Vectors, context: StageContext, decisions: readonly ClassifiedCandidate[], previousStoryId?: string, judgedPublication=false): Promise<string> {
   return transaction(async client => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
     // Keep collection edits from retiring either source while committing a model decision.
     await client.query(`SELECT i.id FROM source_items i WHERE i.id IN(
       SELECT r.item_id FROM item_revisions r JOIN story_mentions m ON m.revision_id=r.id
-      WHERE m.id=$1 OR m.story_id=$2) ORDER BY i.id FOR SHARE`, [mention.id, matched?.id ?? null]);
+      WHERE m.id=$1 OR m.story_id=ANY($2::uuid[]))
+      OR i.id IN(SELECT item_id FROM item_revisions WHERE id=ANY($3::uuid[])) ORDER BY i.id FOR SHARE`,
+    [mention.id, [...new Set([matched?.id, ...decisions.map(decision => decision.storyId)].filter(id => id !== undefined))],
+      [matched?.history?.revisionId, ...decisions.map(decision => decision.candidate.history?.revisionId)].filter(id => id !== undefined)]);
+    // A related/unrelated decision must not overwrite durable links after its candidate changed.
+    for (const decision of decisions.filter(decision => decision.relation !== 'same')) {
+      const candidate = decision.candidate;
+      const current = candidate.history ? await historicalEventInput(candidate.id, candidate.history, client)
+        : await eventInput(candidate.id, client);
+      if (current?.fingerprint !== candidate.input?.fingerprint) throw new Error('Related event changed during matching');
+    }
     if ((await mentionInput(mention.id, client))?.fingerprint !== incoming.fingerprint
       || (matched?.input && (matched.history ? await historicalEventInput(matched.id,matched.history,client)
         : await eventInput(matched.id, client))?.fingerprint !== matched.input.fingerprint)) {
@@ -188,16 +207,26 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
       const created = await client.query<{ id: string }>(`INSERT INTO stories(status,chosen_excerpt,meaningful_hash)
         VALUES('processing',$1,$2) RETURNING id`, [mention.text, hash(mention.text)]);
       storyId = z.uuid().parse(created.rows[0]?.id);
-    } else if (relation === 'update') {
+    } else {
       await client.query(`UPDATE stories SET status='processing',content_version=content_version+1,meaningful_hash=$2,
         chosen_excerpt=$3,headline=NULL,summary=NULL,translated_excerpt=NULL,researched=false,interest_stale=true,updated_at=now() WHERE id=$1 AND ${unpublished('stories')}`,
       [storyId, hash([matched?.text, mention.text]), mention.text]);
       // Preserve evidence associations; research freshness checks reassess them for the new input.
     }
-    if (previousStoryId) await client.query(`INSERT INTO story_publication_threads(story_id,previous_story_id)
-      VALUES($1,$2) ON CONFLICT(story_id) DO UPDATE SET previous_story_id=EXCLUDED.previous_story_id`, [storyId, previousStoryId]);
+    if (previousStoryId) await client.query(`INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version)
+      VALUES($1,$2,$3) ON CONFLICT(story_id) DO UPDATE SET previous_story_id=EXCLUDED.previous_story_id,
+        classification_version=EXCLUDED.classification_version`, [storyId, previousStoryId, GROUPING_VERSION]);
+    await recordStoryRelations(storyId, decisions.filter(decision => decision.relation !== 'same'), GROUPING_VERSION, { origin: 'model', scope: 'mention', operationId: context.id,
+      incomingFingerprint: incoming.fingerprint, candidates: decisions.map(({ candidate, storyId, relation }) =>
+        ({ storyId, relation, fingerprint: candidate.input?.fingerprint })) }, client);
+    if (previousStoryId) {
+      const accepted = await recordStoryRelations(storyId, [{ storyId: previousStoryId, relation: 'same' }],
+        GROUPING_VERSION, { origin: 'model', operationId: context.id, incomingFingerprint: incoming.fingerprint,
+          previousFingerprint: matched?.input?.fingerprint }, client);
+      if (!accepted.length) throw new Error('Conflicting event identity during matching');
+    }
     await client.query('UPDATE story_mentions SET story_id=$2,metadata=metadata || $3::jsonb WHERE id=$1',
-      [mention.id, storyId, JSON.stringify({ relation, batchId: context.batchId, ...(previousStoryId ? { previous_story_id:previousStoryId } : {}) })]);
+      [mention.id, storyId, JSON.stringify({ ...(matched ? { relation } : {}), batchId: context.batchId, ...(previousStoryId ? { previous_story_id:previousStoryId } : {}) })]);
     await client.query(`UPDATE stories SET status='processing',interest_stale=true,updated_at=now()
       WHERE id=$1 AND status='rejected' AND ${unpublished('stories')}`, [storyId]);
     await client.query(`INSERT INTO consolidation_intake(revision_id,item_id,text_fingerprint,urls)
@@ -207,7 +236,7 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
         SELECT 1 FROM story_mentions m WHERE m.revision_id=r.id AND m.story_id IS NULL
           AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window')
       ON CONFLICT(revision_id) DO NOTHING`, [mention.revision_id]);
-    if (!matched || previousStoryId || relation === 'update') await client.query(`INSERT INTO embeddings(config_id,story_id,input_hash,embedding)
+    await client.query(`INSERT INTO embeddings(config_id,story_id,input_hash,embedding)
       VALUES($1,$2,$3,$4::vector) ON CONFLICT(config_id,story_id) DO UPDATE SET input_hash=EXCLUDED.input_hash,embedding=EXCLUDED.embedding`,
     [vectors.config.id, storyId, hash([vectors.config.input_version, mention.text]), JSON.stringify(vector)]);
     return storyId;

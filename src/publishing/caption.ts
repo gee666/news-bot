@@ -16,7 +16,7 @@ function shorten(text: string, limit: number): string {
 }
 
 /** Keep the full snapshot in storage; only the Telegram presentation is shortened. */
-export function renderCaption(content: unknown, limit = CAPTION_LIMIT): RenderedMessage {
+export function renderCaption(content: unknown, limit = CAPTION_LIMIT, legacyBudget = false): RenderedMessage {
   const parsed = publicationSnapshotSchema.safeParse(content);
   if (!parsed.success) throw new PublicationRenderError('publication_snapshot_invalid');
   const snapshot = parsed.data;
@@ -27,5 +27,5 @@ export function renderCaption(content: unknown, limit = CAPTION_LIMIT): Rendered
     })),
     ...(snapshot.earlier ? { earlier: shorten(snapshot.earlier, 120) } : {}),
     ...(snapshot.review ? { review: { ...snapshot.review, reason: shorten(snapshot.review.reason.replace(/\s+/gu, ' ').trim(), 80) } } : {}),
-  }, { limit, compactSources: false });
+  }, { limit, compactSources: false,legacyBudget });
 }

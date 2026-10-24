@@ -28,8 +28,10 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
       candidates: z.array(z.object({ id: z.uuid(), text: z.string() })) }).parse(raw);
     if (input.incoming.text.includes('Сбой')) throw new ModelRequestError(
       failureMetadata(new RequestFault('transient'), 'grouping', 'pi', 1, 0));
-    return modelResult({ matches: input.candidates.filter(candidate => candidate.text.includes('Compiler 2') && input.incoming.text.includes('Compiler 2'))
-      .map(candidate => ({ storyId: candidate.id, relation: model.relation || (input.incoming.text.includes('40 долларов') ? 'update' : 'same') })) });
+    return modelResult({ matches: input.candidates.map(candidate => ({ storyId: candidate.id, relation: model.relation ||
+      (candidate.text.includes('PHP') && input.incoming.text.includes('PHP')
+        ? (candidate.text.includes('Alderon') === input.incoming.text.includes('Alderon') ? 'same' : 'related')
+        : candidate.text.includes('Compiler 2') && input.incoming.text.includes('Compiler 2') ? 'same' : 'unrelated') })) });
   } }),
 }));
 vi.mock('../models/jev.js', async original => ({ ...await original<typeof import('../models/jev.js')>(), JevClient: class {
@@ -134,7 +136,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect(vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text).toContain('Предыдущие публикации');
     expect((await database.db.query('SELECT id FROM publications')).rows).toHaveLength(3);
   });
-  it.each(['same','update'])('creates a new linked post for every %s match, including duplicate coverage', async relation => {
+  it.each(['same'])('creates a new linked post for every %s match, including duplicate coverage', async relation => {
     await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
     const canonical=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
     const original=(await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0];
@@ -179,6 +181,40 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect(vi.mocked(BotApi.prototype.edit).mock.calls.every(call => call[2].plainText.startsWith('UPD: https://t.me/c/123/'))).toBe(true);
     const final=vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text ?? '';
     expect(final).toContain('выпустила Compiler 2'); expect(final).toContain('40 долларов'); expect(final).toContain('поддержку Linux');
+  });
+  it('keeps PHP discovery and a consequent Alderon shutdown separate, without same-event ancestry or UPD', async () => {
+    await processIntake(await intake(['OpenAI model discovered a PHP vulnerability.'])); await publish();
+    const discovery=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE 'OpenAI%'");
+    const original=(await database.db.query('SELECT * FROM stories WHERE id=$1',[discovery])).rows[0];
+    const calls=model.groupingCalls;
+    await processIntake(await intake(['Alderon shut down its game because of the PHP vulnerability.'])); await publish();
+    const shutdown=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE 'Alderon%'");
+    expect(discovery).not.toBe(shutdown); expect(model.groupingCalls-calls).toBe(1);
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]); expect((await database.db.query('SELECT * FROM story_publication_threads')).rows).toEqual([]);
+    const { relatedStoryIds }=await import('./story-relations.js');
+    expect(await relatedStoryIds(discovery)).toEqual([shutdown]); expect(await relatedStoryIds(shutdown)).toEqual([discovery]);
+    expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[discovery])).rows[0]).toEqual(original);
+    expect((await database.db.query('SELECT text FROM story_mentions WHERE story_id=$1',[shutdown])).rows)
+      .toEqual([{text:'Alderon shut down its game because of the PHP vulnerability.'}]);
+    const sent=(await database.db.query<{content:{details:string;updatedTo?:string}}>(`SELECT snap.content
+      FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id WHERE p.story_id=$1`,[shutdown])).rows[0]?.content;
+    expect(sent?.details).toContain('Alderon'); expect(sent?.details).not.toContain('OpenAI model discovered');
+    expect(vi.mocked(BotApi.prototype.edit).mock.calls.some(call=>call[2].plainText.startsWith('UPD:'))).toBe(false);
+    expect(BotApi.prototype.send).toHaveBeenCalledTimes(2);
+  });
+  it('does not consolidate legacy related drafts into a broad-topic story', async () => {
+    await processIntake(await intake(['OpenAI model discovered a PHP vulnerability.']));
+    const discovery=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE 'OpenAI%'");
+    const legacy=await intake(['Alderon shut down its game because of the PHP vulnerability.']);
+    const revision=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[legacy]);
+    const text='Alderon shut down its game because of the PHP vulnerability.'; await (await import('./extraction-store.js')).applyExtraction(legacy,revision,text,[{start:0,end:text.length}]);
+    const shutdown=await one('INSERT INTO stories(chosen_excerpt) VALUES($1) RETURNING id',[text]);
+    await database.db.query('UPDATE story_mentions SET story_id=$2 WHERE revision_id=$1',[revision,shutdown]);
+    await (await import('./consolidation.js')).consolidateStories(settings,legacy);
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows)
+      .toEqual([{story_id:shutdown}]);
+    expect(await (await import('./story-relations.js')).relatedStoryIds(discovery)).toEqual([shutdown]);
   });
   it('adds a source-only recap to stories arriving later, without a separate post or confirmation calls', async () => {
     const recap=await intake(['Ссылки на релизы Compiler 2.']);

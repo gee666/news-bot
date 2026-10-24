@@ -1,9 +1,11 @@
-/** Durable lineage survives source revision retirement. Metadata covers older or in-flight links. */
+/** Legacy edges and mention metadata are audit evidence, not verified event identity. */
 export const publicationThreadEdges = `publication_thread_edges(story_id,previous_story_id) AS (
-  SELECT story_id,previous_story_id FROM story_publication_threads WHERE previous_story_id IS NOT NULL
-  UNION SELECT m.story_id,(m.metadata->>'previous_story_id')::uuid FROM story_mentions m
-    WHERE m.story_id IS NOT NULL AND m.metadata ? 'previous_story_id'
-      AND NOT EXISTS(SELECT 1 FROM story_publication_threads t WHERE t.story_id=m.story_id)
+  SELECT t.story_id,t.previous_story_id FROM story_publication_threads t
+  WHERE t.previous_story_id IS NOT NULL AND t.classification_version IS NOT NULL
+    AND NOT EXISTS(SELECT 1 FROM story_relations r
+      WHERE r.lower_story_id=least(t.story_id,t.previous_story_id)
+        AND r.upper_story_id=greatest(t.story_id,t.previous_story_id)
+        AND (r.relation<>'same' OR r.provenance->>'quarantined'='true'))
 )`;
 
 /** The current draft and every ancestor, with cycle protection and no thread-length cap. */

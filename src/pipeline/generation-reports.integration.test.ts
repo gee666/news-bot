@@ -71,4 +71,41 @@ describe.skipIf(!url)('supplementary report database boundary', () => {
         text: 'Pro $200 now 10x Plus, previously 20x; $500 25x.' }),
     ]);
   });
+  it('loads and fingerprints retained SAME snapshots and expired evidence without reviving legacy RELATED ancestry', async () => {
+    const oldest = await one("INSERT INTO stories(status) VALUES('completed') RETURNING id");
+    const middle = await one("INSERT INTO stories(status) VALUES('completed') RETURNING id");
+    const unrelated = await one("INSERT INTO stories(status) VALUES('completed') RETURNING id");
+    for (const [current, previous, version] of [[storyId,middle,'test-same-v1'],[middle,oldest,'test-same-v1'],[oldest,unrelated,null]]) {
+      await database.db.query(`INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version)
+        VALUES($1,$2,$3)`, [current,previous,version]);
+    }
+    for (const [index, ancestor] of [oldest,middle,unrelated].entries()) {
+      const snapshot = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id', [ancestor, JSON.stringify({
+        headline:index === 2 ? 'Сбой Alderon' : 'OpenAI обнаружила метод для PHP',
+        details:`Исходные сведения ${index}`, earlier:'Прежнее условие сравнения', detailsKind:'summary',score:5,
+        sources:[{label:'Автор',url:`https://example.org/original/${index}`,access:'public',primary:true,classification:'relevant'}],
+      })]);
+      await database.db.query(`INSERT INTO publications(story_id,snapshot_id,destination_id,status,message_id,published_at)
+        VALUES($1,$2,'-100123','published',$3,now()+$4*interval '1 second')`, [ancestor,snapshot,String(index+1),index]);
+    }
+    const evidence = await one(`INSERT INTO evidence_documents(url,content,access,expires_at)
+      VALUES('https://example.org/old-read','Полный исходный механизм и ограничения.','public',now()-interval '1 day') RETURNING id`);
+    await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance) VALUES($1,$2,'primary','relevant')", [oldest,evidence]);
+    const { loadStory, loadPreviousEvidence, generationHash, saveGenerations, alreadyGenerated } = await import('./generation-store.js');
+    const settings = (await import('../settings.js')).defaultSettings;
+    const input = await loadStory(storyId);
+    expect(input.previous_posts?.map(post => post.storyId)).toEqual([oldest,middle]);
+    expect(input.previous_posts?.flatMap(post => post.sources.map(source => source.url))).toEqual([
+      'https://example.org/original/0','https://example.org/original/1',
+    ]);
+    expect(await loadPreviousEvidence(storyId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({id:evidence,content:'Полный исходный механизм и ограничения.'}),
+    ]));
+    expect(generationHash(input,settings)).not.toBe(generationHash({...input,previous_posts:[]},settings));
+    await saveGenerations([input],[{id:storyId,headline:'OpenAI обнаружила метод для PHP',summary:'Полный пересказ.',translatedExcerpt:null}],settings);
+    expect(await alreadyGenerated(await loadStory(storyId),settings)).toBe(true);
+    await database.db.query("UPDATE judgments SET prompt_version='generation-v13-cumulative' WHERE story_id=$1 AND stage='generation_research'", [storyId]);
+    expect(await alreadyGenerated(await loadStory(storyId),settings)).toBe(false);
+  });
+
 });

@@ -21,7 +21,7 @@ async function id(sql: string, values: unknown[] = []): Promise<string> {
 async function story(previous?: string): Promise<string> {
   const storyId = await id("INSERT INTO stories(status) VALUES('completed') RETURNING id");
   stories.push(storyId);
-  await database.db.query('INSERT INTO story_publication_threads(story_id,previous_story_id) VALUES($1,$2)', [storyId, previous ?? null]);
+  await database.db.query("INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version) VALUES($1,$2,'test-same-v1')", [storyId, previous ?? null]);
   return storyId;
 }
 async function report(storyId: string, name: string, role: 'mention' | 'supplement', access = 'public') {
@@ -102,9 +102,10 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     const retiredLatest = await report(latest, 'retired-latest', 'mention'); await retire(retiredLatest.item);
     const unrelated = await story(); await report(unrelated, 'unrelated', 'mention');
     const evidence = await id(`INSERT INTO evidence_documents(url,content_hash,content,access,metadata,expires_at)
-      VALUES('https://example.org/research','old-research','Research','public',$1,now()+interval '1 day') RETURNING id`,
+      VALUES('https://example.org/research','old-research','Research','public',$1,now()-interval '1 day') RETURNING id`,
     [JSON.stringify({ media: [{ type: 'video', url: 'https://example.org/ancestor-research.mp4' }] })]);
     await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance) VALUES($1,$2,'primary','relevant')", [oldest, evidence]);
+    await database.db.query("UPDATE evidence_documents SET fetched_at=now()-interval '8 days' WHERE id=$1", [evidence]);
     const result = await service.publicationMedia(latest, settings);
     expect(result).toHaveLength(5);
     expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url).sort()).toEqual([
@@ -124,7 +125,7 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     expect(mocks.download).not.toHaveBeenCalled();
   });
 
-  it('filters ineligible, failed and over-retention ancestor attachments rather than reviving them', async () => {
+  it('filters ineligible and failed ancestors but keeps attachments while their source rows are retained', async () => {
     const oldest = await story(); const latest = await story(oldest);
     const failed = await report(oldest, 'failed', 'mention');
     await database.db.query("UPDATE item_revisions SET metadata=metadata||'{\"pipelineFailure\":true}'::jsonb WHERE id=$1", [failed.revision]);
@@ -137,8 +138,23 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     const irrelevant = await report(oldest, 'irrelevant', 'supplement');
     await database.db.query("UPDATE story_link_sources SET classification='irrelevant' WHERE link_id IN(SELECT id FROM item_links WHERE revision_id=$1)", [irrelevant.revision]);
     await report(oldest, 'valid', 'mention');
-    expect(await service.publicationMedia(latest, settings)).toHaveLength(1);
-    expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url)).toEqual(['https://example.org/valid.png']);
+    expect(await service.publicationMedia(latest, settings)).toHaveLength(2);
+    expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url).sort()).toEqual([
+      'https://example.org/aged.png', 'https://example.org/valid.png',
+    ]);
+  });
+
+  it.each([null, 'test-same-v1'])('does not inherit attachments through an unverified or RELATED edge, classification %s', async version => {
+    const discovery = await story(); await report(discovery, 'openai-php-discovery', 'mention');
+    const outage = await story(discovery); await report(outage, 'alderon-outage', 'mention');
+    await database.db.query('UPDATE story_publication_threads SET classification_version=$2 WHERE story_id=$1', [outage,version]);
+    if (version) {
+      const [lower, upper] = [discovery, outage].sort();
+      await database.db.query(`INSERT INTO story_relations(lower_story_id,upper_story_id,relation,classifier_version)
+        VALUES($1,$2,'related','test-v1')`, [lower,upper]);
+    }
+    expect(await service.publicationMedia(outage, settings)).toHaveLength(1);
+    expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url)).toEqual(['https://example.org/alderon-outage.png']);
   });
 
 });

@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { publishedThread } from '../pipeline/publication-thread.js';
+import { relatedPublicationSources } from './navigation.js';
 import { orderSources } from './sources.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
 import { evidenceMetadataSchema } from '../pipeline/generation-store.js';
@@ -39,6 +40,8 @@ export function mergeSources(input: PublicationSource[]): PublicationSource[] {
     old.primary = old.primary || source.primary || old.kind === 'primary';
     if (old.primary && old.kind) old.kind = 'primary';
     if (source.previousPublication) old.previousPublication = true;
+    if (source.relatedPublication) old.relatedPublication = true;
+    if (source.unverifiedPublication) old.unverifiedPublication = true;
     if (source.classification === 'relevant') old.classification = 'relevant';
     if (source.access === 'restricted' || source.url.startsWith('https://t.me/c/')) old.access = 'restricted';
   }
@@ -142,12 +145,13 @@ export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: 
     "SELECT value->>'channelId' AS id FROM operational_state WHERE key='telegram_destination'")).rows[0]?.id;
   const thread = currentDestination ? (await publishedThread(story.id, client.query.bind(client), currentDestination))
     .filter(post => post.storyId !== story.id) : [];
-  const inherited = thread.flatMap(post => post.sources);
+  const inherited = thread.flatMap(post => post.sources.filter(source => !source.relatedPublication && !source.unverifiedPublication));
   const previous: PublicationSource[] = thread.flatMap(post => /^-100\d+$/u.test(post.destinationId) && /^\d+$/u.test(post.messageId) ? [{
     label:post.headline,url:`https://t.me/c/${post.destinationId.slice(4)}/${post.messageId}`,
     primary:false,previousPublication:true,access:'public' as const,classification:'relevant' as const,
   }] : []);
-  const combined = mergeSources([...sources, ...inherited, ...previous]);
+  const related = currentDestination ? await relatedPublicationSources(client,story.id,currentDestination) : [];
+  const combined = mergeSources([...sources, ...inherited, ...previous, ...related]);
   return { sources: combined, ...(thread.length && metadata?.earlierSummary ? { earlier: metadata.earlierSummary } : {}),
     ...(metadata?.review ? { review: metadata.review } : {}) };
 }

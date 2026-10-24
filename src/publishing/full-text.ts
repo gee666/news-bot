@@ -23,7 +23,7 @@ function sourceLabel(source: PublicationSource): string {
 }
 
 /** Split decoded text, never raw HTML. Every source and every UTF-16 character survives. */
-export function renderFullText(content: unknown): RenderedMessage[] {
+export function renderFullText(content: unknown, sourcesOnly = false): RenderedMessage[] {
   const parsed = publicationSnapshotSchema.safeParse(content);
   if (!parsed.success) throw new PublicationRenderError('publication_snapshot_invalid');
   const snapshot = parsed.data;
@@ -51,21 +51,24 @@ export function renderFullText(content: unknown): RenderedMessage[] {
       remaining = remaining.slice(length);
     }
   };
+  if (!sourcesOnly) {
   append('•'.repeat(snapshot.score) + '◦'.repeat(10 - snapshot.score) + '\n');
   append(snapshot.headline, 'bold');
-  if (snapshot.earlier) {
-    append('\n\n'); append('Новое', 'bold'); append('\n' + snapshot.details);
-    append('\n\n'); append('Ранее было опубликовано', 'bold'); append('\n' + snapshot.earlier);
-  } else if (snapshot.details) append('\n\n' + snapshot.details);
+  if (snapshot.details) append('\n\n' + snapshot.details);
+  if (snapshot.earlier) append('\n\n' + snapshot.earlier);
   if (snapshot.review?.reason.trim()) append('\n\nЗаметки проверяющего: ' + snapshot.review.reason);
+  }
   const sources = orderSources(snapshot.sources);
   for (const group of SOURCE_GROUPS) {
     const selected = sources.filter(source => sourceGroup(source) === group.kind);
     if (!selected.length) continue;
+    const room=(messages.length ? MESSAGE_LIMIT : FIRST_MESSAGE_LIMIT)-message.plainText.length;
+    if (message.plainText && room<group.heading.length+2) flush();
     append('\n\n'); append(group.heading, 'bold');
     for (const source of selected) { append('\n'); append(sourceLabel(source), 'link', source.url); }
   }
   flush();
+  if (sourcesOnly && snapshot.updatedTo && !messages.length) messages.push(emptyMessage());
   if (snapshot.updatedTo && messages[0]) messages[0] = withUpdateMarker(messages[0], snapshot.updatedTo);
   return messages;
 }

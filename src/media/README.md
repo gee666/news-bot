@@ -1,8 +1,8 @@
 # Cumulative publication media
 
-`publicationMedia(storyId, settings)` returns every retained, distinct attachment from the draft and all its ancestors. It uses `generationThread` from `pipeline/generation-context.ts`, including durable publication lineage. Ancestor mention and supplementary-source revisions may be historical. Draft revisions must still be current.
+`publicationMedia(storyId, settings)` returns every retained, distinct attachment from the draft and all its ancestors. It uses `generationThread` from `pipeline/generation-context.ts`, including verified SAME-event publication lineage. RELATED events and unverified legacy edges do not contribute attachments. Ancestor mention and supplementary-source revisions may be historical. Draft revisions must still be current.
 
-Source media stays subject to the seven-day collection window and pipeline-failure checks. Supplementary sources must remain relevant and evidence-eligible. Research attachments must be public, relevant, unsuperseded, unexpired, and fetched within seven days. Inference approval runs before any selection-cache lookup or download, including when ancestor source access changes.
+Retained source metadata has no extra seven-day collection cutoff. Pipeline-failure checks still apply. Supplementary sources must remain relevant and evidence-eligible. Research attachments must be public, relevant and unsuperseded. Current-draft research must also be unexpired; retained ancestor research is historical event evidence even after its fetch TTL expires. Inference approval runs before any selection-cache lookup or download, including when ancestor source access changes.
 
 There is no attachment-count cap here. The 256 MB aggregate download budget fails the operation rather than publishing an incomplete selection. Telegram batching belongs to publishing. The summary-image cap applies only to `summaryImages`, never publication media.
 
@@ -15,3 +15,7 @@ Exact bytes bypass codecs and models. Image candidates with identical normalized
 Files contain only hashed identities, a verdict, and expiry. Writes use private files and atomic rename. Entries expire after seven days without refreshing on reads, and `cleanupMedia` sweeps them. Publishing releases story media files but keeps reusable pair verdicts. Compose mounts the `media_pair_cache` volume at `tmp/media-pair-cache`, retaining these hash-only decisions across container replacements. Without that mount, a local cache survives process restarts but not replacement of temporary storage.
 
 Final selection fingerprints include the model/prompt policy. Unresolved comparisons retain attachments under a provisional fingerprint that cannot satisfy a final-selection lookup. The next call retries those comparisons while preserving the original first-download deadline. Decoder/download errors fail the operation rather than silently discarding media.
+
+## Byte cache versus source retention
+
+`MediaCache` stores per-story bytes for at most seven days from the first download, without extending that deadline on reuse. Publishing releases them after confirmed delivery. This deadline does not expire media descriptors in PostgreSQL. Descriptor lifetime follows configured source/evidence retention and cleanup. Later editions can download retained older locations again, subject to access approval and download limits. Publication snapshots preserve text and source links, not attachment descriptors or permanent media bytes. Already-deleted descriptors cannot be recovered here.

@@ -37,9 +37,13 @@ async function load(id: string, edit = false): Promise<Publication> {
 }
 async function published(messageId: string, ancestors: string[] = [], album = false): Promise<string> {
   const snapshot = { ...content, sources: ancestors.map(previous), ...(album ? { details: 'Длинные факты '.repeat(300) } : {}) };
-  const snapshotId = await one('INSERT INTO publication_snapshots(content) VALUES($1) RETURNING id',[JSON.stringify(snapshot)]);
-  const id = await one(`INSERT INTO publications(snapshot_id,destination_id,bot_id,status,message_id,published_at,delivery_kind)
-    VALUES($1,'-100123','123','published',$2,now()+$3::int*interval '1 second',$4) RETURNING id`,[snapshotId,messageId,Number(messageId),album ? 'album' : 'text']);
+  const storyId = await one("INSERT INTO stories(status) VALUES('completed') RETURNING id");
+  for (const ancestor of ancestors) await database.db.query(`INSERT INTO story_relations(lower_story_id,upper_story_id,relation,classifier_version)
+    SELECT least($1::uuid,p.story_id),greatest($1::uuid,p.story_id),'same','fixture' FROM publications p WHERE p.message_id=$2
+    ON CONFLICT DO NOTHING`,[storyId,ancestor]);
+  const snapshotId = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id',[storyId,JSON.stringify(snapshot)]);
+  const id = await one(`INSERT INTO publications(snapshot_id,destination_id,bot_id,status,message_id,published_at,delivery_kind,story_id)
+    VALUES($1,'-100123','123','published',$2,now()+$3::int*interval '1 second',$4,$5) RETURNING id`,[snapshotId,messageId,Number(messageId),album ? 'album' : 'text',storyId]);
   if (!album) await database.db.query(`INSERT INTO publication_text_parts(publication_id,snapshot_id,part_number,content,status,message_id)
     VALUES($1,$2,0,$3,'sent',$4)`,[id,snapshotId,JSON.stringify(renderFullText(snapshot)[0]),messageId]);
   return id;
@@ -90,20 +94,17 @@ describe.skipIf(!url)('cumulative publication delivery in PostgreSQL', () => {
     vi.unstubAllEnvs();
   });
 
-  it('points every ancestor in a three-post chain to the newest actual URL after story retention', async () => {
+  it('points every ancestor in a three-post chain to the newest actual URL after source retention', async () => {
     const first = await published('10');
     const second = await published('20',['10']);
     await mark();
     expect((await load(first)).content).toMatchObject({ updatedTo: postUrl('20') });
-    const retainedStory = await one("INSERT INTO stories(status) VALUES('completed') RETURNING id");
-    await database.db.query('UPDATE publications SET story_id=$2 WHERE id=$1',[first,retainedStory]);
-    await database.db.query('UPDATE publication_snapshots SET story_id=$2 WHERE id=$1',[(await load(first)).snapshot_id,retainedStory]);
-    await database.db.query('DELETE FROM stories WHERE id=$1',[retainedStory]);
+    await database.db.query('DELETE FROM story_mentions');
     const third = await published('30',['10','20']);
     await mark();
     for (const id of [first,second]) expect((await load(id)).content).toMatchObject({ updatedTo: postUrl('30') });
     expect((await load(third)).content).not.toHaveProperty('updatedTo');
-    expect((await load(first)).story_id).toBeNull();
+    expect((await load(first)).story_id).not.toBeNull();
     expect((await load(first)).content).toMatchObject({ headline: content.headline, details: content.details });
     const count = vi.mocked(api.edit).mock.calls.length;
     await mark();
@@ -160,13 +161,12 @@ describe.skipIf(!url)('cumulative publication delivery in PostgreSQL', () => {
     expect(vi.mocked(api.edit).mock.calls.filter(call => call[1] === '10')).toHaveLength(2);
   });
 
-  it('adds only the marker to a legacy album, shortening its caption only when necessary', async () => {
+  it('refuses to shorten a full legacy album caption merely to add a marker', async () => {
     const first = await published('10',[],true); const sent = await load(first);
-    await published('20',['10']); await mark();
-    const marked = vi.mocked(api.editCaption).mock.calls[0]?.[2];
-    expect(marked?.plainText).toMatch(/^UPD: https:\/\/t.me\/c\/123\/20\n\n/u);
-    expect(marked?.plainText.length).toBeLessThanOrEqual(1024);
-    expect(marked?.plainText).toContain(content.headline);
+    await published('20',['10']);
+    await mark();
+    expect(vi.mocked(api.editCaption).mock.calls[0]?.[2].plainText).toBe(renderCaption(sent.content).plainText);
+    expect((await database.db.query('SELECT content FROM publication_navigation_parts WHERE publication_id=$1',[first])).rows[0]?.content.plainText).toContain('UPD: '+postUrl('20'));
     expect(renderCaption(sent.content).plainText.length).toBeGreaterThan(900);
     expect((await load(first)).content).toMatchObject({ details: 'Длинные факты '.repeat(300) });
   });

@@ -9,6 +9,7 @@ import { guardDigestEligibility } from '../pipeline/eligibility.js';
 import { prepareUpdates, retryEdits } from './updates.js';
 import { retryPublicationMedia } from './media-delivery.js';
 import { recoverPublicationText, retryPublicationText } from './text-delivery.js';
+import { retryNavigationParts } from './navigation-delivery.js';
 import { prepareThreadUpdates } from './thread-updates.js';
 import { recoverPublicationMedia } from './media-plan.js';
 import { destination, prepareDigest, publicationSelect, rateLimited, refreshPrepared, state, type Publication } from './store.js';
@@ -25,7 +26,8 @@ async function deliveryCounts(selection: z.infer<typeof selectionSchema> | undef
   if (!selection) return { published: 0, updated: 0 };
   const published = await db.query<{ count: number }>(`SELECT count(*)::int AS count FROM publications
     WHERE id=ANY($1::uuid[]) AND status='published' AND media_status IN ('none','complete')
-      AND NOT EXISTS(SELECT 1 FROM publication_text_parts t WHERE t.publication_id=publications.id AND t.status<>'sent')`, [selection.ids]);
+      AND NOT EXISTS(SELECT 1 FROM publication_text_parts t WHERE t.publication_id=publications.id AND t.status<>'sent')
+      AND NOT EXISTS(SELECT 1 FROM publication_navigation_parts n WHERE n.publication_id=publications.id AND n.status<>'sent')`, [selection.ids]);
   const edited = await db.query<{ count: number }>(`SELECT count(DISTINCT a.publication_id)::int AS count FROM request_attempts a
     WHERE a.operation='edit' AND a.status='succeeded' AND a.finished_at>=$2 AND EXISTS(
       SELECT 1 FROM jsonb_to_recordset($1::jsonb) target("publicationId" uuid,"snapshotId" uuid)
@@ -116,10 +118,21 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   if (!await rateLimited()) await retryPublicationText(api, current, destinationId, ids);
   if (!await rateLimited()) await retryPublicationMedia(api, current, destinationId);
   await prepareThreadUpdates(destinationId,ids);
-  const markerIds = (await db.query<{ id: string }>(`SELECT p.id FROM publications p JOIN publication_snapshots desired ON desired.id=p.pending_snapshot_id
-    WHERE p.destination_id=$1 AND desired.content->>'updatedTo' IN (SELECT 'https://t.me/c/'||substring(destination_id from 5)||'/'||message_id
-      FROM publications WHERE id=ANY($2::uuid[]) AND message_id IS NOT NULL)`, [destinationId,ids])).rows.map(row => row.id);
-  if (markerIds.length && !await rateLimited()) await retryEdits(api,current,destinationId,undefined,markerIds);
+  const navigationIds = (await db.query<{ id: string }>(`SELECT p.id FROM publications p JOIN publication_snapshots desired ON desired.id=p.pending_snapshot_id
+    WHERE p.destination_id=$1 AND (p.id=ANY($2::uuid[]) OR desired.content->>'updatedTo' IN
+      (SELECT 'https://t.me/c/'||substring(destination_id from 5)||'/'||message_id FROM publications WHERE id=ANY($2::uuid[]) AND message_id IS NOT NULL)
+      OR EXISTS(SELECT 1 FROM jsonb_array_elements(desired.content->'sources') source WHERE source->>'relatedPublication'='true'
+        AND source->>'url' IN(SELECT 'https://t.me/c/'||substring(destination_id from 5)||'/'||message_id
+          FROM publications WHERE id=ANY($2::uuid[]) AND message_id IS NOT NULL)))`, [destinationId,ids])).rows.map(row => row.id);
+  if (navigationIds.length && !await rateLimited()) await retryEdits(api,current,destinationId,undefined,navigationIds);
+  const navigationScope=[...new Set([...ids,...navigationIds])];
+  if (!await rateLimited()) await retryNavigationParts(api,current,destinationId,navigationScope);
+  const navigationProblems = await db.query<{ status:string; count:number }>(`SELECT status,count(*)::int AS count
+    FROM publication_navigation_parts WHERE publication_id=ANY($1::uuid[]) AND status<>'sent' GROUP BY status`,[navigationScope]);
+  for (const problem of navigationProblems.rows) {
+    report.reasons[`publication_navigation_${problem.status}`]=problem.count;
+    if (['prepared','retryable','running'].includes(problem.status)) report.waiting=true;
+  }
   const textProblems = await db.query<{ status: string; count: number }>(`SELECT status,count(*)::int AS count FROM publication_text_parts
     WHERE publication_id=ANY($1::uuid[]) AND status<>'sent' GROUP BY status`, [ids]);
   for (const problem of textProblems.rows) {

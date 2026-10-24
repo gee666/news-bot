@@ -23,7 +23,7 @@ async function sent(previous?: string) {
   await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
   const mention = await one(`INSERT INTO story_mentions(story_id,revision_id,text,ordinal,metadata)
     VALUES($1,$2,'Exact source report',0,$3) RETURNING id`, [id, revision, JSON.stringify(previous ? { previous_story_id: previous } : {})]);
-  if (previous) await database.db.query('INSERT INTO story_publication_threads(story_id,previous_story_id) VALUES($1,$2)', [id, previous]);
+  if (previous) await database.db.query("INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version) VALUES($1,$2,'fixture-verified')", [id, previous]);
   const snapshot = await one(`INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id`, [id,
     JSON.stringify({ headline: 'Тема', details: 'Все известные сведения', score: 7, detailsKind: 'summary', sources: [] })]);
   await database.db.query(`INSERT INTO publications(story_id,snapshot_id,destination_id,status,message_id,published_at)
@@ -66,7 +66,7 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
   it('reuses an existing unpublished edition and copies shared source associations once', async () => {
     const target = await sent();
     const draft = await one("INSERT INTO stories(status,chosen_excerpt) VALUES('processing','Exact source report') RETURNING id");
-    await database.db.query('INSERT INTO story_publication_threads(story_id,previous_story_id) VALUES($1,$2)', [draft, target.id]);
+    await database.db.query("INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version) VALUES($1,$2,'fixture-verified')", [draft, target.id]);
     const link = await one("INSERT INTO item_links(revision_id,url) VALUES($1,'https://example.com/source') RETURNING id", [target.revision]);
     for (const id of [target.id, draft]) await database.db.query(`INSERT INTO story_link_sources
       (link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)

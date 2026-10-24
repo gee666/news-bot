@@ -10,6 +10,7 @@ vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('./media-plan.js', () => ({ recoverPublicationMedia: vi.fn(), expirePublicationMedia: vi.fn() }));
 vi.mock('./media-delivery.js', () => ({ retryPublicationMedia: vi.fn() }));
 vi.mock('./text-delivery.js', () => ({ recoverPublicationText: vi.fn(), retryPublicationText: vi.fn() }));
+vi.mock('./navigation-delivery.js', () => ({ recoverNavigationParts: vi.fn(), retryNavigationParts: vi.fn() }));
 vi.mock('./thread-updates.js', () => ({ prepareThreadUpdates: vi.fn() }));
 vi.mock('../settings.js', async importOriginal => {
   const original = await importOriginal<typeof import('../settings.js')>();
