@@ -78,7 +78,7 @@ describe.skipIf(!url)('chronological new publications with PostgreSQL', () => {
       expect(sent[index]).toContain(title);
     }
   });
-  it('edits sources of already published stories without another new post or duplicate snapshot ownership', async () => {
+  it('does not silently edit sources of an already published story', async () => {
     const original = (await database.db.query<{ id: string; snapshot_id: string }>("SELECT id,snapshot_id FROM publications WHERE story_id='00000000-0000-4000-8000-000000000004'")).rows[0];
     if (!original) throw new Error('Missing publication');
     await database.db.query("UPDATE stories SET headline='Первая новость с уточнением',summary='Уточненные факты' WHERE id='00000000-0000-4000-8000-000000000004'");
@@ -89,10 +89,10 @@ describe.skipIf(!url)('chronological new publications with PostgreSQL', () => {
     // Existing-post corrections are prepared by accepted ready events, not a history sweep.
     await (await import('./updates.js')).prepareUpdates(settings, '-100123', ['00000000-0000-4000-8000-000000000004']);
     await (await import('./digest.js')).publishDigest(settings);
-    expect(sent).toHaveLength(4); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
+    expect(sent).toHaveLength(4); expect(BotApi.prototype.edit).not.toHaveBeenCalled();
     expect((await database.db.query('SELECT count(*)::int AS count FROM publications')).rows[0]?.count).toBe(4);
     expect((await database.db.query('SELECT id,status,snapshot_id FROM publications WHERE id=$1', [original.id])).rows[0])
-      .toMatchObject({ id: original.id, status: 'published', snapshot_id: expect.not.stringMatching(original.snapshot_id) });
+      .toMatchObject({ id: original.id, status: 'published', snapshot_id: original.snapshot_id });
     expect((await database.db.query('SELECT content FROM publication_snapshots WHERE id=$1', [original.snapshot_id])).rows[0]?.content.headline).toBe('Первая новость');
   });
 });

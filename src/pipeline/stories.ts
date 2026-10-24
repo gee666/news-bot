@@ -1,5 +1,5 @@
 import { unpublished } from './generation-store.js';
-import { refreshPublishedSources } from '../publishing/updates.js';
+import { forkPublishedRefresh } from './publication-edition.js';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import { interestScore } from '../models/jev.js';
@@ -150,7 +150,7 @@ async function finishStory(story: StoryWork, settings: AppSettings, judgments: J
   if (!await assessEligibility(id, settings, judgments, context)) return false;
   await rankStory(id, settings, judgments, context);
   await refreshEmbedding(id, vectors, context);
-  if (await researchStory(id, settings) === 'absorbed') return false;
+  await researchStory(id, settings);
   const checks = { ...await storyPostconditions(id, settings), generationCurrent: await generationIsCurrent(id, settings) };
   if (Object.values(checks).some(value => !value)) throw new StoryCompletionError(id, checks);
   await completeStories([id], settings, batchId);
@@ -184,6 +184,15 @@ async function pinRefresh(ids: string[]): Promise<void> {
 }
 export async function refreshDigest(settings: AppSettings, judgments: Judgments, storyIds?: readonly string[]): Promise<StoryWorkReport> {
   const selectedIds = storyIds === undefined ? null : z.array(z.uuid()).max(1000).parse(storyIds);
+  const publishedRefreshes = await db.query<{ id: string }>(`SELECT s.id FROM operational_state o
+    JOIN stories s ON s.id::text=o.value->>'storyId'
+    WHERE o.key LIKE 'digest_refresh:%' AND NOT (${unpublished('s')})
+      AND ($1::uuid[] IS NULL OR s.id=ANY($1)) ORDER BY o.updated_at,o.key`, [selectedIds]);
+  for (const story of publishedRefreshes.rows) {
+    checkProcessingSlice();
+    const draft = await forkPublishedRefresh(story.id);
+    if (draft && selectedIds && !selectedIds.includes(draft)) selectedIds.push(draft);
+  }
   await db.query(`DELETE FROM operational_state o WHERE key LIKE 'digest_refresh:%' AND NOT EXISTS(
     SELECT 1 FROM stories s WHERE s.id::text=o.value->>'storyId' AND (NOT (${unpublished('s')}) OR (s.status<>'rejected' AND EXISTS(
       SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
@@ -220,16 +229,6 @@ export async function refreshDigest(settings: AppSettings, judgments: Judgments,
         await pinRefresh([story.id]);
         return finishStory(story, settings, judgments, vectors, null);
       }));
-    }
-    // Published text/rank stays immutable. Drain source-only changes without reranking it.
-    const published = await db.query<{ id: string; key: string }>(`SELECT s.id,o.key FROM operational_state o
-      JOIN stories s ON s.id::text=o.value->>'storyId'
-      WHERE o.key LIKE 'digest_refresh:%' AND NOT (${unpublished('s')})
-        AND ($1::uuid[] IS NULL OR s.id=ANY($1)) ORDER BY o.updated_at,o.key`, [selectedIds]);
-    for (const story of published.rows) {
-      checkProcessingSlice();
-      await refreshPublishedSources(settings, [story.id]);
-      await db.query('DELETE FROM operational_state WHERE key=$1', [story.key]);
     }
   } finally { await vectors.close(); await prepareStoryFailureUpdates(settings, visited); }
   return report;

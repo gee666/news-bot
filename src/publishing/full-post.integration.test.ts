@@ -72,7 +72,7 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
   });
   it('preserves sent details, stages sources, edits one existing message and switches the snapshot only after success', async () => {
     const id = await publication(await story(),'5'); const previous = await row(id);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     const staged = await row(id); expect(staged.snapshot_id).toBe(previous.snapshot_id); expect(staged.pending_snapshot_id).not.toBeNull();
     expect(staged.content).toEqual(oldContent);
     const edit = vi.spyOn(BotApi.prototype,'edit').mockImplementation(async (_destination,messageId,message) => {
@@ -82,11 +82,11 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(1);
     expect(edit).toHaveBeenCalledOnce(); expect((await row(id)).content).toEqual(newContent);
     expect((await row(id)).pending_snapshot_id).toBeNull(); expect((await row(id)).format_version).toBe(1);
-    await updates.prepareUpdates(settings,'-100123'); expect((await row(id)).pending_snapshot_id).toBeNull();
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true }); expect((await row(id)).pending_snapshot_id).toBeNull();
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
   });
   it('retains an unknown edit for review after raw-history cleanup instead of blindly retrying it', async () => {
-    const id = await publication(await story(),'5'); await updates.prepareUpdates(settings,'-100123');
+    const id = await publication(await story(),'5'); await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     const edit = vi.spyOn(BotApi.prototype,'edit').mockRejectedValue(new BotError('telegram_transport_unknown','unknown'));
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect((await row(id)).content).toEqual(oldContent);
@@ -105,7 +105,7 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     await database.db.query("UPDATE publication_snapshots SET content=jsonb_set(content,'{details}',to_jsonb($1::text)) WHERE id=$2",[summary,(await row(id)).snapshot_id]);
     await acceptFixtureStories(settings);
     const edit = vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     expect((await row(id)).content).toEqual({ ...oldContent, details: summary });
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(1);
     expect(edit).toHaveBeenCalledOnce();
@@ -194,7 +194,7 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
       VALUES('https://author.org/old','Старое заявление','public',now()+interval '1 day') RETURNING id`);
     await database.db.query(`INSERT INTO story_merge_evidence(merged_story_id,canonical_story_id,evidence_id,role,verified_at)
       VALUES($1,$2,$3,'primary',now())`,[duplicateStory,canonicalStory,evidence]);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     const content = (await database.db.query<{ content: PublicationSnapshot }>(`${store.publicationEditSelect} WHERE p.id=$1`,[canonical])).rows[0]?.content;
     expect(content).toEqual(newContent);
     expect((await row(duplicate)).content).toEqual({ ...oldContent,sources: [oldSource] });
@@ -232,7 +232,7 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     await database.db.query('UPDATE publication_snapshots SET content=$1 WHERE id=$2',[
       JSON.stringify({ ...oldContent,sources: [oldAd] }),(await row(duplicate)).snapshot_id]);
     await acceptFixtureStories(settings);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     const content = (await database.db.query<{ content: PublicationSnapshot }>(`${store.publicationEditSelect} WHERE p.id=$1`,[canonical])).rows[0]?.content;
     if (!content) throw new Error('Prepared snapshot missing');
     expect(content.sources).toHaveLength(19); expect(content.sources.slice(0,17).map(source => source.url).sort()).toEqual([...urls].sort());

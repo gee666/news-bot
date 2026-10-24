@@ -84,7 +84,7 @@ describe.skipIf(!url)('source-only publication contributions in PostgreSQL', () 
     await contribution(storyId,'-1009404','10055','https://publisher.org/uncertain','uncertain');
     expect((await database.db.query('SELECT id FROM story_mentions')).rows).toHaveLength(0);
     await acceptFixtureStories(settings);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     const desired = (await database.db.query<{ content: PublicationSnapshot }>(`${store.publicationEditSelect} WHERE p.id=$1`,[publicationId])).rows[0]?.content;
     if (!desired) throw new Error('Desired snapshot missing');
     expect(desired.sources.map(source => source.url).sort()).toEqual([

@@ -26,8 +26,9 @@ describe('generation database boundary', () => {
     expect(mocks.query.mock.calls[1]?.[0]).toContain('JOIN sources s');
     for (const query of mocks.query.mock.calls.slice(1, 3)) {
       expect(query[0]).toContain('JOIN item_revisions r ON r.id = m.revision_id');
-      expect(query[0]).toContain('JOIN source_items i ON i.current_revision_id = r.id');
-      expect(query[0]).toMatch(/^SELECT /u);
+      expect(query[0]).toContain('m.story_id<>$1 OR i.current_revision_id = r.id');
+      expect(query[0]).toContain('story_publication_threads');
+      expect(query[0]).toMatch(/^WITH RECURSIVE /u);
     }
     expect(mocks.query.mock.calls[2]?.[0]).toContain("ml.classification <> 'irrelevant'");
     expect(mocks.query.mock.calls[2]?.[0]).toContain("sl.classification='relevant'");
@@ -50,7 +51,7 @@ describe('generation database boundary', () => {
     expect(sql).toContain("SELECT DISTINCT");
     expect(sql).toContain("sl.classification='relevant'");
     expect(sql).toContain('i.current_revision_id=r.id');
-    expect(sql).toContain('m.story_id=$1 AND m.revision_id=r.id');
+    expect(sql).toContain('m.story_id IN(SELECT id FROM generation_story_ids) AND m.revision_id=r.id');
     expect(sql).toContain("pipelineFailure");
     expect(sql).toContain("pipeline_failed_item:");
     expect(sql).not.toContain('INSERT');
@@ -159,7 +160,7 @@ describe('generation database boundary', () => {
     mocks.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ id: storyId }] });
     const value = { id: storyId, headline: 'Acme выпустила 2.0.', summary: 'Исправлена ошибка безопасности.', translatedExcerpt: null };
     await saveGenerations([input], [value], defaultSettings);
-    expect(mocks.query.mock.calls[0]?.[0]).toMatch(/^SELECT /u);
+    expect(mocks.query.mock.calls[0]?.[0]).toMatch(/^WITH RECURSIVE /u);
     expect(mocks.query.mock.calls[1]?.[1]).toEqual([storyId, value.headline, value.summary, null, true, 1,
       input.story.chosen_excerpt, null]);
     expect(mocks.query.mock.calls[1]?.[0]).not.toContain('status =');
@@ -188,7 +189,7 @@ describe('generation database boundary', () => {
     expect(await alreadyGenerated(input, defaultSettings)).toBe(true);
     expect(mocks.query.mock.calls[0]?.[0]).toContain("result->>'headline' = $5");
     expect(mocks.query.mock.calls[0]?.[0]).toContain('expires_at > now()');
-    expect(GENERATION_VERSION).toBe('generation-v12-media');
+    expect(GENERATION_VERSION).toBe('generation-v13-cumulative');
     expect(mocks.query.mock.calls[0]?.[0]).toContain(`prompt_version = '${GENERATION_VERSION}'`);
   });
 
@@ -223,7 +224,7 @@ describe('generation database boundary', () => {
     expect(await evidenceSnapshotHash(storyId)).not.toBe(original);
     mocks.query.mockResolvedValueOnce({ rows: [{ ...evidenceDocument(), content: 'original', role: 'primary', unexpired: false }] });
     expect(await evidenceSnapshotHash(storyId)).not.toBe(original);
-    expect(mocks.query.mock.calls.every(([sql]) => String(sql).startsWith('SELECT'))).toBe(true);
+    expect(mocks.query.mock.calls.every(([sql]) => (/^(SELECT|WITH RECURSIVE) /u).test(String(sql)))).toBe(true);
   });
 
   it('requires research output to match current evidence even when collected mentions remain unchanged', async () => {
@@ -245,7 +246,7 @@ describe('generation database boundary', () => {
       translatedExcerpt: null, evidenceSignature: 'obsolete' }], defaultSettings))
       .rejects.toThrow('Evidence changed during generation');
     expect(mocks.query).toHaveBeenCalledOnce();
-    expect(mocks.query.mock.calls[0]?.[0]).toMatch(/^SELECT /u);
+    expect(mocks.query.mock.calls[0]?.[0]).toMatch(/^WITH RECURSIVE /u);
   });
 
   it('invalidates saved citation provenance when current mention IDs or access change', () => {

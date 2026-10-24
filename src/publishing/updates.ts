@@ -6,8 +6,8 @@ import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js
 import { snapshotSources } from './content.js';
 import { BotApi } from './bot-api.js';
 import { editPublication } from './delivery.js';
-import { renderCaption } from './caption.js';
-import { PublicationRenderError, render } from './render.js';
+import { renderStoredPublication } from './message-render.js';
+import { PublicationRenderError } from './render.js';
 import { eligible, locked, publicationEditSelect, rateLimited, supersedeAttempts, type Publication, type StoryContent } from './store.js';
 
 /** One tracked survivor per canonical event and destination. Alias audit survives story pruning. */
@@ -40,6 +40,7 @@ async function invalidateStaleEdits(client: PoolClient, settings: AppSettings, d
       AND ($6::uuid[] IS NULL OR s.id=ANY($6))
       AND (p.pending_snapshot_id IS NOT NULL OR EXISTS(SELECT 1 FROM request_attempts a
         WHERE a.publication_id=p.id AND a.operation='edit' AND a.status IN ('running','unknown','retryable')))
+      AND NOT (desired.content ? 'updatedTo')
       AND (s.status IN ('failed','rejected') OR (((desired.content-'sources') IS DISTINCT FROM (sent.content-'sources'))
       AND ((${eligible}) IS NOT TRUE OR desired.content->>'headline' IS DISTINCT FROM s.headline
         OR desired.content->>'details' IS DISTINCT FROM CASE WHEN s.researched THEN s.summary ELSE s.translated_excerpt END
@@ -60,11 +61,11 @@ async function pinManualEdit(client: PoolClient, runId: string, publicationId: s
 }
 
 export async function prepareUpdates(settings: AppSettings, destinationId: string, storyIds?: string[],
-  options: { cancelOnly?: boolean; runId?: string } = {}): Promise<void> {
+  options: { cancelOnly?: boolean; runId?: string; sourceRepair?: boolean } = {}): Promise<void> {
   await transaction(async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
     await invalidateStaleEdits(client,settings,destinationId,undefined,storyIds);
-    if (options.cancelOnly) return;
+    if (options.cancelOnly || !options.sourceRepair) return;
     const rows = await client.query<StoryContent & { publication_id: string; old_content: unknown; pending_content: unknown;
       delivery_kind: 'text' | 'album'; format_version: number; pending_snapshot_id: string | null; desired_story_id: string | null }>(`SELECT s.*,p.id AS publication_id,
       snap.content AS old_content,desired.content AS pending_content,p.delivery_kind,p.format_version,p.pending_snapshot_id,
@@ -75,14 +76,16 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
       WHERE s.status='completed' AND ($2::uuid[] IS NULL OR s.id=ANY($2)) FOR UPDATE OF p,s`,
     [destinationId,storyIds ?? null]);
     for (const story of rows.rows) {
+      // Keep the attempted desired snapshot until its unknown outcome is reconciled.
+      if ((await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND operation='edit'
+        AND status IN ('running','unknown') LIMIT 1`, [story.publication_id])).rows.length) continue;
       let content: PublicationSnapshot;
       try {
         const sent = publicationSnapshotSchema.parse(story.old_content);
         const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
           summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, destinationId);
         content = publicationSnapshotSchema.parse({ ...sent, sources });
-        if (story.delivery_kind === 'album') renderCaption(content);
-        else render(content);
+        await renderStoredPublication(client,story.publication_id,content,story.delivery_kind);
       }
       catch (error) {
         if (!(error instanceof PublicationRenderError || error instanceof ZodError)) throw error;
@@ -114,18 +117,18 @@ const editDue = `((p.pending_snapshot_id IS NOT NULL AND NOT EXISTS(SELECT 1 FRO
       AND (a.status IN ('failed','succeeded') OR a.next_retry_at>now())))
   OR EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
     AND a.status IN ('running','unknown','retryable') AND (a.next_retry_at IS NULL OR a.next_retry_at<=now())
-    AND a.response_metadata->>'snapshotId'=coalesce(p.pending_snapshot_id,p.snapshot_id)::text))`;
+    AND (a.status IN ('running','unknown') OR a.response_metadata->>'snapshotId'=coalesce(p.pending_snapshot_id,p.snapshot_id)::text)))`;
 
 /** Stored edits still require final freshness; unknown outcomes can only be reconciled. */
-export async function retryEdits(api: BotApi, settings: AppSettings, destinationId: string, storyIds?: string[]): Promise<number> {
+export async function retryEdits(api: BotApi, settings: AppSettings, destinationId: string, storyIds?: string[], publicationIds?: string[]): Promise<number> {
   await transaction(client => invalidateStaleEdits(client,settings,destinationId,undefined,storyIds));
   let edited = 0;
   const botId = String((await api.identity()).id);
-  const rows = await db.query<{ id: string }>(`SELECT p.id FROM publications p WHERE p.destination_id=$1 AND p.status='published'
+  const rows = await db.query<{ id: string }>(`SELECT p.id FROM publications p WHERE p.destination_id=$1 AND p.status='published' AND ($3::uuid[] IS NULL OR p.id=ANY($3))
     AND NOT EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id)
     AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key='publication_removal:'||p.id::text)
     AND ($2::uuid[] IS NULL OR p.id IN(SELECT chosen.id FROM (${canonicalPublications}) chosen WHERE chosen.canonical_story_id=ANY($2)))
-    AND ${editDue} ORDER BY p.created_at`, [destinationId,storyIds ?? null]);
+    AND ${editDue} ORDER BY p.created_at`, [destinationId,storyIds ?? null,publicationIds ?? null]);
   for (const row of rows.rows) {
     if (await rateLimited()) break;
     await locked(`news-bot-publication:${row.id}`, async client => {
@@ -135,12 +138,4 @@ export async function retryEdits(api: BotApi, settings: AppSettings, destination
     });
   }
   return edited;
-}
-
-/** Stage source-only edits wherever these stories have already been published. */
-export async function refreshPublishedSources(settings: AppSettings, storyIds: string[]): Promise<void> {
-  if (!storyIds.length) return;
-  const destinations = await db.query<{ destination_id: string }>(`SELECT DISTINCT destination_id FROM publications
-    WHERE story_id=ANY($1::uuid[]) AND status='published' AND message_id IS NOT NULL AND published_at IS NOT NULL`, [storyIds]);
-  for (const { destination_id } of destinations.rows) await prepareUpdates(settings, destination_id, storyIds);
 }

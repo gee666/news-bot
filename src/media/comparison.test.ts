@@ -170,7 +170,8 @@ describe('deduplicateMedia', () => {
       run: fakeRunner().mockResolvedValue(Buffer.alloc(0)),
     })).rejects.toThrow('no image');
     await expect(deduplicateMedia([image('a'), image('b')], compare, {
-      run: fakeRunner().mockResolvedValue(Buffer.from('bad thumbnail')),
+      run: fakeRunner().mockImplementation(async (_command, args, input) =>
+        args.includes('rawvideo') ? Buffer.from('bad thumbnail') : Buffer.from(`png:${input?.toString()}`)),
     })).rejects.toThrow('Invalid grayscale thumbnail');
     expect(compare).not.toHaveBeenCalled();
   });

@@ -135,7 +135,7 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(25);
     expect((await database.db.query("SELECT story_id FROM story_publication_ready WHERE status='pending'")).rows).toHaveLength(0);
   }, 60_000);
-  it('keeps ready work pending while publishing is paused, and edits sources on a later ready event', async () => {
+  it('keeps ready work pending while publishing is paused, and leaves the earlier post immutable on a later ready event', async () => {
     const batchId = await batch(); const id = await story(batchId); await enqueue(id, batchId);
     settings = await (await import('../settings.js')).saveSettings({ publishingEnabled: false });
     await drain(); expect(BotApi.prototype.send).not.toHaveBeenCalled();
@@ -144,7 +144,7 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
     await drain();
     await sourceCorrection(id);
     await acceptFixtureStories(settings); await enqueue(id, batchId); await drain();
-    expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
+    expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).not.toHaveBeenCalled();
   });
   it('sends each ready event once despite unresolved consolidation and does not resend after resolution', async () => {
     const batchId = await batch(); const left = await story(batchId); const right = await story(batchId);
@@ -271,6 +271,6 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(5); // Archived manual batches cannot erase the input boundary.
     await sourceCorrection(ids[0] ?? '');
     await acceptFixtureStories(settings); await enqueue(ids[0] ?? '', null); await drain();
-    expect(BotApi.prototype.send).toHaveBeenCalledTimes(5); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
+    expect(BotApi.prototype.send).toHaveBeenCalledTimes(5); expect(BotApi.prototype.edit).not.toHaveBeenCalled();
   }, 60_000);
 });

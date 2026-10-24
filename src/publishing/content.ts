@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { publishedThread } from '../pipeline/publication-thread.js';
-import { orderSources, sourceGroup } from './sources.js';
+import { orderSources } from './sources.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
 import { evidenceMetadataSchema } from '../pipeline/generation-store.js';
 import { fetchedRelevanceCte } from './source-relevance.js';
@@ -38,6 +38,7 @@ export function mergeSources(input: PublicationSource[]): PublicationSource[] {
     if (source.kind && (!old.kind || sourceAuthorityRanks[source.kind] < sourceAuthorityRanks[old.kind])) old.kind = source.kind;
     old.primary = old.primary || source.primary || old.kind === 'primary';
     if (old.primary && old.kind) old.kind = 'primary';
+    if (source.previousPublication) old.previousPublication = true;
     if (source.classification === 'relevant') old.classification = 'relevant';
     if (source.access === 'restricted' || source.url.startsWith('https://t.me/c/')) old.access = 'restricted';
   }
@@ -141,23 +142,12 @@ export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: 
     "SELECT value->>'channelId' AS id FROM operational_state WHERE key='telegram_destination'")).rows[0]?.id;
   const thread = currentDestination ? (await publishedThread(story.id, client.query.bind(client), currentDestination))
     .filter(post => post.storyId !== story.id) : [];
-  const inherited = thread.flatMap(post => post.sources.filter(source => !source.previousPublication));
+  const inherited = thread.flatMap(post => post.sources);
   const previous: PublicationSource[] = thread.flatMap(post => /^-100\d+$/u.test(post.destinationId) && /^\d+$/u.test(post.messageId) ? [{
     label:post.headline,url:`https://t.me/c/${post.destinationId.slice(4)}/${post.messageId}`,
     primary:false,previousPublication:true,access:'public' as const,classification:'relevant' as const,
   }] : []);
-  const ownUrls = new Set(sources.map(source => source.url));
-  const previousUrls = new Set(previous.map(source => source.url));
-  const combined = orderSources([...mergeSources([...sources, ...inherited].filter(source => !previousUrls.has(source.url))), ...previous]);
-  // Keep direct sources, primary sources and thread links ahead of inherited secondary sources.
-  while (combined.length > 90) {
-    let index = combined.findLastIndex(source => !ownUrls.has(source.url) && sourceGroup(source) === 'secondary');
-    if (index < 0) index = combined.findLastIndex(source => sourceGroup(source) === 'secondary');
-    if (index < 0) index = combined.findLastIndex(source => !source.previousPublication);
-    if (index < 0) index = combined.length - 1;
-    combined.splice(index, 1);
-  }
-  for (const source of combined) delete source.labels;
+  const combined = mergeSources([...sources, ...inherited, ...previous]);
   return { sources: combined, ...(thread.length && metadata?.earlierSummary ? { earlier: metadata.earlierSummary } : {}),
     ...(metadata?.review ? { review: metadata.review } : {}) };
 }

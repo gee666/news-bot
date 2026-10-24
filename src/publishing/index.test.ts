@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({ query: vi.fn(), getSettings: vi.fn(), destinat
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('./media-plan.js', () => ({ recoverPublicationMedia: vi.fn(), expirePublicationMedia: vi.fn() }));
 vi.mock('./media-delivery.js', () => ({ retryPublicationMedia: vi.fn() }));
+vi.mock('./text-delivery.js', () => ({ recoverPublicationText: vi.fn(), retryPublicationText: vi.fn() }));
+vi.mock('./thread-updates.js', () => ({ prepareThreadUpdates: vi.fn() }));
 vi.mock('../settings.js', async importOriginal => {
   const original = await importOriginal<typeof import('../settings.js')>();
   return { ...original, getSettings: mocks.getSettings };

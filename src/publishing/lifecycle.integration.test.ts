@@ -48,7 +48,7 @@ async function alias(canonical: string, loser: string, publicationId: string): P
 }
 async function pendingEdit(outcome: 'unknown' | 'retryable' = 'unknown') {
   const storyId = await story(); const id = await publication(storyId,'published');
-  await updates.prepareUpdates(settings,'-100123');
+  await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
   const desiredId = (await row(id)).pending_snapshot_id;
   if (!desiredId) throw new Error('Desired snapshot missing');
   const edit = vi.spyOn(BotApi.prototype,'edit').mockRejectedValue(new BotError(
@@ -127,7 +127,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     expect((await database.db.query('SELECT status FROM request_attempts WHERE publication_id=$1',[id])).rows[0]?.status).toBe('unknown');
     await store.prepareDigest(settings,'-100123'); expect((await database.db.query('SELECT id FROM publications')).rows).toHaveLength(1);
     expect(await delivery.reconcile(await row(id),settings,async () => '9')).toBe(true);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     const edit = vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(1); expect(edit.mock.calls[0]?.[1]).toBe('9');
     expect((await row(id)).content).toEqual(current); expect(BotApi.prototype.send).not.toHaveBeenCalled();
@@ -159,16 +159,18 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
       VALUES($1,$2,'Read report details','public',now()+interval '1 day') RETURNING id`,[source.url,source.label]);
     await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at) VALUES($1,$2,'supporting','relevant',now())",[storyId,evidence]);
     await acceptFixtureStories(settings);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     const next = (await row(id)).pending_snapshot_id;
-    expect(next).not.toBeNull(); expect(next).not.toBe(desiredId);
+    expect(next).not.toBeNull();
+    if (outcome === 'unknown') expect(next).toBe(desiredId);
+    else expect(next).not.toBe(desiredId);
     expect((await row(id)).snapshot_id).toBe(publishedId); expect((await row(id)).content).toEqual(original);
     expect((await database.db.query("SELECT status,error_code,next_retry_at FROM request_attempts WHERE operation='edit' AND publication_id=$1",[id])).rows).toEqual([
       outcome === 'unknown' ? { status:'unknown',error_code:'telegram_transport_unknown',next_retry_at:expect.any(Date) }
         : { status:'failed',error_code:'edit_superseded',next_retry_at:null },
     ]);
     expect((await database.db.query('SELECT content FROM publication_snapshots WHERE id=$1',[next])).rows[0]?.content)
-      .toEqual({ ...current, sources: [source] });
+      .toEqual(outcome === 'unknown' ? current : { ...current, sources: [source] });
     edit.mockResolvedValue(undefined);
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(outcome === 'unknown' ? 0 : 1);
     if (outcome === 'unknown') {
@@ -193,23 +195,24 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     edit.mockResolvedValue(undefined); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect((await row(id)).pending_snapshot_id).not.toBeNull(); expect(edit).toHaveBeenCalledOnce();
   });
-  it('bounds a source edit to 90 links with unchanged headline/details/score', async () => {
-    const { id,storyId,edit } = await pendingEdit();
+  it('retains all 99 sources in a new edition snapshot without changing a legacy unknown edit', async () => {
+    const { id,storyId,desiredId,edit } = await pendingEdit();
     await database.db.query(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
       SELECT 'https://publisher.org/'||n,'Источник '||n,'Actual read relevant source text','public',now()+interval '1 day' FROM generate_series(1,99) n`);
     await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at)
       SELECT $1,id,'supporting','relevant',now() FROM evidence_documents WHERE url<>'https://fixture.example/announcement'`,[storyId]);
     await acceptFixtureStories(settings);
+    const story = (await database.db.query<import('./store.js').StoryContent>('SELECT * FROM stories WHERE id=$1',[storyId])).rows[0];
+    if (!story) throw new Error('Story missing');
+    expect((await store.snapshotFor(database.db,story)).sources).toHaveLength(99);
     await updates.prepareUpdates(settings,'-100123');
-    const desired=(await database.db.query<{content:PublicationSnapshot}>(`${store.publicationEditSelect} WHERE p.id=$1`,[id])).rows[0]?.content;
-    expect(desired?.sources).toHaveLength(90);
-    expect(desired?.details).toBe(original.details);
-    edit.mockResolvedValue(undefined); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0); expect(edit).toHaveBeenCalledOnce();
-    expect((await database.db.query("SELECT error_code FROM request_attempts WHERE operation='prepare_edit'")).rows).toEqual([]);
+    expect((await row(id)).pending_snapshot_id).toBe(desiredId);
+    edit.mockResolvedValue(undefined); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
+    expect(edit).toHaveBeenCalledOnce();
   });
   it.each([true,false])('invalidates a pending edit on a rejected live story, with preparation=%s', async prepare => {
     const { id,storyId,edit } = await pendingEdit(); await database.db.query("UPDATE stories SET status='rejected' WHERE id=$1",[storyId]);
-    if (prepare) await updates.prepareUpdates(settings,'-100123');
+    if (prepare) await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     edit.mockResolvedValue(undefined); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect((await row(id)).pending_snapshot_id).toBeNull(); expect((await row(id)).content).toEqual(original); expect(edit).toHaveBeenCalledOnce();
   });
@@ -217,7 +220,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     const { id,storyId } = await pendingEdit('retryable'); const deadline = new Date(Date.now()+120_000);
     await database.db.query('UPDATE request_attempts SET next_retry_at=$1 WHERE publication_id=$2',[deadline,id]);
     await database.db.query("UPDATE stories SET status='rejected' WHERE id=$1",[storyId]);
-    await updates.prepareUpdates(settings,'-100123'); expect((await row(id)).pending_snapshot_id).toBeNull();
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true }); expect((await row(id)).pending_snapshot_id).toBeNull();
     const attempt = (await database.db.query('SELECT status,error_code,next_retry_at,response_metadata FROM request_attempts WHERE publication_id=$1',[id])).rows[0];
     expect(attempt).toMatchObject({ status: 'failed',error_code: 'telegram_rate_limit',next_retry_at: deadline });
     expect(attempt?.response_metadata.superseded).toBe(true); expect(await store.rateLimited()).toBe(true);
@@ -225,7 +228,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
   });
   it('preserves a retained desired snapshot and unknown outcome for review without blind retry', async () => {
     const { id,storyId,desiredId,edit } = await pendingEdit(); await database.db.query('DELETE FROM stories WHERE id=$1',[storyId]);
-    await updates.prepareUpdates(settings,'-100123'); expect((await row(id)).pending_snapshot_id).toBe(desiredId);
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true }); expect((await row(id)).pending_snapshot_id).toBe(desiredId);
     edit.mockResolvedValue(undefined); expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect((await row(id)).pending_snapshot_id).toBe(desiredId); expect((await row(id)).content).toEqual(original); expect(edit).toHaveBeenCalledOnce();
     expect((await database.db.query("SELECT status FROM request_attempts WHERE operation='edit'")).rows).toEqual([{ status:'unknown' }]);

@@ -18,6 +18,31 @@ async function id(sql: string, values: unknown[] = []): Promise<string> {
   return row.id;
 }
 
+async function story(previous?: string): Promise<string> {
+  const storyId = await id("INSERT INTO stories(status) VALUES('completed') RETURNING id");
+  stories.push(storyId);
+  await database.db.query('INSERT INTO story_publication_threads(story_id,previous_story_id) VALUES($1,$2)', [storyId, previous ?? null]);
+  return storyId;
+}
+async function report(storyId: string, name: string, role: 'mention' | 'supplement', access = 'public') {
+  const source = await id("INSERT INTO sources(connector_type,external_id,name,access) VALUES('feed',$1,'Test',$2) RETURNING id", [randomUUID(), access]);
+  const item = await id('INSERT INTO source_items(source_id,external_id,retention_at) VALUES($1,$2,now()) RETURNING id', [source, randomUUID()]);
+  const revision = await id(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text,metadata)
+    VALUES($1,1,$2,'Test','Test',$3) RETURNING id`, [item, randomUUID(), JSON.stringify({ media: [{ type: 'image', url: `https://example.org/${name}.png` }] })]);
+  await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
+  if (role === 'mention') await database.db.query("INSERT INTO story_mentions(story_id,revision_id,text,ordinal) VALUES($1,$2,'Test',0)", [storyId, revision]);
+  else {
+    const link = await id("INSERT INTO item_links(revision_id,url) VALUES($1,'https://example.org/story') RETURNING id", [revision]);
+    await database.db.query("INSERT INTO story_link_sources(story_id,link_id,classification,model_key,model_version,prompt_version,input_hash) VALUES($1,$2,'relevant','test',1,'test','hash')", [storyId, link]);
+  }
+  return { source, item, revision };
+}
+async function retire(item: string) {
+  const revision = await id(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
+    VALUES($1,2,$2,'Revised without media','Revised without media') RETURNING id`, [item, randomUUID()]);
+  await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
+}
+
 describe.skipIf(!url)('story media current-evidence selection', () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: url }); await admin.query(`CREATE SCHEMA ${schema}`);
@@ -65,4 +90,55 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     expect(mocks.download).toHaveBeenCalledTimes(1);
     expect(mocks.download.mock.calls[0]?.[0].url).toBe('https://example.org/0.png');
   });
+
+  it('collects distinct URLs from every ancestor, including historical mention and supplement revisions', async () => {
+    const oldest = await story(); const middle = await story(oldest); const latest = await story(middle);
+    const oldMention = await report(oldest, 'old-mention', 'mention');
+    const oldSupplement = await report(oldest, 'old-supplement', 'supplement');
+    await retire(oldMention.item); await retire(oldSupplement.item);
+    await report(middle, 'middle', 'mention');
+    await report(latest, 'latest', 'mention');
+    await report(latest, 'old-mention', 'supplement'); // Same repost URL, one download.
+    const retiredLatest = await report(latest, 'retired-latest', 'mention'); await retire(retiredLatest.item);
+    const unrelated = await story(); await report(unrelated, 'unrelated', 'mention');
+    const evidence = await id(`INSERT INTO evidence_documents(url,content_hash,content,access,metadata,expires_at)
+      VALUES('https://example.org/research','old-research','Research','public',$1,now()+interval '1 day') RETURNING id`,
+    [JSON.stringify({ media: [{ type: 'video', url: 'https://example.org/ancestor-research.mp4' }] })]);
+    await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance) VALUES($1,$2,'primary','relevant')", [oldest, evidence]);
+    const result = await service.publicationMedia(latest, settings);
+    expect(result).toHaveLength(5);
+    expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url).sort()).toEqual([
+      'https://example.org/ancestor-research.mp4', 'https://example.org/latest.png', 'https://example.org/middle.png',
+      'https://example.org/old-mention.png', 'https://example.org/old-supplement.png',
+    ]);
+  });
+
+  it('does not reuse cached ancestor attachments after source access becomes private', async () => {
+    vi.stubEnv('ALLOW_PRIVATE_INFERENCE', 'false');
+    const oldest = await story(); const latest = await story(oldest);
+    const ancestor = await report(oldest, 'private-later', 'mention'); await retire(ancestor.item);
+    expect(await service.publicationMedia(latest, settings)).toHaveLength(1);
+    mocks.download.mockClear();
+    await database.db.query("UPDATE sources SET access='restricted' WHERE id=$1", [ancestor.source]);
+    await expect(service.publicationMedia(latest, settings)).rejects.toThrow('Private or unknown source access');
+    expect(mocks.download).not.toHaveBeenCalled();
+  });
+
+  it('filters ineligible, failed and over-retention ancestor attachments rather than reviving them', async () => {
+    const oldest = await story(); const latest = await story(oldest);
+    const failed = await report(oldest, 'failed', 'mention');
+    await database.db.query("UPDATE item_revisions SET metadata=metadata||'{\"pipelineFailure\":true}'::jsonb WHERE id=$1", [failed.revision]);
+    const failedItem = await report(oldest, 'failed-item', 'supplement');
+    await database.db.query("INSERT INTO operational_state(key,value) VALUES($1,'{}')", [`pipeline_failed_item:${failedItem.item}`]);
+    const aged = await report(oldest, 'aged', 'mention');
+    await database.db.query("UPDATE source_items SET collected_at=now()-interval '8 days' WHERE id=$1", [aged.item]);
+    const ineligible = await report(oldest, 'ineligible', 'supplement');
+    await database.db.query("UPDATE item_links SET metadata='{\"evidenceEligible\":false}'::jsonb WHERE revision_id=$1", [ineligible.revision]);
+    const irrelevant = await report(oldest, 'irrelevant', 'supplement');
+    await database.db.query("UPDATE story_link_sources SET classification='irrelevant' WHERE link_id IN(SELECT id FROM item_links WHERE revision_id=$1)", [irrelevant.revision]);
+    await report(oldest, 'valid', 'mention');
+    expect(await service.publicationMedia(latest, settings)).toHaveLength(1);
+    expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url)).toEqual(['https://example.org/valid.png']);
+  });
+
 });

@@ -36,6 +36,7 @@ export const publicationSnapshotSchema = z.object({
   detailsKind: z.enum(['summary', 'excerpt']),
   sources: z.array(publicationSourceSchema),
   review: generationReviewSchema.optional(),
+  updatedTo: z.string().regex(/^https:\/\/t\.me\/c\/\d+\/[1-9]\d*$/u).optional(),
 }).strict();
 
 export type PublicationSource = z.infer<typeof publicationSourceSchema>;

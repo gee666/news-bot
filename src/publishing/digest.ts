@@ -5,6 +5,8 @@ import { getSettings, type AppSettings } from '../settings.js';
 import { BotApi } from './bot-api.js';
 import { reconcile, sendPrepared } from './delivery.js';
 import { checkPublicationAdmission } from './admission.js';
+import { prepareThreadUpdates } from './thread-updates.js';
+import { recoverPublicationText, retryPublicationText } from './text-delivery.js';
 import { retryEdits } from './updates.js';
 import { prepareReadyStories } from './ready.js';
 import { retryReplacements } from './repair.js';
@@ -48,6 +50,8 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   await recoverSends(destinationId);
   await recoverEdits(destinationId);
   await recoverPublicationMedia(destinationId);
+  await recoverPublicationText(destinationId);
+  await prepareThreadUpdates(destinationId);
   if (await rateLimited()) return;
   if (!selectNewStories) {
     const row = (await db.query<{ pending: boolean }>(`SELECT EXISTS(SELECT 1 FROM publications p WHERE p.destination_id=$1
@@ -57,6 +61,8 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
           NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status<>'sent')
           OR EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status IN ('prepared','retryable')
             AND (b.next_retry_at IS NULL OR b.next_retry_at<=now()))))))
+        OR EXISTS(SELECT 1 FROM publication_text_parts t WHERE t.publication_id=p.id AND t.part_number>0
+          AND t.status IN ('prepared','retryable') AND (t.next_retry_at IS NULL OR t.next_retry_at<=now()))
         OR EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id AND r.status='pending'
           AND (r.next_retry_at IS NULL OR r.next_retry_at<=now()))
         OR EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
@@ -75,6 +81,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   await adoptPreparedPublications(current,destinationId);
   await retryEdits(api,current,destinationId);
   await retryReplacements(api,current,destinationId);
+  await retryPublicationText(api,current,destinationId);
   await retryPublicationMedia(api,current,destinationId);
   const prepared = await db.query<Publication>(`${publicationSelect} JOIN stories news ON news.id=p.story_id WHERE p.destination_id=$1 AND p.story_id IS NOT NULL
     AND p.status='prepared' AND ${due}
@@ -92,6 +99,8 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
     const desired = (await db.query<Publication>(`${publicationSelect} WHERE p.id=$1 AND p.status='prepared'`,[publication.id])).rows[0];
     if (desired) await sendPrepared(desired,api,latest);
   }
+  await prepareThreadUpdates(destinationId);
+  await retryEdits(api,current,destinationId);
 }
 
 export async function publishDigest(settings: AppSettings): Promise<void> {

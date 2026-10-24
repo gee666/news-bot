@@ -61,6 +61,7 @@ services:
     volumes:
       - telegram_sessions:/data/telegram
       - pi_auth:/data/pi
+      - media_pair_cache:/app/tmp/media-pair-cache
     healthcheck:
       test:
         - CMD
@@ -134,3 +135,4 @@ volumes:
   postgres_data:
   telegram_sessions:
   pi_auth:
+  media_pair_cache:

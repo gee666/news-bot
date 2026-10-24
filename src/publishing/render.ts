@@ -11,7 +11,7 @@ export interface RenderedMessage {
   reply_markup: { inline_keyboard: [] };
 }
 export const publicationRenderCodes = ['publication_snapshot_invalid', 'publication_entity_limit',
-  'publication_message_too_long', 'publication_sources_unresolved', 'publication_no_details_budget'] as const;
+  'publication_message_too_long', 'publication_text_requires_new_edition', 'publication_sources_unresolved', 'publication_no_details_budget'] as const;
 export type PublicationRenderCode = typeof publicationRenderCodes[number];
 export class PublicationRenderError extends Error {
   constructor(readonly code: PublicationRenderCode) { super(code); }

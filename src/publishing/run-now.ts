@@ -8,6 +8,8 @@ import { checkPublicationAdmission } from './admission.js';
 import { guardDigestEligibility } from '../pipeline/eligibility.js';
 import { prepareUpdates, retryEdits } from './updates.js';
 import { retryPublicationMedia } from './media-delivery.js';
+import { recoverPublicationText, retryPublicationText } from './text-delivery.js';
+import { prepareThreadUpdates } from './thread-updates.js';
 import { recoverPublicationMedia } from './media-plan.js';
 import { destination, prepareDigest, publicationSelect, rateLimited, refreshPrepared, state, type Publication } from './store.js';
 
@@ -22,7 +24,8 @@ const selectionSchema = z.object({ ids: z.array(z.uuid()), destinationId: z.stri
 async function deliveryCounts(selection: z.infer<typeof selectionSchema> | undefined, createdAt: string) {
   if (!selection) return { published: 0, updated: 0 };
   const published = await db.query<{ count: number }>(`SELECT count(*)::int AS count FROM publications
-    WHERE id=ANY($1::uuid[]) AND status='published' AND media_status IN ('none','complete')`, [selection.ids]);
+    WHERE id=ANY($1::uuid[]) AND status='published' AND media_status IN ('none','complete')
+      AND NOT EXISTS(SELECT 1 FROM publication_text_parts t WHERE t.publication_id=publications.id AND t.status<>'sent')`, [selection.ids]);
   const edited = await db.query<{ count: number }>(`SELECT count(DISTINCT a.publication_id)::int AS count FROM request_attempts a
     WHERE a.operation='edit' AND a.status='succeeded' AND a.finished_at>=$2 AND EXISTS(
       SELECT 1 FROM jsonb_to_recordset($1::jsonb) target("publicationId" uuid,"snapshotId" uuid)
@@ -67,6 +70,7 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   // Selection commits before any network send. Retry/restart always uses these same IDs.
   await recoverSends(destinationId, ids);
   await recoverPublicationMedia(destinationId);
+  await recoverPublicationText(destinationId,ids);
   const selected = await db.query<Publication & { error_code: string | null }>(`${publicationSelect}
     WHERE p.id=ANY($1::uuid[]) AND p.destination_id=$2 ORDER BY p.created_at,p.id`, [ids, destinationId]);
   const withheld = new Set<string>();
@@ -109,7 +113,19 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   await prepareUpdates(current, destinationId, storyIds, { runId });
   const receipt = selectionSchema.parse(await state(`run_now_publications:${runId}`));
   if (!await rateLimited()) await retryEdits(api, current, destinationId, storyIds);
+  if (!await rateLimited()) await retryPublicationText(api, current, destinationId, ids);
   if (!await rateLimited()) await retryPublicationMedia(api, current, destinationId);
+  await prepareThreadUpdates(destinationId,ids);
+  const markerIds = (await db.query<{ id: string }>(`SELECT p.id FROM publications p JOIN publication_snapshots desired ON desired.id=p.pending_snapshot_id
+    WHERE p.destination_id=$1 AND desired.content->>'updatedTo' IN (SELECT 'https://t.me/c/'||substring(destination_id from 5)||'/'||message_id
+      FROM publications WHERE id=ANY($2::uuid[]) AND message_id IS NOT NULL)`, [destinationId,ids])).rows.map(row => row.id);
+  if (markerIds.length && !await rateLimited()) await retryEdits(api,current,destinationId,undefined,markerIds);
+  const textProblems = await db.query<{ status: string; count: number }>(`SELECT status,count(*)::int AS count FROM publication_text_parts
+    WHERE publication_id=ANY($1::uuid[]) AND status<>'sent' GROUP BY status`, [ids]);
+  for (const problem of textProblems.rows) {
+    report.reasons[`publication_text_${problem.status}`] = problem.count;
+    if (['prepared','retryable','running'].includes(problem.status)) report.waiting = true;
+  }
   const outcomes = await db.query<{ id: string; status: string; error_code: string | null; media_status?: string }>(`SELECT id,status,error_code,media_status
     FROM publications WHERE id=ANY($1::uuid[])`, [ids]);
   for (const row of outcomes.rows) {

@@ -4,9 +4,8 @@ import { defaultSettings } from '../settings.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 import { summaryImages } from '../media/story-media.js';
 import { researchStory } from './generation.js';
-import { publishedStory, alreadyGenerated, saveGenerations } from './generation-store.js';
-import { publishedThread, absorbIntoPublished, rebaseFollowup } from './publication-thread.js';
-import { refreshPublishedSources } from '../publishing/updates.js';
+import { publishedStory, alreadyGenerated, saveGenerations, loadPreviousEvidence } from './generation-store.js';
+import { publishedThread, rebaseFollowup } from './publication-thread.js';
 import { generationClient } from './generation-model.js';
 import { evidenceDocument, modelResult, storyId, storyInput } from './generation.test-helpers.js';
 
@@ -16,15 +15,14 @@ const mocks = vi.hoisted(() => ({ input: vi.fn(), generate: vi.fn() }));
 vi.mock('./generation-store.js', () => ({
   publishedStory:vi.fn(async()=>null),
   loadStory: mocks.input, alreadyGenerated: vi.fn(), evidenceSnapshotHash: async () => 'evidence-signature',
-  saveGenerations: vi.fn(), loadCurrentEvidence:async()=>[],
+  saveGenerations: vi.fn(), loadCurrentEvidence:async()=>[], loadPreviousEvidence:vi.fn(async()=>[]),
 }));
 vi.mock('./generation-model.js', async original => ({
   ...await original<typeof import('./generation-model.js')>(), generationClient: vi.fn(), recordGenerationFailure: vi.fn(),
 }));
 vi.mock('../db.js', () => ({ db: { query: vi.fn().mockResolvedValue({ rows: [] }) } }));
 vi.mock('./publication-thread.js', () => ({ publishedThread: vi.fn(async () => []), rebaseFollowup: vi.fn(),
-  latestThreadStory: vi.fn(async (id: string) => id), absorbIntoPublished: vi.fn(async () => true) }));
-vi.mock('../publishing/updates.js', () => ({ refreshPublishedSources: vi.fn() }));
+}));
 vi.mock('./source-origins.js',()=>({classifySourceOrigins:async()=>[]}));
 vi.mock('./research.js', async original => ({
   ...await original<typeof import('./research.js')>(), researchEvidence: async () => [evidenceDocument()],
@@ -209,33 +207,52 @@ it('skips an already generated story without buying another review', async () =>
 
 const previous = { storyId:'previous',headline:'Предыдущий заголовок',details:'Старые сведения',
   destinationId:'-100123',messageId:'644',sources:[] };
-it('passes all posted copies and saves the combined earlier summary for a follow-up', async () => {
+it('writes a self-contained event summary from full current and ancestor sources, including repeated coverage', async () => {
   vi.mocked(publishedThread).mockResolvedValueOnce([previous, { ...previous, storyId:'second',details:'Продолжение' }]);
-  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, new_information:true, earlier_summary:'Сводка прежних сообщений' }))
-    .mockResolvedValueOnce(modelResult(passed));
+  const input = storyInput();
+  const original = 'Полный исходный текст о выпуске. '.repeat(500) + 'Старые условия лицензии.';
+  input.mentions.push({ ...input.mentions[0]!, id:'55555555-5555-4555-8555-555555555555', text: original });
+  input.supplementary_reports = [{ source_id:'22222222-2222-4222-8222-222222222222',
+    revision_id:'66666666-6666-4666-8666-666666666666', text:'Полный прежний отчёт с деталями.',
+    source_name:'Автор', original_url:'https://author.org/report', access:'public', published_at:null,collected_at:null }];
+  mocks.input.mockResolvedValueOnce(input);
+  const content = 'Полный прочитанный документ предшественника. '.repeat(500) + 'Старая цена 40 долларов.';
+  vi.mocked(loadPreviousEvidence).mockResolvedValueOnce([{ ...evidenceDocument(),
+    id:'77777777-7777-4777-8777-777777777777', url:'https://author.org/release', canonical_url:null,
+    role:'primary', relevance:'relevant', content }]);
+  const cumulative = { ...draft, summary:'Acme выпустила версию 2.0, цена 40 долларов. Исправлена ошибка безопасности.',
+    source_urls:['https://author.org/release','https://author.org/report'] };
+  mocks.generate.mockResolvedValueOnce(modelResult(cumulative)).mockResolvedValueOnce(modelResult(passed));
   expect(await researchStory(storyId,defaultSettings)).toBe('ready');
   const request=mocks.generate.mock.calls[0]?.[0];
-  expect(JSON.parse(request.prompt).previous_posts).toEqual([
+  const material=JSON.parse(request.prompt);
+  expect(material.previous_posts).toEqual([
     {headline:previous.headline,summary:previous.details}, {headline:previous.headline,summary:'Продолжение'},
   ]);
-  expect(request.systemPrompt).toContain('summary: только новые сведения');
-  expect(saveGenerations).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({ earlierSummary:'Сводка прежних сообщений' })], defaultSettings);
+  expect(material.mentions).toContainEqual(expect.objectContaining({text:original}));
+  expect(material.reports).toContainEqual(expect.objectContaining({text:'Полный прежний отчёт с деталями.'}));
+  expect(material.documents).toContainEqual(expect.objectContaining({content}));
+  expect(request.systemPrompt).toContain('пересказ ВСЕГО события');
+  expect(request.systemPrompt).not.toContain('только новые сведения');
+  expect(request.responseSchema.schema.required).toEqual(['headline','summary','source_urls']);
+  expect(saveGenerations).toHaveBeenCalledWith([input], [expect.objectContaining({
+    summary:cumulative.summary,sourceUrls:cumulative.source_urls,primarySourceUrls:['https://author.org/release'],
+  })], defaultSettings);
+  expect(vi.mocked(saveGenerations).mock.calls[0]?.[1]?.[0]).not.toHaveProperty('earlierSummary');
 });
-it('absorbs a follow-up with no new information and stages only a source edit', async () => {
-  vi.mocked(publishedThread).mockResolvedValueOnce([previous]);
-  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, new_information:false, earlier_summary:'Старые сведения' }));
-  expect(await researchStory(storyId,defaultSettings)).toBe('absorbed');
-  expect(absorbIntoPublished).toHaveBeenCalledWith(storyId, previous.storyId, expect.any(Array));
-  expect(refreshPublishedSources).toHaveBeenCalledWith(defaultSettings, [previous.storyId]);
+
+it('blocks private ancestor evidence before sending any text to the model', async () => {
+  vi.mocked(loadPreviousEvidence).mockResolvedValueOnce([{ ...evidenceDocument(), access:'restricted' }]);
+  await expect(researchStory(storyId,defaultSettings)).rejects.toMatchObject({metadata:{kind:'invalid_request'}});
+  expect(mocks.generate).not.toHaveBeenCalled();
   expect(saveGenerations).not.toHaveBeenCalled();
-  expect(mocks.generate).toHaveBeenCalledOnce();
 });
 
 it('regenerates a cached follow-up when a newer post rebases its thread', async () => {
   vi.mocked(rebaseFollowup).mockResolvedValueOnce(true);
   vi.mocked(alreadyGenerated).mockResolvedValue(true);
   vi.mocked(publishedThread).mockResolvedValueOnce([previous]);
-  mocks.generate.mockResolvedValueOnce(modelResult({...draft,new_information:true,earlier_summary:'Обновлённая предыстория'}))
+  mocks.generate.mockResolvedValueOnce(modelResult(draft))
     .mockResolvedValueOnce(modelResult(passed));
   await researchStory(storyId,defaultSettings);
   expect(mocks.generate).toHaveBeenCalledTimes(2);
@@ -256,7 +273,8 @@ it('passes still-image attachments to writing, review and corrective calls', asy
     .mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(passed));
   await researchStory(storyId, defaultSettings);
   expect(summaryImages).toHaveBeenCalledWith(storyId, defaultSettings);
-  expect(mocks.generate.mock.calls[0]?.[0].systemPrompt).toContain('summary не более 500 символов');
+  expect(mocks.generate.mock.calls[0]?.[0].systemPrompt).not.toContain('summary не более 500 символов');
+  expect(mocks.generate.mock.calls[0]?.[0].systemPrompt).not.toContain('лимит подписи');
   expect(mocks.generate).toHaveBeenCalledTimes(4);
   for (const [request] of mocks.generate.mock.calls) expect(request.images).toEqual(images);
 });

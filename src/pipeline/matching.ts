@@ -9,9 +9,7 @@ import { GROUPING_VERSION, groupReport } from './grouping-model.js';
 import { mergeStories } from './consolidation-store.js';
 import { historicalEventInput } from './historical-input.js';
 import { publishedStory, unpublished } from './generation-store.js';
-import { choice, Judgments } from './judgments.js';
-import { latestThreadStory, publishedThread, threadKnowledge } from './publication-thread.js';
-import { refreshPublishedSources } from '../publishing/updates.js';
+import { latestThreadStory } from './publication-thread.js';
 import { ProcessingYield } from './processing-slice.js';
 
 export interface Mention { id: string; revision_id: string; text: string; story_id: string | null }
@@ -133,22 +131,12 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
         const previous = matched ? posted.get(matched.id) : null;
         if (previous) {
           const latest = await latestThreadStory(previous.storyId);
-          const thread = await publishedThread(latest);
           const latestInput = await eventInput(latest);
           const target: Candidate | undefined = latestInput
             ? { id: latest, text: latestInput.text, previous_revision_id: null, input: latestInput } : matched;
-          const judgments = new Judgments(settings);
-          let verdict: 'different' | 'duplicate' | 'followup';
-          try {
-            verdict = z.enum(['different','duplicate','followup']).parse(choice(await judgments.judge('published_update', {
-              previousPost:{headline:thread.at(-1)?.headline ?? previous.headline,summary:threadKnowledge(thread)},newEvent:incoming.text,
-            },context)));
-          } finally { await judgments.close(); }
-          const attached = await attach(mention,incoming,vector,verdict === 'different' ? undefined : target,
-            verdict === 'duplicate' ? 'same' : 'update',vectors,context,
-            verdict === 'followup' ? latest : undefined,true);
-          if (verdict === 'duplicate') await refreshPublishedSources(settings, [attached]);
-          return attached;
+          // Grouping already established event identity. Every published match gets a new post,
+          // including repeated coverage, without mutating the old story or its sources.
+          return attach(mention, incoming, vector, target, relation, vectors, context, latest, true);
         }
         for (const match of selected.slice(1)) {
           if (!matched) break;
@@ -206,6 +194,8 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
       [storyId, hash([matched?.text, mention.text]), mention.text]);
       // Preserve evidence associations; research freshness checks reassess them for the new input.
     }
+    if (previousStoryId) await client.query(`INSERT INTO story_publication_threads(story_id,previous_story_id)
+      VALUES($1,$2) ON CONFLICT(story_id) DO UPDATE SET previous_story_id=EXCLUDED.previous_story_id`, [storyId, previousStoryId]);
     await client.query('UPDATE story_mentions SET story_id=$2,metadata=metadata || $3::jsonb WHERE id=$1',
       [mention.id, storyId, JSON.stringify({ relation, batchId: context.batchId, ...(previousStoryId ? { previous_story_id:previousStoryId } : {}) })]);
     await client.query(`UPDATE stories SET status='processing',interest_stale=true,updated_at=now()

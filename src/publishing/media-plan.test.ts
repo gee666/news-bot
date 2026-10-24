@@ -113,18 +113,18 @@ describe('original-format plan partitioning', () => {
 });
 
 
-describe('single album selection', () => {
-  it.each([0, 1, 10, 11])('bounds %i candidates to one album of at most ten original items', count => {
+describe('whole legacy album compatibility', () => {
+  it.each([0, 1, 10, 11])('accepts all %i candidates only when the whole legacy plan fits', count => {
     const items = Array.from({ length: count }, (_, index) => ({ type: 'image' as const, mimeType: 'image/png', data: Buffer.from(String(index)) }));
     const selected = selectAlbumMedia(items);
-    expect(selected).toEqual(items.slice(0, 10));
+    expect(selected).toEqual(count > 10 ? [] : items);
     selected.forEach((item, index) => expect(item.data).toBe(items[index]?.data));
   });
-  it('prioritizes native JPEG/PNG/MP4, omitting incompatible documents and excess items', () => {
+  it('refuses a mixed native/document album rather than dropping documents', () => {
     const items = ['image/webp', 'image/jpeg', 'video/webm', 'image/png', 'video/mp4'].map((mimeType, index) => ({
       type: mimeType.startsWith('video') ? 'video' as const : 'image' as const, mimeType, data: Buffer.from(String(index)),
     }));
-    expect(selectAlbumMedia(items)).toEqual([items[1], items[3], items[4]]);
+    expect(selectAlbumMedia(items)).toEqual([]);
     expect(selectAlbumMedia([items[0]!, items[2]!])).toEqual([items[0], items[2]]);
   });
 });

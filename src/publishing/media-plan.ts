@@ -43,17 +43,16 @@ export function partitionMedia<T extends PublicationMedia>(media: T[]): T[][] {
   return batches;
 }
 
-/** Prefer one native photo/video group. Other formats stay unmodified as documents. */
+/** Legacy caption-first plans must fit whole. Otherwise use complete text/reply delivery. */
 export function selectAlbumMedia<T extends PublicationMedia>(media: T[]): T[] {
-  const native = media.filter(item => mediaUploadType(item) !== 'document');
-  return (native.length ? native : media).slice(0, MAX_ALBUM_MEDIA);
+  return media.length <= MAX_ALBUM_MEDIA && partitionMedia(media).length <= 1 ? media : [];
 }
 
 /** Download and commit the entire upload plan before the canonical Telegram request. */
 export async function preparePublicationMedia(publication: Publication, settings: AppSettings, captionFirst = false): Promise<boolean> {
   if (!publication.story_id) return false;
   // Once a send was authorized, its byte selection never changes, including after a 429.
-  const attempted = captionFirst && (await db.query(`SELECT 1 FROM request_attempts
+  const attempted = (await db.query(`SELECT 1 FROM request_attempts
     WHERE publication_id=$1 AND operation='send' LIMIT 1`, [publication.id])).rows.length > 0;
   if (publication.media_snapshot_id === publication.snapshot_id || attempted) {
     if (publication.media_status === 'failed' || publication.media_status === 'unknown') {
@@ -62,7 +61,8 @@ export async function preparePublicationMedia(publication: Publication, settings
     return Boolean(publication.media_snapshot_id) && publication.media_status !== 'none';
   }
   const downloaded = deduplicateMedia(await publicationMedia(publication.story_id, settings));
-  const media = captionFirst ? selectAlbumMedia(downloaded) : downloaded;
+  const album = captionFirst && downloaded.length > 0 && selectAlbumMedia(downloaded).length === downloaded.length;
+  const media = downloaded;
   if (!media.length && !publication.media_snapshot_id) return false;
   await transaction(async client => {
     const current = (await client.query<Publication>('SELECT * FROM publications WHERE id=$1 FOR UPDATE', [publication.id])).rows[0];
@@ -75,7 +75,7 @@ export async function preparePublicationMedia(publication: Publication, settings
       FROM publication_media_items i JOIN publication_media_batches b ON b.id=i.batch_id WHERE b.publication_id=$1`, [publication.id])).rows;
     const deadlines = new Map(previous.map(item => [item.digest, item.expires_at.getTime()]));
     await client.query('DELETE FROM publication_media_batches WHERE publication_id=$1', [publication.id]);
-    for (const [batchNumber, batch] of (captionFirst && media.length ? [media] : partitionMedia(media)).entries()) {
+    for (const [batchNumber, batch] of (album ? [media] : partitionMedia(media)).entries()) {
       const batchId = randomUUID();
       await client.query('INSERT INTO publication_media_batches(id,publication_id,batch_number) VALUES($1,$2,$3)',
         [batchId, publication.id, batchNumber]);
@@ -88,7 +88,7 @@ export async function preparePublicationMedia(publication: Publication, settings
       }
     }
     await client.query(`UPDATE publications SET media_snapshot_id=$2,media_status=$3,delivery_kind=$4,updated_at=now() WHERE id=$1`,
-      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none', captionFirst && media.length ? 'album' : 'text']);
+      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none', album ? 'album' : 'text']);
   });
   return media.length > 0;
 }

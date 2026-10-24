@@ -24,7 +24,7 @@ function client(options: { receipt?: object; primary?: string[]; referenced?: st
     if (sql.includes('jsonb_array_elements_text')) return { rows: (options.primary ?? []).map(url => ({ url })) };
     if (sql.includes('SELECT DISTINCT l.url')) return { rows: (options.referenced ?? []).map(url => ({ url })) };
     if (sql.includes("key='telegram_destination'")) return { rows: [{ id: '-100123' }] };
-    if (sql.includes('WITH RECURSIVE thread')) return { rows: (options.posts ?? []).map(post => ({ ...post, destination_id: '-100123' })) };
+    if (sql.includes('publication_thread_edges')) return { rows: (options.posts ?? []).map(post => ({ ...post, destination_id: '-100123' })) };
     return { rows: [] };
   });
   return { query };
@@ -42,7 +42,7 @@ describe('generation source selection', () => {
     expect(snapshot.sources.find(source => source.url === reportUrl)?.primary).toBe(true);
     expect(snapshot.sources.find(source => source.url === xorUrl)?.primary).toBe(false);
   });
-  it('includes every earlier post oldest first, inherits its sources but not its previous-publication links', async () => {
+  it('includes every earlier post oldest first, inherits every source and retained previous-publication link', async () => {
     const primary = source('https://author.org/first', true); const secondary = source('https://press.org/second');
     const oldLink: PublicationSource = { ...source('https://t.me/c/123/0'), previousPublication: true };
     const db = client({ receipt: { earlierSummary: 'Сводка всех прежних сообщений' },
@@ -50,12 +50,13 @@ describe('generation source selection', () => {
     const snapshot = await snapshotFor(db, story);
     expect(snapshot.earlier).toBe('Сводка всех прежних сообщений');
     expect(snapshot.sources.filter(source => source.previousPublication)).toEqual([
+      oldLink,
       { ...source('https://t.me/c/123/1'), label: 'Новость 1', previousPublication: true },
       { ...source('https://t.me/c/123/2'), label: 'Новость 2', previousPublication: true },
     ]);
     expect(snapshot.sources).toContainEqual(primary); expect(snapshot.sources).toContainEqual(secondary);
-    expect(snapshot.sources.some(source => source.url === oldLink.url)).toBe(false);
-    const call = db.query.mock.calls.find(([sql]) => sql.includes('WITH RECURSIVE thread'));
+    expect(snapshot.sources.some(source => source.url === oldLink.url)).toBe(true);
+    const call = db.query.mock.calls.find(([sql]) => sql.includes('publication_thread_edges'));
     expect(call?.[0]).toContain('p.destination_id=$2');
     expect(render(snapshot).text).toContain('Предыдущие публикации');
     expect(render(await snapshotFor(client(), story)).text).not.toContain('Предыдущие публикации');
@@ -65,11 +66,11 @@ describe('generation source selection', () => {
     const snapshot=await snapshotFor(client({posts:[post('1',[{...source(reportUrl),kind:'journalism'}])]}),story);
     expect(snapshot.sources.find(source=>source.url===reportUrl)).toMatchObject({primary:true,kind:'primary'});
   });
-  it('limits sources to 90, discarding inherited secondary sources before own and primary links', async () => {
+  it('keeps all sources beyond ninety, including inherited secondary sources', async () => {
     const inherited = Array.from({ length: 100 }, (_, i) => source(`https://press.org/${i}`));
     const primary = source('https://author.org/first', true);
     const snapshot = await snapshotFor(client({ posts: [post('1', [...inherited, primary])] }), story);
-    expect(snapshot.sources).toHaveLength(90);
+    expect(snapshot.sources).toHaveLength(105);
     expect(snapshot.sources).toContainEqual(primary);
     expect(snapshot.sources.some(source => source.url === xorUrl)).toBe(true);
     expect(snapshot.sources.at(-1)?.previousPublication).toBe(true);

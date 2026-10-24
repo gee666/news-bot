@@ -75,32 +75,46 @@ describe.skipIf(!url)('scoped manual publication with PostgreSQL', () => {
     expect(await invoke(runId, ids)).toMatchObject({ published: 1, waiting: false });
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
   });
-  it('updates only affected existing posts and counts edits separately from the new-post limit', async () => {
+  it('leaves existing posts unchanged instead of automatically staging source repairs', async () => {
     const unrelated = await story('Unrelated current'); const unrelatedPublication = await published(unrelated);
     const affected = await story('Affected current'); await published(affected);
     const next = await story('New story'); const createdAt = new Date(Date.now() - 1000).toISOString();
     const result = await invoke(randomUUID(), [affected, next], 1, createdAt);
-    expect(result).toMatchObject({ published: 1, updated: 1, waiting: false });
-    expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ published: 1, updated: 0, waiting: false });
+    expect(BotApi.prototype.edit).not.toHaveBeenCalled();
     expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE id=$1', [unrelatedPublication])).rows[0]?.pending_snapshot_id).toBeNull();
   });
   it('retains cumulative counts when publishing pauses and attributes only pinned edit snapshots', async () => {
     const affected = await story('Existing affected'); await published(affected);
     const next = await story('New story'); const runId = randomUUID(); const createdAt = new Date(Date.now() - 1000).toISOString();
-    expect(await invoke(runId, [affected, next], 1, createdAt)).toMatchObject({ published: 1, updated: 1 });
+    expect(await invoke(runId, [affected, next], 1, createdAt)).toMatchObject({ published: 1, updated: 0 });
     const selection = (await database.db.query('SELECT value FROM operational_state WHERE key=$1', [`run_now_publications:${runId}`])).rows[0]?.value;
-    expect(selection.editTargets).toHaveLength(1);
-    // A later normal edit of the new post must not become a manual existing-post update.
+    expect(selection.editTargets ?? []).toHaveLength(0);
+    // A later explicit repair must not count as an update selected by this run.
     const evidence=await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
       VALUES('https://new.example/report','New source','New report details','public',now()+interval '1 day') RETURNING id`);
     await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at) VALUES($1,$2,'supporting','relevant',now())",[next,evidence]);
     await acceptFixtureStories(settings);
-    const updates = await import('./updates.js'); await updates.prepareUpdates(settings, destination, [next]);
-    await updates.retryEdits(new BotApi(), settings, destination, [next]);
+    const updates = await import('./updates.js'); await updates.prepareUpdates(settings, destination, [affected], { sourceRepair: true });
+    await updates.retryEdits(new BotApi(), settings, destination, [affected]);
     await (await import('../settings.js')).saveSettings({ publishingEnabled: false });
     expect(await invoke(runId, [affected, next], 1, createdAt))
-      .toMatchObject({ published: 1, updated: 1, waiting: false, reasons: { publishing_disabled: 1 } });
-    expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledTimes(2);
+      .toMatchObject({ published: 1, updated: 0, waiting: false, reasons: { publishing_disabled: 1 } });
+    expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
+  });
+  it('counts a manual publication only after its continuation text is completely delivered', async () => {
+    const id = await story('Long cumulative edition');
+    await database.db.query('UPDATE stories SET summary=$2 WHERE id=$1',[id,'Полные факты 😀 '.repeat(1000)]);
+    await acceptFixtureStories(settings,[id]);
+    const runId = randomUUID();
+    const send = vi.mocked(BotApi.prototype.send).mockResolvedValueOnce('42')
+      .mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',120_000));
+    expect(await invoke(runId,[id])).toMatchObject({ published: 0, waiting: true });
+    await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
+    await database.db.query("UPDATE publication_text_parts SET next_retry_at=now()-interval '1 second'");
+    send.mockImplementation(async () => String(100+send.mock.calls.length));
+    expect(await invoke(runId,[id])).toMatchObject({ published: 1, waiting: false });
+    expect(send.mock.calls.filter(call => call[2] === undefined)).toHaveLength(1);
   });
   it('does not resend an unknown send after restart and respects its durable cooldown', async () => {
     const id = await story('Uncertain event'); const runId = randomUUID();
@@ -125,13 +139,14 @@ describe.skipIf(!url)('scoped manual publication with PostgreSQL', () => {
   });
   it('reports failed edits rather than successful completion', async () => {
     const id = await story('Corrected story'); await published(id);
+    await (await import('./updates.js')).prepareUpdates(settings,destination,[id],{ sourceRepair: true });
     vi.mocked(BotApi.prototype.edit).mockRejectedValue(new BotError('telegram_edit_rejected', 'failed'));
     const result = await invoke(randomUUID(), [id]);
     expect(result).toMatchObject({ published: 0, updated: 0, waiting: false, reasons: { edit_telegram_edit_rejected: 1 } });
   });
   it('recovers interrupted scoped edits as unknown without blindly resubmitting them', async () => {
     const id = await story('Corrected story'); const publication = await published(id);
-    const updates = await import('./updates.js'); await updates.prepareUpdates(settings, destination, [id]);
+    const updates = await import('./updates.js'); await updates.prepareUpdates(settings, destination, [id], { sourceRepair: true });
     const pending = (await database.db.query<{ pending_snapshot_id: string }>('SELECT pending_snapshot_id FROM publications WHERE id=$1', [publication])).rows[0];
     await database.db.query(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status,response_metadata)
       VALUES($1,'telegram-bot','edit',1,'running',$2)`, [publication, JSON.stringify({ snapshotId: pending?.pending_snapshot_id, fingerprint: 'a'.repeat(64) })]);

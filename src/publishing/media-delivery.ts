@@ -24,6 +24,7 @@ async function finishMedia(publication: Publication): Promise<boolean> {
 /** Only explicit Telegram rejections may be retried. Unknown batches require manual review. */
 export async function deliverPublicationMedia(publication: Publication, api: BotApi, settings: AppSettings): Promise<boolean> {
   if (publication.delivery_kind === 'album' || !publication.message_id || publication.status !== 'published') return false;
+  if ((await db.query(`SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND status<>'sent' LIMIT 1`, [publication.id])).rows.length) return false;
   const botId = String((await api.identity()).id);
   if (publication.bot_id !== botId) return false;
   const batches = (await db.query<Batch>(`SELECT * FROM publication_media_batches WHERE publication_id=$1 ORDER BY batch_number`,
@@ -118,11 +119,21 @@ export async function deletePublicationMedia(publication: Publication, api: BotA
 /** Delete siblings before the caption, retaining per-item progress for authorized retries. */
 export async function deletePublicationMessages(publication: Publication, api: BotApi): Promise<void> {
   if (!publication.message_id) throw new BotError('publication_message_missing', 'failed');
+  const unknownText = await db.query(`SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND status IN ('running','unknown') LIMIT 1`, [publication.id]);
+  if (unknownText.rows.length) throw new BotError('publication_text_requires_review','failed');
+  const parts = (await db.query<{ part_number: number; message_id: string }>(`SELECT part_number,message_id FROM publication_text_parts
+    WHERE publication_id=$1 AND part_number>0 AND message_id IS NOT NULL AND deleted_at IS NULL ORDER BY part_number`, [publication.id])).rows;
+  for (const part of parts) {
+    await api.delete(publication.destination_id,part.message_id);
+    await db.query('UPDATE publication_text_parts SET deleted_at=now() WHERE publication_id=$1 AND part_number=$2', [publication.id,part.part_number]);
+  }
   await deletePublicationMedia(publication, api);
   const deleted = (await db.query(`SELECT 1 FROM publication_media_items i JOIN publication_media_batches b ON b.id=i.batch_id
-    WHERE b.publication_id=$1 AND i.message_id=$2 AND i.deleted_at IS NOT NULL`, [publication.id, publication.message_id])).rows.length > 0;
+    WHERE b.publication_id=$1 AND i.message_id=$2 AND i.deleted_at IS NOT NULL
+      UNION ALL SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND part_number=0 AND message_id=$2 AND deleted_at IS NOT NULL`, [publication.id, publication.message_id])).rows.length > 0;
   if (deleted) return;
   await api.delete(publication.destination_id, publication.message_id);
+  await db.query('UPDATE publication_text_parts SET deleted_at=now() WHERE publication_id=$1 AND part_number=0', [publication.id]);
   await db.query(`UPDATE publication_media_items i SET deleted_at=now(),data=NULL FROM publication_media_batches b
     WHERE b.id=i.batch_id AND b.publication_id=$1 AND i.message_id=$2`, [publication.id, publication.message_id]);
 }

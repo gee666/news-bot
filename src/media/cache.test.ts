@@ -44,3 +44,13 @@ it('rejects path traversal identifiers', async () => {
   const cache = await setup();
   await expect(cache.release('../outside')).rejects.toThrow();
 });
+
+
+it('keeps provisional attachments without treating unresolved comparisons as a final selection or extending TTL', async () => {
+  const cache = await setup(); const id = randomUUID();
+  await cache.save(id, 'unresolved:selection', [candidate], 100);
+  expect(await cache.load(id, 'selection', 200)).toBeNull();
+  const expiresAt = await cache.save(id, 'selection', [candidate], 300);
+  expect(expiresAt).toBe(100 + MEDIA_TTL_MS);
+  expect(await cache.load(id, 'selection', 400)).toEqual([expect.objectContaining(candidate)]);
+});

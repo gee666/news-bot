@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
-import { defaultSettings } from '../settings.js';
+import { defaultSettings, type AppSettings } from '../settings.js';
 const mocks = vi.hoisted(() => ({ query: vi.fn(), load: vi.fn(), save: vi.fn(), release: vi.fn(),
-  download: vi.fn(), dedup: vi.fn(), normalize: vi.fn(), privacy: vi.fn() }));
+  download: vi.fn(), dedup: vi.fn(), normalize: vi.fn(), privacy: vi.fn(), judge: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('./cache.js', () => ({ MEDIA_TTL_MS: 604800000, MediaCache: class { load = mocks.load; save = mocks.save; release = mocks.release; } }));
 vi.mock('./download.js', async original => ({ ...await original<typeof import('./download.js')>(), downloadMedia: mocks.download }));
 vi.mock('./comparison.js', () => ({ deduplicateMedia: mocks.dedup, compressModelImage: mocks.normalize }));
-vi.mock('./judgment.js', () => ({ judgeMedia: vi.fn() }));
+vi.mock('./judgment.js', () => ({ judgeMedia: mocks.judge,
+  mediaJudgmentVersion: (settings: AppSettings) => JSON.stringify(settings) }));
 vi.mock('../pipeline/generation-model.js', () => ({ requireInferenceApproval: mocks.privacy }));
 import { publicationMedia, summaryImages, releaseStoryMedia } from './story-media.js';
 
@@ -20,6 +21,7 @@ beforeEach(() => {
     { type: 'video', url: 'https://example.org/a.mp4' },
   ] }, source_metadata: {}, access: 'public' }] });
   mocks.load.mockResolvedValue(null);
+  mocks.judge.mockResolvedValue('different');
   mocks.save.mockResolvedValue(Date.now() + 604800000);
   mocks.download.mockResolvedValueOnce(image).mockResolvedValueOnce(video);
   mocks.dedup.mockImplementation(async items => items);
@@ -64,4 +66,40 @@ it('does not download or send private media without approval', async () => {
   mocks.privacy.mockRejectedValue(new Error('private inference forbidden'));
   await expect(publicationMedia(randomUUID(), defaultSettings)).rejects.toThrow('private inference forbidden');
   expect(mocks.download).not.toHaveBeenCalled();
+});
+
+
+it.each(['unresolved', 'same', 'different'])('only saves a final selection after resolved %s comparisons', async decision => {
+  const id = randomUUID();
+  mocks.judge.mockResolvedValue(decision);
+  mocks.dedup.mockImplementation(async (items, compare) => {
+    await compare(image.data, image.data);
+    return items;
+  });
+  expect(await publicationMedia(id, defaultSettings)).toHaveLength(2);
+  if (decision === 'unresolved') {
+    expect(mocks.save.mock.calls[0]?.[1]).toBe(`unresolved:${mocks.load.mock.calls[0]?.[1]}`);
+    // A second call must retry, not freeze the outage as a final selection.
+    mocks.download.mockResolvedValue(image);
+    await publicationMedia(id, defaultSettings);
+    expect(mocks.judge).toHaveBeenCalledTimes(2);
+  } else expect(mocks.save).toHaveBeenCalledTimes(1);
+});
+
+it('invalidates final selections when model identity changes', async () => {
+  const id = randomUUID();
+  await publicationMedia(id, defaultSettings);
+  const first = mocks.load.mock.calls[0]?.[1];
+  mocks.download.mockResolvedValue(image);
+  await publicationMedia(id, { ...defaultSettings, piProvider: 'openai', piModel: 'new-vision-model' });
+  expect(mocks.load.mock.calls[1]?.[1]).not.toBe(first);
+});
+
+it('keeps all attachments above the old 100-item processing cap', async () => {
+  mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media:
+    Array.from({ length: 103 }, (_, i) => ({ type: 'image', url: `https://example.org/${i}.jpg` })),
+  }, source_metadata: {}, access: 'public' }] });
+  mocks.download.mockReset().mockResolvedValue(image);
+  expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(103);
+  expect(mocks.download).toHaveBeenCalledTimes(103);
 });

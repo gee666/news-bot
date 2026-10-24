@@ -97,11 +97,25 @@ export function createMediaRunner(options: MediaCodecOptions): MediaCommandRunne
 export async function decodeImage(data: Buffer, run: MediaCommandRunner): Promise<Buffer> {
   const output = await run('ffmpeg', [
     '-v', 'error', '-threads', '1', '-filter_threads', '1', '-i', 'pipe:0', '-map', '0:v:0', '-frames:v', '1',
-    '-vf', modelImageScale, '-pix_fmt', 'rgba',
+    '-vf', modelImageScale, '-map_metadata', '-1', '-pix_fmt', 'rgba',
     '-f', 'image2pipe', '-c:v', 'png', '-threads', '1', 'pipe:1',
   ], data);
   if (!output.length) throw new Error('Media decoder produced no image');
   return output;
+}
+
+/** Canonical full-resolution RGBA frame hash, including dimensions. Never resize or use grayscale. */
+export async function fullImagePixelHash(data: Buffer, run: MediaCommandRunner): Promise<string | null> {
+  const output = (await run('ffmpeg', [
+    '-v', 'error', '-threads', '1', '-filter_threads', '1', '-i', 'pipe:0', '-map', '0:v:0', '-frames:v', '2',
+    '-vf', 'format=rgba', '-pix_fmt', 'rgba', '-c:v', 'rawvideo', '-threads', '1', '-f', 'framehash', '-hash', 'sha256', 'pipe:1',
+  ], data)).toString();
+  const dimensions = /^#dimensions 0: (\d+x\d+)$/mu.exec(output)?.[1];
+  const hashes = [...output.matchAll(/^0,\s*[^,]+,\s*[^,]+,\s*[^,]+,\s*\d+,\s*([a-f0-9]{64})$/gmu)];
+  const hash = hashes[0]?.[1];
+  if (!dimensions || !hash) throw new Error('Invalid full image pixel hash');
+  if (hashes.length !== 1) return null; // Animated inputs need a visual judgment, not first-frame equality.
+  return `${dimensions}:${hash}`;
 }
 
 /** Decode the first image to PNG, fitting inside 2560 x 2560 without upscaling. */
@@ -213,7 +227,7 @@ export function extractVideoFrame(data: Buffer, time: number, run: MediaCommandR
   return runVideo(run, 'ffmpeg', data, (input) => [
     '-v', 'error', '-threads', '1', '-filter_threads', '1', '-i', input,
     '-ss', String(time), '-map', '0:v:0', '-frames:v', '1',
-    '-vf', modelImageScale, '-pix_fmt', 'rgba',
+    '-vf', modelImageScale, '-map_metadata', '-1', '-pix_fmt', 'rgba',
     '-f', 'image2pipe', '-c:v', 'png', '-threads', '1', 'pipe:1',
   ]);
 }

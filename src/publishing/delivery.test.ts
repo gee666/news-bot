@@ -138,7 +138,7 @@ describe('durable publication delivery', () => {
     expect(failure?.[1]?.[2].getTime()).toBeGreaterThanOrEqual(before+120_000);
   });
 
-  it('trims oversized details for Telegram without dropping sources', async () => {
+  it('freezes oversized details and sources as complete continuation parts', async () => {
     const api = new BotApi('123:synthetic');
     const send = vi.spyOn(api,'send').mockResolvedValue('9');
     const broken = { ...publication, content: { headline: 'Новость', score: 3, details: 'Текст'.repeat(1500), detailsKind: 'excerpt', sources: [{ label: 'Источник',
@@ -146,7 +146,9 @@ describe('durable publication delivery', () => {
     expect(await sendPrepared(broken,api,defaultSettings)).toBe('9');
     expect(send).toHaveBeenCalledOnce();
     expect(send.mock.calls[0]?.[1].plainText.length).toBeLessThanOrEqual(4096);
-    expect(send.mock.calls[0]?.[1].text).toContain('https://example.org/');
+    const parts = mocks.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO publication_text_parts'));
+    expect(parts.length).toBeGreaterThan(1);
+    expect(parts.some(([,args]) => String(args[3]).includes('https://example.org/'))).toBe(true);
   });
 
   it('persists terminal render failures without dispatching an edit', async () => {
@@ -170,7 +172,7 @@ describe('durable publication delivery', () => {
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes('edit_superseded')) events.push('supersede');
       if (sql.includes('INSERT INTO request_attempts')) events.push('insert');
-      return { rows: [{ id: 'attempt' }] };
+      return { rows: sql.includes('publication_text_parts') ? [] : [{ id: 'attempt' }] };
     });
     const api = new BotApi('123:synthetic');
     vi.spyOn(api,'edit').mockImplementation(async () => { events.push('dispatch'); });

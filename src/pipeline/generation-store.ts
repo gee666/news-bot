@@ -7,6 +7,7 @@ import type { AppSettings } from '../settings.js';
 import type { ResearchPage } from './research-page.js';
 import { publicationSnapshotSchema, generationReviewSchema, type GenerationReview } from '../types.js';
 import { jevTemplates } from '../models/templates.js';
+import { generationThread } from './generation-context.js';
 
 const accessSchema = z.enum(['public', 'restricted', 'unknown']);
 const storySchema = z.object({
@@ -14,7 +15,7 @@ const storySchema = z.object({
   headline: z.string().nullable(), summary: z.string().nullable(), researched: z.boolean(),
   translated_excerpt: z.string().nullable(), content_version: z.number().int(), meaningful_hash: z.string().nullable(),
 });
-export const GENERATION_VERSION = 'generation-v12-media';
+export const GENERATION_VERSION = 'generation-v13-cumulative';
 const timestampSchema = z.union([z.date().transform(value => value.toISOString()), z.iso.datetime({ offset: true })]);
 const mentionSchema = z.object({ id: z.uuid(), text: z.string(), access: accessSchema, original_url: z.string().nullable(),
   media: z.array(z.unknown()).nullish(),
@@ -59,28 +60,29 @@ export async function loadStoryWithQuery(id: string, query: typeof db.query): Pr
   z.uuid().parse(id);
   const stories = await query('SELECT id, chosen_excerpt, interest_score, headline, summary, researched, translated_excerpt, content_version, meaningful_hash FROM stories WHERE id = $1', [id]);
   const story = storySchema.parse(stories.rows[0]);
-  const mentions = await query(`SELECT m.id, m.text, s.access, s.name AS source_name, s.connector_type, i.original_url, i.published_at, i.collected_at,
+  const mentions = await query(`${generationThread} SELECT m.id, m.text, s.access, s.name AS source_name, s.connector_type, i.original_url, i.published_at, i.collected_at,
     m.metadata, r.metadata->'media' AS media, r.original_text AS parent_text FROM story_mentions m
-    JOIN item_revisions r ON r.id = m.revision_id JOIN source_items i ON i.current_revision_id = r.id
-    JOIN sources s ON s.id = i.source_id WHERE m.story_id = $1 ORDER BY m.created_at, m.id`, [id]);
-  const links = await query(`SELECT DISTINCT l.url, ml.classification, so.access, i.original_url, so.name AS source_name FROM story_mentions m
-    JOIN item_revisions r ON r.id = m.revision_id JOIN source_items i ON i.current_revision_id = r.id
+    JOIN item_revisions r ON r.id = m.revision_id JOIN source_items i ON i.id = r.item_id AND (m.story_id<>$1 OR i.current_revision_id = r.id)
+    JOIN sources s ON s.id = i.source_id WHERE m.story_id IN(SELECT id FROM generation_story_ids) ORDER BY m.created_at, m.id`, [id]);
+  const links = await query(`${generationThread} SELECT DISTINCT l.url, ml.classification, so.access, i.original_url, so.name AS source_name FROM story_mentions m
+    JOIN item_revisions r ON r.id = m.revision_id JOIN source_items i ON i.id = r.item_id AND (m.story_id<>$1 OR i.current_revision_id = r.id)
     JOIN sources so ON so.id=i.source_id
     JOIN mention_links ml ON ml.mention_id = m.id JOIN item_links l ON l.id = ml.link_id
-    WHERE m.story_id = $1 AND ml.classification <> 'irrelevant' AND ${evidenceLinkSql}
+    WHERE m.story_id IN(SELECT id FROM generation_story_ids) AND ml.classification <> 'irrelevant' AND ${evidenceLinkSql}
     UNION
     SELECT l.url, sl.classification, so.access, i.original_url, so.name AS source_name
     FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-    JOIN source_items i ON i.current_revision_id=l.revision_id JOIN sources so ON so.id=i.source_id
-    WHERE sl.story_id=$1 AND sl.classification='relevant' AND ${evidenceLinkSql}
+    JOIN item_revisions r ON r.id=l.revision_id
+    JOIN source_items i ON i.id=r.item_id AND (sl.story_id<>$1 OR i.current_revision_id=r.id) JOIN sources so ON so.id=i.source_id
+    WHERE sl.story_id IN(SELECT id FROM generation_story_ids) AND sl.classification='relevant' AND ${evidenceLinkSql}
     ORDER BY classification, url`, [id]);
-  const reports = await query(`SELECT DISTINCT so.id AS source_id, r.id AS revision_id,
+  const reports = await query(`${generationThread} SELECT DISTINCT so.id AS source_id, r.id AS revision_id,
       r.metadata->'media' AS media, r.original_text AS text, so.name AS source_name, i.original_url, so.access, i.published_at, i.collected_at
     FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
     JOIN item_revisions r ON r.id=l.revision_id
-    JOIN source_items i ON i.current_revision_id=r.id JOIN sources so ON so.id=i.source_id
-    WHERE sl.story_id=$1 AND sl.classification='relevant' AND ${evidenceLinkSql}
-      AND NOT EXISTS (SELECT 1 FROM story_mentions m WHERE m.story_id=$1 AND m.revision_id=r.id)
+    JOIN source_items i ON i.id=r.item_id AND (sl.story_id<>$1 OR i.current_revision_id=r.id) JOIN sources so ON so.id=i.source_id
+    WHERE sl.story_id IN(SELECT id FROM generation_story_ids) AND sl.classification='relevant' AND ${evidenceLinkSql}
+      AND NOT EXISTS (SELECT 1 FROM story_mentions m WHERE m.story_id IN(SELECT id FROM generation_story_ids) AND m.revision_id=r.id)
       AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS (SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
     ORDER BY i.published_at DESC NULLS LAST, i.collected_at DESC NULLS LAST, r.id`, [id]);
@@ -140,9 +142,9 @@ export async function alreadyGenerated(input: StoryInput, settings: AppSettings,
 
 /** Read-only snapshot detects changed content, authority, timestamps, access and expiry. */
 export async function evidenceSnapshotHash(storyId: string, query = db.query.bind(db)): Promise<string> {
-  const result = await query(`SELECT e.id,e.url,e.canonical_url,e.title,e.content,e.access,e.metadata,
+  const result = await query(`${generationThread} SELECT DISTINCT e.id,e.url,e.canonical_url,e.title,e.content,e.access,e.metadata,
     se.role,se.assessment,e.expires_at>now() AS unexpired,se.relevance FROM story_evidence se
-    JOIN evidence_documents e ON e.id=se.evidence_id WHERE se.story_id=$1 AND se.superseded_at IS NULL ORDER BY e.id`, [storyId]);
+    JOIN evidence_documents e ON e.id=se.evidence_id WHERE se.story_id IN(SELECT id FROM generation_story_ids) AND se.superseded_at IS NULL ORDER BY e.id`, [storyId]);
   const rows = result.rows.flatMap((row: unknown) => {
     const parsed = evidenceSchema.safeParse(row);
     // Failed reads never enter the writer's sources; their short retry TTL cannot invalidate a draft.
@@ -161,8 +163,6 @@ export interface GeneratedStory {
   review?: GenerationReview;
   sourceUrls?: string[];
   primarySourceUrls?: string[];
-  /** Follow-ups only: combined summary of the thread's earlier posts. */
-  earlierSummary?: string;
 }
 
 export async function saveGenerations(inputs: StoryInput[], values: GeneratedStory[], settings: AppSettings): Promise<void> {
@@ -232,6 +232,17 @@ export async function loadCurrentEvidence(storyId:string):Promise<Evidence[]> {
     e.metadata,e.metadata->>'publishedAt' AS published_at,e.metadata->>'updatedAt' AS updated_at,e.fetched_at
     FROM story_evidence se JOIN evidence_documents e ON e.id=se.evidence_id
     WHERE se.story_id=$1 AND se.superseded_at IS NULL AND e.expires_at>now() ORDER BY e.fetched_at DESC`,[storyId]);
+  return parseEvidenceRows(result.rows);
+}
+
+/** Retained ancestor reads remain event evidence even after their fetch-cache TTL expires. */
+export async function loadPreviousEvidence(storyId: string): Promise<Evidence[]> {
+  const result = await db.query(`${generationThread} SELECT DISTINCT e.id,e.url,e.canonical_url,e.title,e.content,e.access,
+    se.role,se.relevance,se.assessment,se.assessed_at,e.metadata,
+    e.metadata->>'publishedAt' AS published_at,e.metadata->>'updatedAt' AS updated_at,e.fetched_at
+    FROM story_evidence se JOIN evidence_documents e ON e.id=se.evidence_id
+    WHERE se.story_id IN(SELECT id FROM generation_story_ids WHERE id<>$1) AND se.superseded_at IS NULL
+    ORDER BY e.fetched_at DESC,e.id`, [storyId]);
   return parseEvidenceRows(result.rows);
 }
 

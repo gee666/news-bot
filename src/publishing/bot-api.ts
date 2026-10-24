@@ -79,9 +79,10 @@ export class BotApi {
     catch (error) { if (error instanceof BotError) throw error; throw new BotError('telegram_identity_invalid', 'failed'); }
   }
 
-  async send(destinationId: string, message: RenderedMessage): Promise<string> {
+  async send(destinationId: string, message: RenderedMessage, replyTo?: string): Promise<string> {
     const { text, parse_mode, link_preview_options, reply_markup } = message;
-    const value = await this.call('sendMessage', { chat_id: destinationId, text, parse_mode, link_preview_options, reply_markup });
+    const value = await this.call('sendMessage', { chat_id: destinationId, text, parse_mode, link_preview_options, reply_markup,
+      ...(replyTo ? { reply_parameters: { message_id: Number(replyTo), allow_sending_without_reply: false } } : {}) });
     const parsed = messageSchema.safeParse(value);
     if (!parsed.success || String(parsed.data.chat.id) !== destinationId) throw new BotError('telegram_send_response_unknown', 'unknown');
     return String(parsed.data.message_id);

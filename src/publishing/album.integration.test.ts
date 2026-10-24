@@ -33,12 +33,13 @@ async function load(id: string): Promise<Publication> {
   if (!row) throw new Error('Fixture publication missing');
   return row;
 }
-async function fixture(): Promise<Publication> {
+async function fixture(legacyAlbum = true): Promise<Publication> {
   const storyId = await one(`INSERT INTO stories(status,headline,summary,interest_score,researched,interest_stale,profile_version,model_version)
     VALUES('completed','Album news',$1,8,true,false,$2,$3) RETURNING id`, ['Core facts 😀 '.repeat(200), settings.profileVersion, settings.modelVersion]);
   await acceptFixtureStories(settings, [storyId]);
   const [id] = await store.prepareDigest(settings, '-100123', { storyIds: [storyId] });
   if (!id) throw new Error('Prepared fixture missing');
+  if (legacyAlbum) await plans.preparePublicationMedia(await load(id), settings, true);
   return load(id);
 }
 async function tracked() {
@@ -47,7 +48,7 @@ async function tracked() {
 }
 
 // Disposable schemas and synthetic bytes only. No Telegram, model or download calls.
-describe.skipIf(!url)('caption-first album PostgreSQL lifecycle', () => {
+describe.skipIf(!url)('legacy caption-first album PostgreSQL lifecycle', () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: url });
     await admin.query(`CREATE SCHEMA ${schema}`);
@@ -78,7 +79,7 @@ describe.skipIf(!url)('caption-first album PostgreSQL lifecycle', () => {
     vi.unstubAllEnvs();
   });
 
-  it.each([1, 10, 11])('publishes %i candidates as one bounded original-byte request and atomically commits every ID', async count => {
+  it.each([1, 10])('publishes %i candidates as one bounded original-byte request and atomically commits every ID', async count => {
     const original = Array.from({ length: count }, (_, index) => image(index));
     media.publicationMedia.mockResolvedValue(original);
     const publication = await fixture();
@@ -101,7 +102,7 @@ describe.skipIf(!url)('caption-first album PostgreSQL lifecycle', () => {
 
   it('keeps text-only publications on the original send/edit lifecycle', async () => {
     media.publicationMedia.mockResolvedValue([]);
-    const publication = await fixture(); vi.mocked(api.send).mockResolvedValue('50');
+    const publication = await fixture(false); vi.mocked(api.send).mockResolvedValue('50');
     const album = vi.spyOn(api, 'sendAlbum');
     expect(await delivery.sendPrepared(publication, api, settings)).toBe('50');
     expect(api.send).toHaveBeenCalledOnce(); expect(album).not.toHaveBeenCalled();
@@ -241,7 +242,7 @@ describe.skipIf(!url)('caption-first album PostgreSQL lifecycle', () => {
   });
 
   it('preserves migrated text/reply plans and their pending legacy attachment retries', async () => {
-    let publication = await fixture(); await plans.preparePublicationMedia(publication, settings); publication = await load(publication.id);
+    let publication = await fixture(false); await plans.preparePublicationMedia(publication, settings); publication = await load(publication.id);
     expect(publication.delivery_kind).toBe('text');
     vi.mocked(api.send).mockResolvedValue('50'); vi.mocked(api.sendMedia).mockResolvedValue(ids(2));
     const album = vi.spyOn(api, 'sendAlbum');

@@ -63,7 +63,7 @@ export async function repairExistingPublications(settings: AppSettings, options:
     const botId = String((await api.identity()).id);
     if (verified.destinationId !== destinationId || String(verified.botId) !== botId) throw new Error('Repair bot verification changed');
     const test = options.includeVerificationTest ? await trackedVerificationTest(db,destinationId,botId) : undefined;
-    await prepareUpdates(current,destinationId);
+    await prepareUpdates(current,destinationId,undefined,{ sourceRepair: true });
     const candidates = (await db.query<{ id: string; canonical_story_id: string }>(canonicalPublications, [destinationId])).rows;
     let edited = 0;
     for (const candidate of candidates) {

@@ -151,11 +151,11 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
     expect(await delivery.sendPrepared(await publication(f.id),new BotApi(),settings)).toBeNull();
     await database.db.query("UPDATE stories SET summary='Acme также выпустила документацию.' WHERE id=$1",[f.storyId]);
     await acceptFixtureStories(settings);
-    const updates = await import('./updates.js'); await updates.prepareUpdates(settings,'-100123');
+    const updates = await import('./updates.js'); await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect((await publication(f.id)).content).toMatchObject({details:'Acme открыла код модели.'});
     await database.db.query("UPDATE evidence_documents SET title='New source label' WHERE id=$1",[f.evidence]);
-    await updates.prepareUpdates(settings,'-100123');
+    await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(1);
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
@@ -167,7 +167,7 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
     const fresh=await import('../pipeline/generation-freshness.js');
     expect(await fresh.generationIsCurrent(f.storyId,settings)).toBe(true);
     expect(await fresh.generationIsCurrent(f.storyId,settings,undefined,f.receipt)).toBe(false);
-    const updates=await import('./updates.js'); await updates.prepareUpdates(settings,'-100123');
+    const updates=await import('./updates.js'); await updates.prepareUpdates(settings,'-100123',undefined,{ sourceRepair: true });
     expect((await publication(f.id)).pending_snapshot_id).not.toBe(f.desired);
     expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(1);
     expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
