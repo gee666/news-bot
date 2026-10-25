@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { z } from 'zod';
+import { db } from '../db.js';
 import { getSettings } from '../settings.js';
 import { resumePublications } from './digest.js';
 import { saveState } from './store.js';
@@ -7,7 +8,7 @@ import { expirePublicationMedia } from './media-plan.js';
 import { BotError } from './bot-api.js';
 import { processingDiagnostic } from '../pipeline/processing-diagnostics.js';
 
-const maintenanceBotCodes = new Set(['bot_token_missing_or_invalid', 'telegram_transport_unknown',
+const maintenanceBotCodes = new Set(['bot_token_missing_or_invalid', 'telegram_connect_failed', 'telegram_transport_unknown',
   'telegram_response_unknown', 'telegram_identity_invalid', 'telegram_server_unknown', 'telegram_rate_limit']);
 
 export async function startPublicationMaintenance(): Promise<() => Promise<void>> {
@@ -26,6 +27,7 @@ export async function startPublicationMaintenance(): Promise<() => Promise<void>
         const settings = await getSettings();
         phase = 'resume';
         await resumePublications(settings);
+        await db.query("DELETE FROM operational_state WHERE key='telegram_publication_maintenance'");
       }
       catch (error) {
         const { errorName, sqlState, frames } = processingDiagnostic(error);

@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { relatedStoryIds } from '../pipeline/story-relations.js';
 import { publicationThreadEdges } from '../pipeline/generation-context.js';
-import type { PublicationSnapshot, PublicationSource } from '../types.js';
+import { publicationSnapshotSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
 import { RELATED_PUBLICATION_LIMIT } from './sources.js';
 
 export const delivered = `p.status='published' AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
@@ -83,7 +83,7 @@ export async function latestUpdateTarget(client: Pick<PoolClient,'query'>, publi
 export function navigationOnlyChange(sent: PublicationSnapshot, desired: PublicationSnapshot): boolean {
   const body = (snapshot: PublicationSnapshot) => ({ ...snapshot,updatedTo:undefined,updatedToHeadline:undefined,navigationVersion:undefined,navigationOverflow:undefined,
     sources:snapshot.sources.filter(source => !isNavigationSource(source)) });
-  return JSON.stringify(body(sent)) === JSON.stringify(body(desired));
+  return JSON.stringify(publicationSnapshotSchema.parse(body(sent))) === JSON.stringify(publicationSnapshotSchema.parse(body(desired)));
 }
 
 export async function desiredNavigation(client: Pick<PoolClient,'query'>,

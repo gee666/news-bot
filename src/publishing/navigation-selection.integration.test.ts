@@ -52,6 +52,30 @@ describe.skipIf(!url)('verified bounded navigation selection',()=>{
     expect(await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123')).toEqual(links);
     expect((await database.db.query("SELECT count(*)::int n FROM story_relations WHERE relation='related'")).rows[0]?.n).toBe(9);
   });
+  it('does not restage unchanged related links after a JSONB round trip or replace an identical pending edit',async()=>{
+    const target=await fixture('200',0); const own=await fixture('100',10);
+    await classify(own.story_id,target.story_id,'related');
+    const {prepareThreadUpdates}=await import('./thread-updates.js');
+    const current=async()=>(await database.db.query<{snapshot_id:string;pending_snapshot_id:string|null}>(
+      'SELECT snapshot_id,pending_snapshot_id FROM publications WHERE id=$1',[own.id])).rows[0];
+    await prepareThreadUpdates('-100123');
+    const staged=await current();
+    expect(staged?.pending_snapshot_id).toBeTruthy();
+    const count=(await database.db.query('SELECT count(*)::int n FROM publication_snapshots')).rows[0]?.n;
+    await prepareThreadUpdates('-100123');
+    expect(await current()).toEqual(staged);
+    expect((await database.db.query('SELECT count(*)::int n FROM publication_snapshots')).rows[0]?.n).toBe(count);
+    // Apply the stored edit receipt, then repeat maintenance against the JSONB snapshot.
+    await database.db.query('UPDATE publications SET snapshot_id=pending_snapshot_id,pending_snapshot_id=NULL WHERE pending_snapshot_id IS NOT NULL');
+    const sent=await current();
+    for(let tick=0;tick<3;tick++) await prepareThreadUpdates('-100123');
+    expect(await current()).toEqual(sent);
+    expect((await database.db.query('SELECT count(*)::int n FROM publication_snapshots')).rows[0]?.n).toBe(count);
+    const edition=await fixture('300',20);
+    await classify(target.story_id,edition.story_id,'same');
+    await prepareThreadUpdates('-100123');
+    expect((await current())?.pending_snapshot_id).toBeTruthy();
+  });
   it('withholds old topical links and preserves every frozen link as hidden audit, leaving event text and previous links alone',async()=>{
     const target=await fixture('200',0); const previous=await fixture('90',-10);
     const related={url:'https://t.me/c/123/200',label:'Старая широкая связь',primary:false,access:'public' as const,

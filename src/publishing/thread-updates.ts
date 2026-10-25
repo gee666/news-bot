@@ -29,7 +29,8 @@ export async function prepareThreadUpdates(destinationId: string, latestPublicat
       ORDER BY p.id FOR UPDATE OF p`, [destinationId]);
     for (const row of rows.rows) {
       const sent = publicationSnapshotSchema.parse(row.content);
-      const desired = await desiredNavigation(client,row,sent);
+      // Match the schema's property order on both sides, including rebuilt related links.
+      const desired = publicationSnapshotSchema.parse(await desiredNavigation(client,row,sent));
       const refreshLegacyNavigation = sent.navigationVersion !== 2
         && sent.sources.some(source => source.unverifiedPublication || source.relatedPublication);
       if (!refreshLegacyNavigation && JSON.stringify({ ...sent,navigationVersion:undefined })

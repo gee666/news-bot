@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../settings.js';
 import { BotError } from './bot-api.js';
 
-const mocks = vi.hoisted(() => ({ settings: vi.fn(), resume: vi.fn(), expire: vi.fn(), save: vi.fn() }));
+const mocks = vi.hoisted(() => ({ settings: vi.fn(), resume: vi.fn(), expire: vi.fn(), save: vi.fn(), query: vi.fn() }));
+vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('../settings.js', async original => ({ ...await original<typeof import('../settings.js')>(), getSettings: mocks.settings }));
 vi.mock('./digest.js', () => ({ resumePublications: mocks.resume }));
 vi.mock('./media-plan.js', () => ({ expirePublicationMedia: mocks.expire }));
@@ -44,7 +45,7 @@ it.each([
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it.each(['telegram_transport_unknown', 'telegram_rejected_401', 'telegram_rate_limit'])(
+it.each(['telegram_connect_failed', 'telegram_transport_unknown', 'telegram_rejected_401', 'telegram_rate_limit'])(
   'retains allowlisted bot failure label %s', async code => {
     mocks.resume.mockRejectedValue(new BotError(code, 'unknown'));
     stop = await startPublicationMaintenance();
@@ -75,9 +76,11 @@ it('keeps the diagnostic in logs if saving maintenance state also fails', async 
   expect(fetch).not.toHaveBeenCalled();
 });
 
-it('does not record an error for a successful maintenance tick', async () => {
+it('clears stale maintenance errors on a successful tick', async () => {
   stop = await startPublicationMaintenance();
-  await vi.waitFor(() => expect(mocks.resume).toHaveBeenCalledWith(defaultSettings));
+  await vi.waitFor(() => expect(mocks.query).toHaveBeenCalledWith(
+    "DELETE FROM operational_state WHERE key='telegram_publication_maintenance'"));
+  expect(mocks.resume).toHaveBeenCalledWith(defaultSettings);
   expect(mocks.save).not.toHaveBeenCalled();
   expect(console.error).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
