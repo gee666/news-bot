@@ -7,9 +7,7 @@ import { discoverChannels, resolveDestination } from '../telegram/discovery.js';
 import { listSources, refreshSources } from '../telegram/repository.js';
 import type { ApiServices } from './app.js';
 import { listPrimarySources, addPrimarySource, editPrimarySource, seedPrimarySources } from '../sources/index.js';
-import { Operations, type OperationRunner } from './operations.js';
-import { observeCollection, runCollectionOperation } from './collection-operation.js';
-import { observeDigest, runDigestOperation } from './digest-operation.js';
+import { Operations, observeCollection, runCollectionOperation, observeDigest, runDigestOperation, type OperationRunner } from './operations.js';
 import type { RunNowJob, RunNowOutcome } from '../pipeline/run-now.js';
 import { publicationAdmissionDenialSchema } from './contracts.js';
 

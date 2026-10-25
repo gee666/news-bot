@@ -6,6 +6,5 @@ export default tseslint.config(
   { ignores: ['dist/**', 'node_modules/**', 'tmp/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
-  { files: ['scripts/pi-update*.mjs'], languageOptions: { globals: globals.node } },
   { files: ['**/*.ts', '**/*.tsx'], languageOptions: { globals: { ...globals.node, ...globals.browser } } },
 );

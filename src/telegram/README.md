@@ -19,7 +19,7 @@ Login needs an existing Telegram user account and an API ID/hash from https://my
 
 Set TELEGRAM_SESSION_DIR to a persistent private directory. Its default is tmp/telegram-session. The application restricts the directory to 0700 and session/credential files to 0600. Treat both session.txt and api.json as secrets. Do not commit, inspect, paste or share them. Mount a private volume at the configured path for containers, and run login with an attached terminal. The application must run as the owner of that directory.
 
-Login does not need PostgreSQL. Discovery does; it applies migrations, resolves TELEGRAM_DESTINATION through CheckChatInvite and stores its Bot API numeric ID in operational_state under telegram_destination. The default invite is the destination specified in IMPLEMENTATION_PLAN.md. If Telegram returns only invite metadata without a numeric ID, the command stops without joining. Add the account to the destination yourself and rerun discovery.
+Login does not need PostgreSQL. Discovery does; it applies migrations, resolves TELEGRAM_DESTINATION through CheckChatInvite and stores its Bot API numeric ID in operational_state under telegram_destination. Set the destination with `TELEGRAM_DESTINATION`. If Telegram returns only invite metadata without a numeric ID, the command stops without joining. Add the account to the destination yourself and rerun discovery.
 
 Discovery includes subscribed broadcast channels, including archived channels. It excludes private chats, groups and the destination. Rerun discover to refresh subscriptions. Departed channels become inactive without deleting content; manually disabled sources stay disabled.
 

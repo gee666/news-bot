@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { db } from '../db.js';
-import { evidenceLinkSql } from '../sources/link-policy.js';
+import { evidenceLinkSql } from '../sources/links.js';
 
 const hex = z.string().regex(/^[a-f0-9]{64}$/u);
 export const collectedBoundarySchema = z.object({ version:z.literal('collected-owned-content-v1'),inputs:z.array(z.object({

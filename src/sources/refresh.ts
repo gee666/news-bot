@@ -6,7 +6,7 @@ import { publisherReader } from './collector.js';
 import { publisherArticle } from './config.js';
 import { publisherRefreshState } from './refresh-state.js';
 import { PostgresSourceCollectionStore } from './collection-store.js';
-import { normalizeText } from './content.js';
+import { normalizeText } from './links.js';
 import { extractMarkdownLinks } from './markdown.js';
 
 /** Internal operator API, not a scheduler or HTTP route. Caller must hold news-bot-pipeline lease. */

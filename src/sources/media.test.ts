@@ -3,7 +3,7 @@ import { cleanArticle } from './article.js';
 import { discoverMedia, validatedMedia } from './media.js';
 import { parseFeed } from './feed.js';
 import { primarySourceInput } from './config.js';
-import { revisionHash } from './content.js';
+import { revisionHash } from './links.js';
 
 const base = 'https://publisher.org/news/release';
 const source = primarySourceInput.parse({ kind: 'feed', name: 'Publisher', publisher: 'Publisher',

@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import { transaction } from "../db.js";
-import { revisionHash } from "./content.js";
+import { revisionHash } from "./links.js";
 import type { SourceCollectedItem } from "./types.js";
 import { publisherRefreshState } from "./refresh-state.js";
 import { PrimaryCollectionError } from "./collector-errors.js";

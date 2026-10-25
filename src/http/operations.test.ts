@@ -1,9 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ModelFailure } from '../models/index.js';
 import { failureMetadata, RequestFault } from '../models/errors.js';
-import { observeDigest, runDigestOperation } from './digest-operation.js';
-import { Operations, type Operation, type OperationRunner } from './operations.js';
-
+import { observeDigest, runDigestOperation, Operations, type Operation, type OperationRunner } from './operations.js';
 const storage = vi.hoisted(() => ({ records: new Map<string, unknown>(), attempts: [] as unknown[][],
   digest: undefined as unknown, digestUpdatedAt: '' }));
 vi.mock('../db.js', () => {
@@ -50,13 +48,11 @@ vi.mock('../db.js', () => {
 let operations: Operations;
 beforeEach(() => { storage.records.clear(); storage.attempts = []; storage.digest = undefined; storage.digestUpdatedAt = ''; });
 afterEach(async () => { await operations?.stop(); vi.useRealTimers(); });
-
 const failure = (operation: Operation): ModelFailure => ({
   operationId: operation.id, service: 'jev', kind: 'timeout', message: 'The request deadline expired; server-side completion is unknown.',
   attempt: operation.attempt, failedAt: new Date().toISOString(), nextRetryAt: new Date(Date.now() + 300_000).toISOString(),
   retryable: true, outcome: 'unknown', durationMs: 1000,
 });
-
 describe('durable asynchronous operations', () => {
   it('persists manual progress checkpoints and ignores duplicate-click limit changes', async () => {
     let release = () => {};
@@ -148,7 +144,6 @@ describe('durable asynchronous operations', () => {
     expect((await operations.start('test_pi')).id).toBe(first.id);
     expect(storage.attempts).toHaveLength(1);
   });
-
   it('resumes due model tests after the persisted wait', async () => {
     vi.useFakeTimers();
     const now = new Date().toISOString();
@@ -190,7 +185,6 @@ describe('durable asynchronous operations', () => {
     if (attempt < 10) expect(Date.parse(restored?.nextRetryAt ?? '')).toBeGreaterThan(Date.now() + 290_000);
     else expect(restored?.nextRetryAt).toBeNull();
   });
-
   it.each([5, 10])('persists the configured retry decision for UI test attempt %i', async attempt => {
     vi.useFakeTimers();
     const now = new Date().toISOString();
@@ -214,7 +208,6 @@ describe('durable asynchronous operations', () => {
       expect(storage.attempts[0]?.[6]).toBeNull();
     }
   });
-
   it('leaves throttled UI tests uncapped', async () => {
     const runner: OperationRunner = async (operation, recordFailure) => {
       await recordFailure({ ...failure(operation), kind: 'throttled' });
@@ -225,7 +218,6 @@ describe('durable asynchronous operations', () => {
     await vi.waitFor(async () => expect((await operations.get(current.id))?.status).toBe('waiting'));
     expect((await operations.get(current.id))?.nextRetryAt).not.toBeNull();
   });
-
   it('observes a waiting collection without resubmitting it, and reports a later batch failure', async () => {
     vi.useFakeTimers();
     const batchId = '946b26ea-14f9-473d-8a1f-6bf47b15b62a';

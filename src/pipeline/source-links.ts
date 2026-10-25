@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
-import { evidenceLinkSql } from '../sources/link-policy.js';
+import { evidenceLinkSql } from '../sources/links.js';
 import { generateStructured } from '../models/index.js';
 import { jevTemplates } from '../models/templates.js';
 import type { AppSettings } from '../settings.js';

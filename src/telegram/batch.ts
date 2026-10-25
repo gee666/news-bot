@@ -1,7 +1,7 @@
 import { db } from "../db.js";
 import { withUserClient } from "./client.js";
 import { collectSource } from "./collector.js";
-import { PostgresCollectionStore } from "./collection-store.js";
+import { PostgresSourceCollectionStore } from "../sources/collection-store.js";
 import { TelegramHistory } from "./history.js";
 import { prepareBatchSources } from "./repository.js";
 
@@ -11,7 +11,7 @@ export async function collectTelegramBatch(batchId: string, cutoff: Date, window
   if (!sources.length) return 0;
   return await withUserClient(async client => {
     const reader = new TelegramHistory(client);
-    const store = new PostgresCollectionStore();
+    const store = new PostgresSourceCollectionStore();
     let count = 0;
     for (const source of sources) {
       try {

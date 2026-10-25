@@ -1,7 +1,7 @@
 import { messageMedia, type TelegramMedia } from "./media.js";
 import { Api } from "telegram";
 import { parseID } from "telegram/Utils.js";
-import { extractLinks, normalizeText, type UrlEntity } from "./links.js";
+import { extractLinks, normalizeText, type UrlEntity } from "../sources/links.js";
 import { TelegramSetupError } from "./input.js";
 import type { CollectedItem, TelegramSource } from "./types.js";
 

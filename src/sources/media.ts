@@ -3,7 +3,6 @@ import { z } from 'zod';
 import type { Nodes } from 'mdast';
 import { publicUrl } from '../pipeline/research-fetch.js';
 import { markdownTree } from './markdown.js';
-import { decorativeImage } from './media-policy.js';
 
 export const webMediaSchema = z.object({ type: z.enum(['image', 'video']), url: z.string().max(4096) });
 export type WebMedia = z.infer<typeof webMediaSchema>;
@@ -123,4 +122,16 @@ export function discoverMedia(content: string, base: string, format: 'markdown' 
     if (ancillaryDepth === null) visit(node);
   }
   return mergeMedia(media);
+}
+
+/** Obvious page furniture is never an article attachment, including in stored descriptors. */
+export function decorativeImage(...values: Array<string | null | undefined>): boolean {
+  return values.some(value => {
+    if (!value) return false;
+    let decoded = value;
+    try { decoded = decodeURIComponent(value); } catch { /* Keep malformed text for matching. */ }
+    const tokens = decoded.replace(/([a-z])([A-Z])/gu, '$1 $2');
+    return /(?:^|[^\p{L}\p{N}])(?:avatars?|icons?|logos?|logomark|wordmark|favicon|emoji|tracking|pixel|headshot)(?:[^\p{L}\p{N}]|$)/iu.test(tokens)
+      || /(?:author|profile|site|publisher|brand)[\s_-]+(?:photo|portrait|badge|branding|image)(?:[^\p{L}\p{N}]|$)/iu.test(tokens);
+  });
 }

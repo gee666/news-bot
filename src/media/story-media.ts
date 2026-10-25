@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { evidenceLinkSql } from '../sources/link-policy.js';
+import { evidenceLinkSql } from '../sources/links.js';
 import { db } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { requireInferenceApproval } from '../pipeline/generation-model.js';

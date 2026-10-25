@@ -11,8 +11,8 @@ vi.mock("pg", () => ({
   } },
 }));
 
-import { PostgresCollectionStore } from "./collection-store.js";
-import { extractLinks } from "./links.js";
+import { PostgresSourceCollectionStore } from "../sources/collection-store.js";
+import { extractLinks } from "../sources/links.js";
 import { item, source } from "./test-fixtures.js";
 
 const itemId = "22222222-2222-4222-8222-222222222222";
@@ -34,7 +34,7 @@ describe("revision-aware transactional collection", () => {
     const news = item({ originalText: "read", links: extractLinks("read", [
       { kind: "text-url", offset: 0, length: 4, url: "https://example.com/release" },
     ]) });
-    const store = new PostgresCollectionStore();
+    const store = new PostgresSourceCollectionStore();
     expect(await store.commitSource("batch", source(), [news], cursor)).toBe(1);
     const queries = mocks.query.mock.calls.map(call => call[0]);
     expect(queries[0]).toBe("BEGIN");
@@ -56,7 +56,7 @@ describe("revision-aware transactional collection", () => {
       if (sql.startsWith("SELECT id FROM item_revisions")) return { rows: [{ id: revisionId }] };
       return { rows: [] };
     });
-    expect(await new PostgresCollectionStore().commitSource("batch", source(), [item()], cursor)).toBe(0);
+    expect(await new PostgresSourceCollectionStore().commitSource("batch", source(), [item()], cursor)).toBe(0);
     expect(mocks.query.mock.calls.some(call => call[0].includes("INSERT INTO item_links"))).toBe(false);
     expect(mocks.query.mock.calls.some(call => call[0].includes("INSERT INTO batch_items"))).toBe(false);
     expect(mocks.query.mock.calls.some(call => call[0].includes("SET collection_cursor"))).toBe(true);
@@ -70,7 +70,7 @@ describe("revision-aware transactional collection", () => {
       return await original(sql, parameters);
     });
     const news = item({ links: extractLinks("https://example.com") });
-    await expect(new PostgresCollectionStore().commitSource("batch", source(), [news], cursor)).rejects.toThrow("link failure");
+    await expect(new PostgresSourceCollectionStore().commitSource("batch", source(), [news], cursor)).rejects.toThrow("link failure");
     expect(mocks.query).toHaveBeenCalledWith("ROLLBACK");
     expect(mocks.query).not.toHaveBeenCalledWith("COMMIT");
     expect(mocks.query.mock.calls.some(call => call[0].includes("SET collection_cursor"))).toBe(false);
@@ -78,7 +78,7 @@ describe("revision-aware transactional collection", () => {
 
   it("does not change a completed batch source on resume", async () => {
     mocks.query.mockResolvedValue({ rows: [{ status: "completed" }] });
-    expect(await new PostgresCollectionStore().commitSource("batch", source(), [item()], cursor)).toBe(0);
+    expect(await new PostgresSourceCollectionStore().commitSource("batch", source(), [item()], cursor)).toBe(0);
     expect(mocks.query.mock.calls.map(call => call[0])).toHaveLength(3);
     expect(mocks.query).toHaveBeenLastCalledWith("COMMIT");
   });

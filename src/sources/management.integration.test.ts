@@ -115,7 +115,7 @@ describe.skipIf(!databaseUrl)('publisher management and progress in disposable d
     const added = await repository.addPrimarySource({ ...input, url: 'https://example.org/links-feed' });
     if (added.configState !== 'valid') throw new Error('fixture_missing');
     const { collectPublisher } = await import('./collector.js');
-    const { evidenceLinkSql } = await import('./link-policy.js');
+    const { evidenceLinkSql } = await import('./links.js');
     const cutoff = new Date('2026-10-01T12:00:00Z');
     const batch = await createBatch(cutoff);
     const source = (await repository.preparePrimarySources(batch)).find(value => value.id === added.id);

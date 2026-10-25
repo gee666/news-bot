@@ -13,10 +13,9 @@
     "migrate:production": "node dist/db.js",
     "cli:production": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.test.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "lint": "eslint src web vite.config.ts vitest.config.ts scripts/pi-update*.mjs",
+    "lint": "eslint src web vite.config.ts vitest.config.ts",
     "test": "vitest run",
     "test:db": "vitest run src/db.test.ts src/schema.test.ts",
-    "pi:update": "node scripts/pi-update.mjs",
     "build": "tsc && vite build",
     "start": "node dist/server.js"
   },

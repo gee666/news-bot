@@ -1,30 +1,26 @@
 # Native Linux deployment
 
-Use Docker Engine and Compose v2 on the remote host. Docker must already be enabled at boot. Spark runs the existing inference services externally. Do not install models on this host or run the WSL relay/startup scripts here.
+Production runs on this native Linux host with Docker Engine and Compose v2. Docker must be enabled at boot. Spark runs the existing inference services externally; do not install models on this host. Startup and recovery use `news-bot.service` and `news-bot-watchdog.timer`. There is no Pi auto-update timer or cron job.
 
-## Cut over before enabling boot startup
+## Before deploying
 
-The local app is still active during database migration. Do not run the installer or start the remote app yet. Installing enables startup on the next reboot, even though it does not start anything immediately.
+Back up the database, `telegram_sessions` and `pi_auth` volumes, including OAuth and usage-outbox state. Retain the previous images for rollback. Resolve ambiguous Telegram sends before retrying publication, and never run two production apps against the same destination.
 
-1. Disable Windows task `\NewsBot-WSL`, including future logon/retry startup. Disable any other project startup task, WSL watcher and project Pi-update cron entry. Verify local automation cannot restart production.
-2. Stop the local app. Keep its DB and private state for rollback. If the migration snapshot predates shutdown, take and restore a final snapshot after shutdown or explicitly accept the lost writes. Never run both production apps.
-3. Verify remote DB/schema and copied `telegram_sessions` and `pi_auth` volumes, including OAuth and usage-outbox state. Resolve ambiguous Telegram sends before retrying publication.
-4. Privately configure reachable existing Spark URLs in `.env` and inspect saved DB inference profiles. Environment defaults only seed profiles once. Old `host.docker.internal:18765` and `:21434` settings describe WSL relays, not Spark. Check container reachability, private-inference policy, credentials and allowed hosts without installing models. Retain loopback-only UI/DB bindings.
-5. Confirm images are already built/loaded and validate Compose without exposing secrets:
+Configure reachable Spark URLs privately and inspect saved DB inference profiles. Environment defaults seed profiles only once. Check container reachability, private-inference policy, credentials and allowed hosts. Retain loopback-only UI/DB bindings. See [Deploy a new version](../README.md#deploy-a-new-version) for the build, migration and startup commands.
 
-   ```sh
-   cd /home/oira666/Work/news-bot
-   newgrp docker <<'DOCKER'
-   timeout 30 docker compose --project-name news-bot config --quiet
-   timeout 30 docker compose --project-name news-bot images
-   DOCKER
-   ```
+Validate Compose without exposing secrets:
 
-No output from `.env`, resolved Compose configuration or container environments should be pasted into reports.
+```sh
+cd /home/oira666/Work/news-bot
+docker compose --project-name news-bot config --quiet
+docker compose --project-name news-bot images
+```
+
+Do not paste `.env`, resolved Compose configuration or container environments into reports.
 
 ## Install, then explicitly start
 
-Only after those gates pass, run on the remote host:
+For a fresh installation, after configuration and state are verified:
 
 ```sh
 sudo bash /home/oira666/Work/news-bot/scripts/install-linux-startup.sh
@@ -34,7 +30,7 @@ The installer checks shell/unit syntax, installs a root-owned helper and three u
 
 Optional overrides are `sudo ROOT=/absolute/checkout SERVICE_USER=oira666 DOCKER_BIN=/usr/bin/docker bash /path/to/scripts/install-linux-startup.sh`. Defaults use the installer's checkout, user `oira666`, and Docker from PATH. Paths must not contain spaces or shell/systemd metacharacters. Templates in `deploy/systemd/` show the intended `/home/oira666/Work/news-bot` deployment.
 
-After final cutover approval, explicitly start:
+Explicitly start the installed units when ready:
 
 ```sh
 sudo systemctl start news-bot.service news-bot-watchdog.timer
@@ -66,12 +62,10 @@ sudo systemctl disable --now news-bot-watchdog.timer news-bot.service
 # Separately stop the app through Compose using Docker-authorized access.
 ```
 
-There is deliberately no unit ExecStop. Stopping the systemd oneshot does not stop Docker containers, and disabling it does not cancel Docker restart policies. Stopping the app explicitly leaves it stopped under `unless-stopped`. Stop remote production before reactivating local production.
+There is deliberately no unit ExecStop. Stopping the systemd oneshot does not stop Docker containers, and disabling it does not cancel Docker restart policies. Stopping the app explicitly leaves it stopped under `unless-stopped`. Stop the current production app before starting a rollback instance.
 
-## Acceptance and cleanup
+## Verification and cleanup
 
 Check container health, mounts, saved schedules and publication state. Close SSH and confirm unchanged app uptime after reconnecting. With approval, reboot and confirm boot recovery/timer operation. Test unhealthy recovery in a disposable stack first. During an approved Spark outage test, a healthy app's start time/restart count must remain unchanged.
 
-Retain local rollback data until the final snapshot and remote restore are verified and reboot checks pass. Then remove only project-owned resources: `\NewsBot-WSL`, verified project relay processes, project cron entries, the three production containers and old project canaries, `news-bot_default`/`news-bot_crawler`, and reviewed project images/files. Verify PID identity before stopping relays. Never kill arbitrary WSL processes named Relay.
-
-The local `news-bot_postgres_data`, `news-bot_pi_auth` and `news-bot_telegram_sessions` volumes contain private state. Back them up before deliberate removal. Anonymous volumes, shared base images, Docker globally and Windows model services are not blanket cleanup targets. Do not use global prune. Review checkout tmp snapshots/logs, private `.env`, and project-specific session records outside the checkout before retention or disposal. See the inspection inventory in remote `tmp/migration/operations-review.md` for observed candidates; recheck identities and current state before acting.
+Retain rollback data until backups, deployment and reboot recovery are verified. Back up private volumes before deliberate removal. Review project-specific files and volumes individually; do not use global Docker prune or delete shared images and services. Keep private `.env`, auth/session state and retained snapshots protected.

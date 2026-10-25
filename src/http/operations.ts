@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
+import { partialCompletionLabel } from './status-labels.js';
 import type { ModelFailure } from '../models/index.js';
 import { canRetryFailure, failureResponseMetadata } from '../models/errors.js';
 import { runNowOptionsSchema, runNowProgressSchema, type RunNowOptions } from '../pipeline/run-now-contract.js';
-
 export const operationKind = z.enum(['test_jev', 'test_embedding', 'test_pi', 'collection', 'digest', 'cleanup', 'refresh_sources', 'run_now']);
 export type OperationKind = z.infer<typeof operationKind>;
 const operationSchema = z.object({
@@ -26,7 +26,6 @@ export interface OperationOutcome {
 }
 export type OperationRunner = (operation: Operation, recordFailure: (failure: ModelFailure) => Promise<void>, signal: AbortSignal, checkpoint: () => Promise<void>) => Promise<void | OperationOutcome>;
 type OperationObserver = (operation: Operation) => Promise<OperationOutcome | undefined>;
-
 const key = (id: string) => `web_operation:${id}`;
 async function persist(operation: Operation): Promise<void> {
   await db.query(`INSERT INTO operational_state(key,value) VALUES($1,$2)
@@ -230,4 +229,121 @@ export class Operations {
     this.controller.abort();
     await Promise.allSettled(this.active.values());
   }
+}
+
+const timestamp = z.preprocess(value => value instanceof Date ? value.toISOString() : value, z.iso.datetime());
+const batchSchema = z.object({ id: z.uuid(), status: z.enum(['queued', 'collecting', 'processing', 'waiting', 'completed', 'failed']),
+  next_retry_at: timestamp.nullable(), error_code: z.string().nullable(), failed_items: z.number().int().nonnegative() });
+
+function collectionOutcome(batch: z.infer<typeof batchSchema>): OperationOutcome {
+  if (batch.status === 'completed' && batch.error_code === 'partial_story_failure') {
+    return { status: 'completed_with_errors', message: 'Collection completed with withheld stories. See processing status for counts and correction.' };
+  }
+  if (batch.status === 'completed' && batch.error_code === 'partial_item_failure') {
+    return { status: 'completed_with_errors', message: `${partialCompletionLabel(batch.failed_items)}. Withheld items need explicit correction.` };
+  }
+  if (batch.status === 'completed') return { status: 'succeeded', message: 'Collection batch completed.' };
+  if (batch.status === 'failed') return { status: 'failed', message: 'Collection batch failed. See processing status for the stage and failure reason.' };
+  if (batch.status === 'queued') return { status: 'waiting', nextRetryAt: batch.next_retry_at,
+    message: 'Collected source snapshot is queued. Model processing is paused or earlier work owns the processor.' };
+  if (batch.status === 'waiting') return { status: 'waiting', nextRetryAt: batch.next_retry_at,
+    message: 'Collection batch is waiting. The pipeline will resume it at the saved retry time.' };
+  return { status: 'running', message: 'Collection batch is still processing. Follow processing status for progress.' };
+}
+
+export async function observeCollection(operation: Operation): Promise<OperationOutcome | undefined> {
+  if (operation.kind !== 'collection' || !operation.batchId) return;
+  const result = await db.query<{ id: unknown; status: unknown; next_retry_at: unknown; error_code: unknown; failed_items: unknown }>(
+    `SELECT b.id,b.status,b.next_retry_at,b.error_code,
+      (SELECT count(*)::int FROM batch_items i WHERE i.batch_id=b.id AND i.status='failed') AS failed_items
+      FROM processing_batches b WHERE b.id=$1`, [operation.batchId]);
+  // History cleanup must not turn a previously completed operation into a failure.
+  return result.rows[0] ? collectionOutcome(batchSchema.parse(result.rows[0])) : undefined;
+}
+
+export async function runCollectionOperation(operation: Operation, run: () => Promise<void>): Promise<OperationOutcome> {
+  const existing = await db.query<{ id: string }>(`SELECT id FROM processing_batches
+    WHERE completed_at IS NULL AND status IN ('queued','collecting','processing','waiting','failed')
+    ORDER BY CASE WHEN status IN ('collecting','processing','waiting') THEN 0 WHEN status='failed' THEN 1 ELSE 2 END,started_at LIMIT 1`);
+  const existingId = existing.rows[0] ? z.uuid().parse(existing.rows[0].id) : null;
+  let failed = false;
+  try { await run(); } catch { failed = true; }
+  finally {
+    // A failed batch can be replaced when settings changed. Prefer that new batch over its predecessor.
+    const result = await db.query<{ id: string }>(`SELECT id FROM processing_batches
+      WHERE id=$1 OR started_at >= $2 ORDER BY started_at DESC LIMIT 1`, [existingId, operation.createdAt]);
+    if (result.rows[0]) operation.batchId = z.uuid().parse(result.rows[0].id);
+  }
+  const observed = await observeCollection(operation);
+  if (failed && observed?.status !== 'waiting' && observed?.status !== 'failed') {
+    return { status: 'failed', message: 'Collection request failed. See processing status for the failure reason.' };
+  }
+  return observed ?? { status: 'failed',
+    message: 'Collection was skipped without creating a batch. The pipeline may be busy with another operation.' };
+}
+
+const reportSchema = z.object({
+  phase: z.enum(['completed', 'waiting', 'running', 'failed']),
+  failedStories: z.number().int().nonnegative().optional(), completedStories: z.number().int().nonnegative().optional(),
+  next: z.iso.datetime().nullable().optional(), completedAt: z.iso.datetime().optional(),
+  retryEpoch: z.number().int().nonnegative().default(0), totalAttempts: z.number().int().nonnegative().default(0),
+});
+const stateSchema = z.object({ value: reportSchema, updated_at: timestamp, newer_manual: z.boolean().default(false) });
+type DigestState = z.infer<typeof stateSchema>;
+
+async function readState(operation: Operation): Promise<DigestState | undefined> {
+  const result = await db.query<{ value: unknown; updated_at: unknown; newer_manual: unknown }>(`SELECT d.value,d.updated_at,
+    EXISTS(SELECT 1 FROM operational_state w WHERE w.key LIKE 'web_operation:%'
+      AND w.value->>'kind'='digest' AND w.key<>$1
+      AND (w.value->>'createdAt')::timestamptz>$2::timestamptz
+      AND (w.value->>'createdAt')::timestamptz<=d.updated_at) AS newer_manual
+    FROM operational_state d WHERE d.key='pipeline_digest'`, [`web_operation:${operation.id}`, operation.createdAt]);
+  const parsed = stateSchema.safeParse(result.rows[0]);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function digestOutcome(state: DigestState): OperationOutcome {
+  const report = state.value;
+  if (report.phase === 'failed') return { status: 'failed', nextRetryAt: null,
+    message: 'Digest refresh failed. Correct the pipeline failure before starting a new manual refresh.' };
+  if (report.phase !== 'completed') return { status: 'waiting', nextRetryAt: report.next ?? null,
+    message: 'Digest refresh is waiting. The pipeline owns recovery at the saved retry time.' };
+  if (report.failedStories) return { status: 'completed_with_errors',
+    message: `Digest refreshed ${report.completedStories ?? 0} stories; ${report.failedStories} withheld after validation failures.` };
+  return { status: 'succeeded', message: 'Digest refresh completed.' };
+}
+
+function settledAttempts(state: DigestState): number {
+  // Running includes the current attempt; lease deferral later removes it from the durable total.
+  return state.value.phase === 'running' ? Math.max(0, state.value.totalAttempts - 1) : state.value.totalAttempts;
+}
+
+function bind(operation: Operation, state: DigestState): void {
+  operation.digestRun = { retryEpoch: state.value.retryEpoch, totalAttempts: settledAttempts(state),
+    updatedAt: state.updated_at };
+}
+
+export async function observeDigest(operation: Operation): Promise<OperationOutcome | undefined> {
+  if (operation.kind !== 'digest' || !['running', 'waiting'].includes(operation.status)) return;
+  const state = await readState(operation);
+  if (!state || state.newer_manual) return;
+  const binding = operation.digestRun;
+  if (Date.parse(state.updated_at) < Date.parse(binding?.updatedAt ?? operation.createdAt)) return;
+  // A retry advances once from a saved wait. A different epoch or skipped counters belongs to another run.
+  if (binding && (state.value.retryEpoch !== binding.retryEpoch ||
+      settledAttempts(state) < binding.totalAttempts || settledAttempts(state) > binding.totalAttempts + 1)) return;
+  const result = digestOutcome(state);
+  bind(operation, state);
+  return result;
+}
+
+export async function runDigestOperation(operation: Operation, run: () => Promise<void>): Promise<OperationOutcome> {
+  await run();
+  const state = await readState(operation);
+  if (!state || state.newer_manual) return { status: 'waiting', message: 'Digest refresh is waiting for the pipeline lease.' };
+  if (['completed', 'failed'].includes(state.value.phase) && Date.parse(state.updated_at) < Date.parse(operation.createdAt)) {
+    return { status: 'waiting', message: 'Digest refresh was skipped while another operation held the lease.' };
+  }
+  bind(operation, state);
+  return digestOutcome(state);
 }

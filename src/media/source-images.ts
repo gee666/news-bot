@@ -1,5 +1,5 @@
 import type { MediaDescriptor } from './download.js';
-import { decorativeImage } from '../sources/media-policy.js';
+import { decorativeImage } from '../sources/media.js';
 
 /** Reject page furniture and collapse a WordPress rendition only when its original is supplied. */
 export function distinctSourceMedia(descriptors: readonly MediaDescriptor[]): MediaDescriptor[] {

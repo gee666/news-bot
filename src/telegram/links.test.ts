@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractLinks, normalizeText, revisionHash } from "./links.js";
+import { extractLinks, normalizeText, revisionHash } from "../sources/links.js";
 
 describe("link extraction", () => {
   it("keeps hidden URL anchors in Telegram UTF-16 units after emoji", () => {

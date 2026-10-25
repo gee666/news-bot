@@ -60,7 +60,7 @@ services:
     ports:
       - "127.0.0.1:${WEB_PORT:-3000}:3000"
     extra_hosts:
-      - "host.docker.internal:${INFERENCE_HOST_GATEWAY:-host-gateway}"
+      - "host.docker.internal:host-gateway"
     volumes:
       - telegram_sessions:/data/telegram
       - pi_auth:/data/pi

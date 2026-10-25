@@ -1,5 +1,5 @@
 import { envInteger } from './research-fetch.js';
-import { evidenceLinkSql } from '../sources/link-policy.js';
+import { evidenceLinkSql } from '../sources/links.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';

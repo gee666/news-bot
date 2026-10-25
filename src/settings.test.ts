@@ -74,10 +74,8 @@ describe('settings validation', () => {
     expect(state.query).not.toHaveBeenCalled();
   });
 
-  it('uses an explicit public allowlist even if runtime data has extra fields', () => {
-    const output = publicSettings({ ...defaultSettings, ...{ token: 'synthetic' } });
-    expect(output).toEqual(defaultSettings);
-    expect(output).not.toHaveProperty('token');
+  it('picks public settings without re-parsing and excludes unknown secret fields', () => {
+    expect(publicSettings({ ...defaultSettings, ...{ token: 'synthetic' } })).toEqual(defaultSettings);
   });
 });
 

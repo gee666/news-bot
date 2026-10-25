@@ -174,11 +174,12 @@ export async function getActiveEmbeddingConfig(): Promise<ActiveEmbeddingConfig>
   });
 }
 
-// Explicit allowlist. Never spread an arbitrary stored object into an API response.
 export function publicSettings(settings: AppSettings): AppSettings {
-  return settingsSchema.parse(Object.fromEntries(
-    Object.keys(settingsSchema.shape).map(key => [key, Reflect.get(settings, key)]),
-  ));
+  const result = { ...settings };
+  for (const key of Object.keys(result)) {
+    if (!Object.hasOwn(settingsSchema.shape, key)) Reflect.deleteProperty(result, key);
+  }
+  return result;
 }
 
 /** Switch retrieval only after every retained, searchable story has a new embedding. */

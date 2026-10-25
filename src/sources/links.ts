@@ -1,9 +1,9 @@
 import { cleanSourceUrl } from '../source-url.js';
-import type { TextLink } from "./types.js";
+import { createHash } from "node:crypto";
+import type { SourceCollectedItem, TextLink } from "./types.js";
 import { extractMarkdownLinks, markdownTree } from "./markdown.js";
 import type { Nodes } from "mdast";
 export { extractMarkdownLinks } from "./markdown.js";
-export { normalizeText, revisionHash } from "./content.js";
 
 export interface UrlEntity {
   kind: "url" | "text-url";
@@ -75,3 +75,15 @@ export function extractLinks(text: string, entities: readonly UrlEntity[] = []):
   return [...unique.values()].sort((a, b) => a.startOffset - b.startOffset || a.url.localeCompare(b.url));
 }
 
+export function normalizeText(text: string): string { return text.replace(/\r\n?/gu, '\n').trim(); }
+export function revisionHash(item: Pick<SourceCollectedItem, 'originalText' | 'links'> & { metadata?: Record<string, unknown> }): string {
+  return createHash('sha256').update(JSON.stringify({ text: item.originalText,
+    links: item.links.map(link => [link.url, link.anchorText, link.startOffset, link.endOffset,
+      ...(link.metadata.format === 'markdown' ? [link.metadata.kind, link.metadata.evidenceEligible] : [])]),
+    ...(Array.isArray(item.metadata?.media) && item.metadata.media.length ? { media: item.metadata.media } : {}),
+  })).digest('hex');
+}
+
+// Missing flags preserve legacy/Telegram references. Malformed explicit policy is never evidence.
+export const evidenceLinkSql = `jsonb_typeof(l.metadata)='object' AND
+  (NOT (l.metadata ? 'evidenceEligible') OR l.metadata->'evidenceEligible'='true'::jsonb)`;
