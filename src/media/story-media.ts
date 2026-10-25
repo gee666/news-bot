@@ -10,10 +10,11 @@ import { downloadMedia, mediaDescriptor } from './download.js';
 import { deduplicateMedia, compressModelImage, sweepComparisonTemps, type MediaCandidate } from './comparison.js';
 import { judgeMedia, mediaJudgmentVersion } from './judgment.js';
 import { MediaPairCache } from './pair-cache.js';
+import { distinctSourceMedia } from './source-images.js';
 import { generationThread } from '../pipeline/generation-context.js';
 
-// Codec changes must invalidate selections made while visual comparisons were rejected.
-const preparationVersion = 'media-v4-retained-ancestry';
+// Selection policy changes must invalidate previously retained duplicate renditions.
+const preparationVersion = 'media-v5-source-image-variants';
 const cache = new MediaCache();
 const active = new Map<string, Promise<MediaCandidate[]>>();
 const sourceSchema = z.object({ revision_id: z.string(), metadata: z.record(z.string(), z.unknown()),
@@ -43,7 +44,7 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
   const sources = z.array(sourceSchema).parse(result.rows);
   const descriptors = sources.flatMap(source => {
     const parsed = z.array(mediaDescriptor).safeParse(source.metadata.media ?? []);
-    return parsed.success ? parsed.data.map(descriptor => ({ descriptor, source })) : [];
+    return parsed.success ? distinctSourceMedia(parsed.data).map(descriptor => ({ descriptor, source })) : [];
   });
   if (!descriptors.length) return [];
   await requireInferenceApproval(sources.map(source => source.access), `media:${storyId}`);

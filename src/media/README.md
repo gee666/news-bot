@@ -8,6 +8,8 @@ There is no attachment-count cap here. The 256 MB aggregate download budget fail
 
 ## Duplicate decisions
 
+Before downloading, each source revision's image descriptors collapse known WordPress upload renditions onto a supplied original. A `name-WIDTHxHEIGHT.ext` under `/wp-content/uploads/YYYY/MM/` is omitted only when that same revision also supplies `name.ext` with the same origin, directory, extension, query and fragment. JPEG, PNG, WebP and AVIF are supported. The original stays in its existing position. Lone renditions, arbitrary dimension-suffixed URLs, different sources and videos still use normal comparison. No original URL is invented or fetched. This avoids sending a full image and its cropped or blurred CMS rendition when visual judgment misses their shared content. Selection-policy versioning invalidates older final-selection caches.
+
 Exact bytes bypass codecs and models. Image candidates with identical normalized PNGs also receive a full-resolution RGBA hash check, including dimensions, without resizing. Animated inputs and video frames cannot use that shortcut. Equal grayscale thumbnails alone never prove identity. Duration gaps and clearly different thumbnails avoid model work. Remaining pairs go through vision evidence extraction and JEV judgment.
 
 `MediaPairCache` stores explicit `same` and `different` model verdicts under `tmp/media-pair-cache/`. Keys are symmetric and include raw attachment identity plus vision provider/model, JEV endpoint/model, model revision, evidence/prompt versions, and preparation policy. Cache hits happen before decoding. Unresolved decisions, errors, and legacy boolean results are not persisted as pair verdicts. Concurrent reversed comparisons share one in-process request.

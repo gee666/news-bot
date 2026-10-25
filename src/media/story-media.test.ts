@@ -39,6 +39,32 @@ it('downloads repeated source URLs once and persists only deduplicated media', a
   expect(mocks.release).toHaveBeenCalledWith(id);
 });
 
+it('selects one original from the NVIDIA WordPress pair before downloads or visual judgment', async () => {
+  const id = randomUUID();
+  const url = 'https://blogs.nvidia.com/wp-content/uploads/2026/10/NVIDIA-European-Retail.jpg';
+  mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media: [
+    { type: 'image', url }, { type: 'image', url: url.replace('.jpg', '-842x450.jpg') },
+  ] }, source_metadata: {}, access: 'public' }] });
+  expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(image)]);
+  expect(mocks.download).toHaveBeenCalledExactlyOnceWith({ type: 'image', url }, { metadata: {} });
+  expect(mocks.dedup.mock.calls[0]?.[0]).toHaveLength(1);
+  expect(mocks.judge).not.toHaveBeenCalled();
+  expect(mocks.privacy).toHaveBeenCalledBefore(mocks.load);
+  expect(mocks.load).toHaveBeenCalledBefore(mocks.download);
+  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [expect.objectContaining(image)]);
+});
+
+it('does not infer rendition identity across separate source revisions', async () => {
+  const url = 'https://example.org/wp-content/uploads/2026/10/chart.jpg';
+  mocks.query.mockResolvedValue({ rows: [url, url.replace('.jpg', '-842x450.jpg')].map(url => ({
+    revision_id: randomUUID(), metadata: { media: [{ type: 'image', url }] }, source_metadata: {}, access: 'public',
+  })) });
+  mocks.download.mockReset().mockResolvedValue(image);
+  expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(2);
+  expect(mocks.download).toHaveBeenCalledTimes(2);
+  expect(mocks.dedup.mock.calls[0]?.[0]).toHaveLength(2);
+});
+
 it('excludes videos from summarization and obeys the configurable image cap', async () => {
   vi.stubEnv('MEDIA_SUMMARY_MAX_IMAGES', '2');
   mocks.dedup.mockResolvedValue([video, ...Array.from({ length: 12 }, () => image)]);

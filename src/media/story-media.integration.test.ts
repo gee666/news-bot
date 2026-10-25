@@ -60,6 +60,19 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     vi.unstubAllEnvs();
   });
 
+  it('collapses the original and WordPress rendition from one retained source before caching', async () => {
+    const storyId = await story();
+    const { revision } = await report(storyId, 'wordpress', 'mention');
+    const url = 'https://blogs.nvidia.com/wp-content/uploads/2026/10/NVIDIA-European-Retail.jpg';
+    await database.db.query('UPDATE item_revisions SET metadata=$2 WHERE id=$1', [revision, JSON.stringify({ media: [
+      { type: 'image', url: url.replace('.jpg', '-842x450.jpg') }, { type: 'image', url },
+    ] })]);
+    expect(await service.publicationMedia(storyId, settings)).toHaveLength(1);
+    expect(mocks.download).toHaveBeenCalledExactlyOnceWith({ type: 'image', url }, { metadata: {} });
+    expect(await service.publicationMedia(storyId, settings)).toHaveLength(1);
+    expect(mocks.download).toHaveBeenCalledTimes(1);
+  });
+
   it('loads relevant supplementary source attachments without requiring story mentions', async () => {
     const story = await id("INSERT INTO stories(status) VALUES('completed') RETURNING id"); stories.push(story);
     const source = await id("INSERT INTO sources(connector_type,external_id,name,access) VALUES('feed',$1,'Test','public') RETURNING id", [randomUUID()]);
