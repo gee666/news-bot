@@ -49,7 +49,7 @@ function countResponse(choice = "1", inputTokens = 42, outputTokens = 0): unknow
 
 describe("model HTTP adapters", () => {
   it("dispatches media visual evidence using the versioned same/different template", async () => {
-    const state = { left: { subject: 'A bridge' }, right: { subject: 'The same bridge with a border' },
+    const state = { attachment1: { subject: 'A bridge' }, attachment2: { subject: 'The same bridge with a border' },
       correspondences: ['Matching cables and boat'], differences: ['Border'], limitations: [] };
     const baseUrl = await serve((req, res) => {
       void body(req).then(value => {
@@ -62,7 +62,7 @@ describe("model HTTP adapters", () => {
     const client = new JevClient({ baseUrl, apiKey: 'test-key', contextTokens: 12288, recordFailure: async () => {} });
     cleanups.push(() => client.close());
     expect(await client.judge('media_identity', state, { operationId: 'media-evidence' })).toMatchObject({
-      template: 'media_identity', promptVersion: 'media-identity-visual-evidence-v1', answers: { relation: { choice: 'same' } },
+      template: 'media_identity', promptVersion: 'media-identity-visual-evidence-v2', answers: { relation: { choice: 'same' } },
     });
   });
 
