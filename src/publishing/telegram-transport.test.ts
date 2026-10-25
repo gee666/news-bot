@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { errors } from 'undici';
-import { isTelegramPreconnectFailure, telegramTimeouts } from './telegram-transport.js';
+import { isTelegramPreconnectFailure, telegramTimeouts } from './bot-api.js';
 
 beforeEach(() => {
   vi.stubEnv('TELEGRAM_REQUEST_TIMEOUT_MS', undefined);

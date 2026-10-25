@@ -1,20 +1,16 @@
-import { newsOrderTime } from './ordering.js';
+import { newsOrderTime } from './store.js';
 import { z } from 'zod';
-import { db, transaction } from '../db.js';
+import { db } from '../db.js';
 import { getSettings, type AppSettings } from '../settings.js';
 import { BotApi } from './bot-api.js';
 import { reconcile, sendPrepared } from './delivery.js';
-import { checkPublicationAdmission } from './admission.js';
-import { recoverNavigationParts, retryNavigationParts } from './navigation-delivery.js';
 import { prepareThreadUpdates } from './thread-updates.js';
-import { deliverPublicationText, recoverPublicationText, retryPublicationText } from './text-delivery.js';
 import { retryEdits } from './updates.js';
 import { prepareReadyStories } from './ready.js';
 import { retryReplacements } from './repair.js';
 import { recoverPublicationMedia } from './media-plan.js';
-import { retryPublicationMedia } from './media-delivery.js';
-import { reservedPublication, releaseDestination } from './destination-order.js';
-import { adoptPreparedPublications, destination, locked, publicationSelect, rateLimited, refreshPrepared, state, tryLocked, unsafeSendAttempt, type Publication } from './store.js';
+import { reservedPublication } from './destination-order.js';
+import { adoptPreparedPublications, destination, locked, publicationSelect, rateLimited, state, tryLocked, unsafeSendAttempt, type Publication } from './store.js';
 
 const verificationSchema = z.object({ verified: z.literal(true), destinationId: z.string(), botId: z.number().int().positive() });
 const due = '(p.next_retry_at IS NULL OR p.next_retry_at<=now())';
@@ -52,8 +48,6 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   await recoverSends(destinationId);
   await recoverEdits(destinationId);
   await recoverPublicationMedia(destinationId);
-  await recoverPublicationText(destinationId);
-  await recoverNavigationParts(destinationId);
   await prepareThreadUpdates(destinationId);
   if (await rateLimited()) return;
   if (!selectNewStories) {
@@ -61,16 +55,9 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
       OR EXISTS(SELECT 1 FROM publications p WHERE p.destination_id=$1
       AND ${due} AND ((p.status='prepared' AND (p.story_id IS NOT NULL
         OR EXISTS(SELECT 1 FROM story_publication_aliases pa WHERE pa.publication_id=p.id))) OR (p.status='uncertain' AND ${reviewExcluded})
-        OR (p.status='published' AND (p.pending_snapshot_id IS NOT NULL OR (p.media_status='pending' AND (
-          NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status<>'sent')
-          OR EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status IN ('prepared','retryable')
-            AND (b.next_retry_at IS NULL OR b.next_retry_at<=now()))))))
-        OR EXISTS(SELECT 1 FROM publication_text_parts t WHERE t.publication_id=p.id AND t.part_number>0
-          AND t.status IN ('prepared','retryable') AND (t.next_retry_at IS NULL OR t.next_retry_at<=now()))
+        OR (p.status='published' AND p.pending_snapshot_id IS NOT NULL)
         OR EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id AND r.status='pending'
           AND (r.next_retry_at IS NULL OR r.next_retry_at<=now()))
-        OR EXISTS(SELECT 1 FROM publication_navigation_parts n WHERE n.publication_id=p.id
-          AND n.status IN ('prepared','retryable','unknown') AND (n.next_retry_at IS NULL OR n.next_retry_at<=now()))
         OR EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
           AND a.status IN ('running','retryable','unknown') AND (a.next_retry_at IS NULL OR a.next_retry_at<=now()))))
       AS pending`, [destinationId])).rows[0];
@@ -84,10 +71,6 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
     if (owner && (!owner.next_retry_at || owner.next_retry_at <= new Date())) {
       if (owner.status === 'uncertain' && owner.error_code !== 'send_not_found_requires_review') await reconcile(owner,current);
       else if (owner.status === 'prepared') await sendPrepared(owner,api,current);
-      else if (owner.status === 'published') {
-        await deliverPublicationText(owner,api,current);
-        await transaction(client => releaseDestination(owner.id,client));
-      }
     }
     if (await reservedPublication(destinationId)) return;
   }
@@ -99,10 +82,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   if (selectNewStories) await prepareReadyStories(current,destinationId);
   await adoptPreparedPublications(current,destinationId);
   await retryEdits(api,current,destinationId);
-  await retryNavigationParts(api,current,destinationId);
   await retryReplacements(api,current,destinationId);
-  await retryPublicationText(api,current,destinationId);
-  await retryPublicationMedia(api,current,destinationId);
   const prepared = await db.query<Publication>(`${publicationSelect} JOIN stories news ON news.id=p.story_id WHERE p.destination_id=$1 AND p.story_id IS NOT NULL
     AND p.status='prepared' AND ${due}
     AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=p.story_id)
@@ -111,18 +91,11 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
     const latest = await getSettings();
     if (!latest.publishingEnabled || await rateLimited()) break;
     if (await destination() !== destinationId) break;
-    const content = await refreshPrepared(publication,latest);
-    if (!content) {
-      await checkPublicationAdmission(publication, latest, 'send');
-      continue;
-    }
-    const desired = (await db.query<Publication>(`${publicationSelect} WHERE p.id=$1 AND p.status='prepared'`,[publication.id])).rows[0];
-    if (desired) await sendPrepared(desired,api,latest);
+    await sendPrepared(publication,api,latest);
     if (await reservedPublication(destinationId)) return;
   }
   await prepareThreadUpdates(destinationId);
   await retryEdits(api,current,destinationId);
-  await retryNavigationParts(api,current,destinationId);
 }
 
 export async function publishDigest(settings: AppSettings): Promise<void> {

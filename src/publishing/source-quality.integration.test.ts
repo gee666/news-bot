@@ -9,7 +9,6 @@ const schema = `read_quality_${randomUUID().replaceAll('-', '')}`;
 let admin: pg.Pool;
 let database: typeof import('../db.js');
 let snapshotFor: typeof import('./store.js').snapshotFor;
-let expectedSourceUrls: typeof import('./preview-sources.js').expectedSourceUrls;
 let settings: import('../settings.js').AppSettings;
 async function one(sql: string, args: unknown[] = []): Promise<string> {
   const id = (await database.db.query<{ id: string }>(sql, args)).rows[0]?.id;
@@ -52,7 +51,6 @@ describe.skipIf(!url)('read-source publication and diagnostic history', () => {
     database = await import('../db.js'); await database.migrate();
     settings = await (await import('../settings.js')).getSettings();
     ({ snapshotFor } = await import('./store.js'));
-    ({ expectedSourceUrls } = await import('./preview-sources.js'));
   });
   afterAll(async () => {
     if (database) await database.db.end();
@@ -76,7 +74,6 @@ describe.skipIf(!url)('read-source publication and diagnostic history', () => {
     const sources = (await snapshotFor(database.db, current)).sources;
     expect(sources.map(source => source.url)).toEqual(['https://arxiv.org/abs/2609.16247','https://t.me/reporter/1']);
     expect(sources[0]).toMatchObject({ primary: true, access: 'public', classification: 'relevant', label: 'The Pain Axis: LLMs Represent Self-Directed Harm and Act on It' });
-    expect(await expectedSourceUrls(database.db,current.id,current)).toEqual(new Set(sources.map(source => source.url)));
     expect((await database.db.query('SELECT evidence_id FROM story_evidence WHERE story_id=$1', [current.id])).rows).toHaveLength(9);
   });
 
@@ -85,7 +82,6 @@ describe.skipIf(!url)('read-source publication and diagnostic history', () => {
     await database.db.query("UPDATE mention_links ml SET classification='irrelevant' FROM item_links l WHERE ml.link_id=l.id AND l.url='https://arxiv.org/abs/2609.16247'");
     await evidence(current.id, { url: 'https://arxiv.org/abs/2609.16247', role: 'primary' });
     expect((await snapshotFor(database.db, current)).sources.some(source => source.primary)).toBe(true);
-    expect(await expectedSourceUrls(database.db,current.id,current)).toContain('https://arxiv.org/abs/2609.16247');
   });
 
   it('preserves failed read attribution through retry expiry, policy invalidation and cleanup', async () => {

@@ -4,7 +4,7 @@ import { defaultSettings } from '../settings.js';
 import { createHash } from 'node:crypto';
 import { normalizeImage } from '../media/codec.js';
 import { publicationMedia } from '../media/story-media.js';
-import { deduplicateMedia, expirePublicationMedia, partitionMedia, preparePublicationMedia, recoverPublicationMedia, selectAlbumMedia } from './media-plan.js';
+import { deduplicateMedia, expirePublicationMedia, partitionMedia, preparePublicationMedia, recoverPublicationMedia } from './media-plan.js';
 import type { Publication } from './store.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn() }));
@@ -38,10 +38,10 @@ describe('temporary durable media plan', () => {
     });
     mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT * FROM publications') ? [publication] : [] }));
     expect(await preparePublicationMedia(publication, defaultSettings)).toBe(true);
-    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO publication_media_batches'))).toHaveLength(2);
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO publication_media_batches'))).toHaveLength(1);
     const inserts = mocks.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO publication_media_items'));
-    expect(inserts).toHaveLength(11);
-    expect(inserts.map(([, args]) => args[1])).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]);
+    expect(inserts).toHaveLength(10);
+    expect(inserts.map(([, args]) => args[1])).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(inserts.every(([, args]) => Buffer.isBuffer(args[5]))).toBe(true);
   });
   it('converts non-native images before freezing a new media-first plan, keeping native media and expiry intact', async () => {
@@ -124,7 +124,7 @@ describe('original-format plan partitioning', () => {
     const items = [
       { type: 'image' as const, mimeType: 'image/jpeg', data: Buffer.from('original jpg') },
       { type: 'video' as const, mimeType: 'video/webm', data: Buffer.from('original webm') },
-      { type: 'image' as const, mimeType: 'image/webp', data: Buffer.from('original webp') },
+      { type: 'video' as const, mimeType: 'video/quicktime', data: Buffer.from('original mov') },
       { type: 'video' as const, mimeType: 'video/mp4', data: Buffer.from('original mp4') },
     ];
     vi.mocked(publicationMedia).mockResolvedValue(items);
@@ -139,27 +139,4 @@ describe('original-format plan partitioning', () => {
       expect(args[5]).toBe(items[index]?.data);
     });
   });
-});
-
-
-describe('whole legacy album compatibility', () => {
-  it.each([0, 1, 10, 11])('accepts all %i candidates only when the whole legacy plan fits', count => {
-    const items = Array.from({ length: count }, (_, index) => ({ type: 'image' as const, mimeType: 'image/png', data: Buffer.from(String(index)) }));
-    const selected = selectAlbumMedia(items);
-    expect(selected).toEqual(count > 10 ? [] : items);
-    selected.forEach((item, index) => expect(item.data).toBe(items[index]?.data));
-  });
-  it('refuses a mixed native/document album rather than dropping documents', () => {
-    const items = ['image/webp', 'image/jpeg', 'video/webm', 'image/png', 'video/mp4'].map((mimeType, index) => ({
-      type: mimeType.startsWith('video') ? 'video' as const : 'image' as const, mimeType, data: Buffer.from(String(index)),
-    }));
-    expect(selectAlbumMedia(items)).toEqual([]);
-    expect(selectAlbumMedia([items[0]!, items[2]!])).toEqual([items[0], items[2]]);
-  });
-});
-
-it('leaves text-only publications untouched while preparing caption-first sends', async () => {
-  expect(await preparePublicationMedia(publication, defaultSettings, true)).toBe(false);
-  expect(mocks.transaction).not.toHaveBeenCalled();
-  expect(mocks.query.mock.calls.every(([sql]) => !/UPDATE|INSERT|DELETE/u.test(String(sql)))).toBe(true);
 });

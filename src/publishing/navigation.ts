@@ -3,11 +3,9 @@ import { relatedStoryIds } from '../pipeline/story-relations.js';
 import { publicationThreadEdges } from '../pipeline/generation-context.js';
 import type { PublicationSnapshot, PublicationSource } from '../types.js';
 import { RELATED_PUBLICATION_LIMIT } from './sources.js';
-import { snapshotHash } from './approval.js';
 
 export const delivered = `p.status='published' AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
   AND p.media_status IN ('none','complete')
-  AND NOT EXISTS(SELECT 1 FROM publication_text_parts t WHERE t.publication_id=p.id AND t.status<>'sent')
   AND NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status<>'sent')
   AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key='publication_removal:'||p.id::text)
   AND NOT EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id)`;
@@ -85,7 +83,7 @@ export async function latestUpdateTarget(client: Pick<PoolClient,'query'>, publi
 export function navigationOnlyChange(sent: PublicationSnapshot, desired: PublicationSnapshot): boolean {
   const body = (snapshot: PublicationSnapshot) => ({ ...snapshot,updatedTo:undefined,updatedToHeadline:undefined,navigationVersion:undefined,navigationOverflow:undefined,
     sources:snapshot.sources.filter(source => !isNavigationSource(source)) });
-  return snapshotHash(body(sent)) === snapshotHash(body(desired));
+  return JSON.stringify(body(sent)) === JSON.stringify(body(desired));
 }
 
 export async function desiredNavigation(client: Pick<PoolClient,'query'>,

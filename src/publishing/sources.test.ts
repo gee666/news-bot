@@ -1,8 +1,6 @@
 import { describe,expect,it } from 'vitest';
 import type { PublicationSnapshot,PublicationSource } from '../types.js';
 import { render } from './render.js';
-import { renderCaption } from './caption.js';
-import { renderFullText } from './full-text.js';
 import { orderSources,sourceGroup,SOURCE_GROUPS,visibleSources } from './sources.js';
 
 const audit:PublicationSource={ label:'Непроверенная историческая ссылка',url:'https://t.me/c/123/10',primary:false,
@@ -30,9 +28,6 @@ describe('visible navigation and audit-only historical links',()=>{
   });
   it.each([
     ['text',()=>[render(snapshot)]],
-    ['caption',()=>[renderCaption(snapshot)]],
-    ['full text',()=>renderFullText(snapshot)],
-    ['overflow footer',()=>renderFullText(snapshot,true)],
   ] as const)('does not render audit-only links in %s',(_name,renderParts)=>{
     const parts=renderParts(); const plain=parts.map(part=>part.plainText).join('');
     expect(plain).not.toContain('Связанные новости');
@@ -58,11 +53,11 @@ it('caps persisted related links at five unique URLs without capping previous or
   expect(orderSources(sources)).toHaveLength(sources.length);
 });
 
-it.each(['text','caption','full text','overflow footer'] as const)('caps actual persisted sources in %s rendering without mutating the snapshot',kind=>{
+it.each(['text'] as const)('caps actual persisted sources in %s rendering without mutating the snapshot',()=>{
   const stored={...snapshot,sources:[...snapshot.sources,...Array.from({length:26},(_,index)=>({...audit,
     unverifiedPublication:undefined,relatedPublication:true as const,label:`Related ${index}`,url:`https://t.me/c/123/${index+200}`}))]};
   const before=structuredClone(stored);
-  const parts=kind==='text' ? [render(stored)] : kind==='caption' ? [renderCaption(stored)] : renderFullText(stored,kind==='overflow footer');
+  const parts=[render(stored)];
   const relatedUrls=new Set(stored.sources.filter(source=>source.relatedPublication).map(source=>source.url));
   expect(parts.flatMap(part=>part.links).filter(link=>relatedUrls.has(link.url)).length).toBeLessThanOrEqual(5);
   expect(stored).toEqual(before);

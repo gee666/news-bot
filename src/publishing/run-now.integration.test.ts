@@ -102,19 +102,16 @@ describe.skipIf(!url)('scoped manual publication with PostgreSQL', () => {
       .toMatchObject({ published: 1, updated: 0, waiting: false, reasons: { publishing_disabled: 1 } });
     expect(BotApi.prototype.send).toHaveBeenCalledOnce(); expect(BotApi.prototype.edit).toHaveBeenCalledOnce();
   });
-  it('counts a manual publication only after its continuation text is completely delivered', async () => {
-    const id = await story('Long cumulative edition');
-    await database.db.query('UPDATE stories SET summary=$2 WHERE id=$1',[id,'Полные факты 😀 '.repeat(1000)]);
+  it('counts only a committed canonical message and rejects oversized editions without continuation sends', async () => {
+    const id = await story('Oversized edition');
+    await database.db.query(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
+      SELECT 'https://long-source.example/'||n,repeat('Detailed factual source title. ',10),'Read report details','public',now()+interval '1 day'
+      FROM generate_series(1,45) n`);
+    await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at)
+      SELECT $1,id,'supporting','relevant',now() FROM evidence_documents WHERE url LIKE 'https://long-source.example/%'`,[id]);
     await acceptFixtureStories(settings,[id]);
-    const runId = randomUUID();
-    const send = vi.mocked(BotApi.prototype.send).mockResolvedValueOnce('42')
-      .mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',120_000));
-    expect(await invoke(runId,[id])).toMatchObject({ published: 0, waiting: true });
-    await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
-    await database.db.query("UPDATE publication_text_parts SET next_retry_at=now()-interval '1 second'");
-    send.mockImplementation(async () => String(100+send.mock.calls.length));
-    expect(await invoke(runId,[id])).toMatchObject({ published: 1, waiting: false });
-    expect(send.mock.calls.filter(call => call[2] === undefined)).toHaveLength(1);
+    expect(await invoke(randomUUID(),[id])).toMatchObject({published:0,waiting:false,reasons:{publication_message_too_long:1}});
+    expect(BotApi.prototype.send).not.toHaveBeenCalled();
   });
   it('does not resend an unknown send after restart and respects its durable cooldown', async () => {
     const id = await story('Uncertain event'); const runId = randomUUID();

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { migrate } from './db.js';
@@ -62,6 +62,49 @@ describe.skipIf(!databaseUrl)('PostgreSQL schema integration', () => {
     await pool.query(sql);
     expect((await pool.query<{deadline:number}>("SELECT (value->>'piTimeoutMs')::int AS deadline FROM app_settings")).rows).toEqual([{deadline:900_000}]);
   });
+
+  it('retires unresolved delivery without changing published messages', async () => {
+    const client = await pool.connect();
+    const legacy = `legacy_${randomUUID().replaceAll('-','')}`;
+    try {
+      await client.query('BEGIN');
+      await client.query(`CREATE SCHEMA ${legacy}`);
+      await client.query(`SET LOCAL search_path=${legacy},public`);
+      const directory = new URL('../migrations/',import.meta.url);
+      const names = (await readdir(directory)).filter(name => /^\d+_[a-z_]+\.sql$/u.test(name) && name < '207_').sort();
+      for (const name of names) await client.query(await readFile(new URL(name,directory),'utf8'));
+      const snapshot = (await client.query<{id:string}>(`INSERT INTO publication_snapshots(content)
+        VALUES('{"headline":"News","score":8,"details":"Facts","detailsKind":"summary","sources":[]}') RETURNING id`)).rows[0];
+      if (!snapshot) throw new Error('Missing migration fixture');
+      for (const [index,kind,status] of [[1,'text','uncertain'],[2,'album','uncertain'],[3,'text','published']] as const) {
+        const publication = (await client.query<{id:string}>(`INSERT INTO publications(snapshot_id,destination_id,delivery_kind,status,message_id)
+          VALUES($1,$2,$3,$4,$5) RETURNING id`,[snapshot.id,`-100${index}`,kind,status,status==='published'?'100':null])).rows[0];
+        if (!publication) throw new Error('Missing publication fixture');
+        await client.query(`INSERT INTO publication_destination_reservations(destination_id,publication_id) VALUES($1,$2)`,[`-100${index}`,publication.id]);
+        if (status === 'uncertain') await client.query(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status)
+          VALUES($1,'telegram-bot','send',1,'unknown')`,[publication.id]);
+        if (index === 2) await client.query(`INSERT INTO publication_media_batches(publication_id,batch_number,status)
+          VALUES($1,0,'unknown')`,[publication.id]);
+      }
+      await client.query(await readFile(new URL('207_simplify_publishing.sql',directory),'utf8'));
+      expect((await client.query('SELECT status,error_code,message_id FROM publications ORDER BY destination_id')).rows).toEqual([
+        {status:'failed',error_code:'legacy_unresolved',message_id:null},
+        {status:'failed',error_code:'legacy_unresolved',message_id:null},
+        {status:'published',error_code:null,message_id:'100'},
+      ]);
+      expect((await client.query('SELECT status,error_code FROM publication_media_batches')).rows)
+        .toEqual([{status:'failed',error_code:'legacy_unresolved'}]);
+      expect((await client.query('SELECT status,error_code FROM request_attempts')).rows)
+        .toEqual(Array.from({length:2},()=>({status:'failed',error_code:'legacy_unresolved'})));
+      expect((await client.query('SELECT destination_id FROM publication_destination_reservations')).rows).toEqual([{destination_id:'-1003'}]);
+      expect((await client.query(`SELECT to_regclass($1) AS text_parts,to_regclass($2) AS navigation_parts`,
+        [`${legacy}.publication_text_parts`,`${legacy}.publication_navigation_parts`])).rows)
+        .toEqual([{text_parts:null,navigation_parts:null}]);
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  },30_000);
 
   it('enforces durable history boundaries and preserves published snapshots', async () => {
     const source = (await pool.query<{ id: string }>(

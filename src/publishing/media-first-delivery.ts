@@ -1,13 +1,10 @@
 import { db, transaction } from '../db.js';
-import { getSettings, type AppSettings } from '../settings.js';
+import type { AppSettings } from '../settings.js';
 import { releaseStoryMedia } from '../media/story-media.js';
-import { BotApi, BotError, mediaUploadType, type PublicationMedia } from './bot-api.js';
-import { publicationAdmission } from './freshness.js';
-import { recordAdmissionDenial } from './admission.js';
-import type { DeliveryAuthorization } from './approval.js';
+import { BotApi, BotError, mediaUploadType, telegramTimeouts, type PublicationMedia } from './bot-api.js';
+import { publicationAdmission, recordAdmissionDenial, type DeliveryAuthorization } from './freshness.js';
 import { destinationBlocked, reserveDestination } from './destination-order.js';
-import { destination, rateLimited, type Publication } from './store.js';
-import { telegramTimeouts } from './telegram-transport.js';
+import { rateLimited, type Publication } from './store.js';
 
 interface Batch { id: string; batch_number: number; status: string; attempt_count: number; next_retry_at: Date | null }
 interface Item { id: string; type: PublicationMedia['type']; mime_type: string; digest: string; data: Buffer | null; expires_at: Date }
@@ -25,9 +22,7 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
   for (const batch of batches) {
     if (batch.status === 'sent') continue;
     if (!['prepared','retryable'].includes(batch.status) || batch.next_retry_at && batch.next_retry_at > new Date()) return false;
-    const current = await getSettings();
-    if (!current.publishingEnabled || JSON.stringify(current) !== JSON.stringify(settings)
-      || await destination() !== publication.destination_id || await rateLimited()) return false;
+    if (await rateLimited()) return false;
     const items = (await db.query<Item>('SELECT * FROM publication_media_items WHERE batch_id=$1 ORDER BY ordinal', [batch.id])).rows;
     if (!items.length || items.some(item => !item.data?.length || item.expires_at.getTime() <= Date.now())) return false;
     const media: PublicationMedia[] = [];
@@ -38,7 +33,7 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
     const attemptId = await transaction(async client => {
       await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
       if (await destinationBlocked(publication.destination_id, publication.id, client)) return null;
-      const admission = await publicationAdmission(client, publication, settings, 'send', authorization);
+      const admission = await publicationAdmission(client, publication, settings, 'send', authorization, botId);
       if (!admission.allowed) {
         await recordAdmissionDenial(client, publication, 'send', admission.reason);
         return null;

@@ -5,12 +5,9 @@ import { publishDigest, resumePublications, verifyBot } from './index.js';
 import type { Publication } from './store.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), getSettings: vi.fn(), destination: vi.fn(), state: vi.fn(),
-  prepare: vi.fn(), ready: vi.fn(), refresh: vi.fn(), send: vi.fn(), reconcile: vi.fn(), edit: vi.fn(), saveState: vi.fn(), testPublication: vi.fn(), tryLock: vi.fn(), adopt: vi.fn(), retryEdits: vi.fn(), retryReplacements: vi.fn(), admission: vi.fn() }));
+  prepare: vi.fn(), ready: vi.fn(), send: vi.fn(), reconcile: vi.fn(), edit: vi.fn(), saveState: vi.fn(), testPublication: vi.fn(), tryLock: vi.fn(), adopt: vi.fn(), retryEdits: vi.fn(), retryReplacements: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('./media-plan.js', () => ({ recoverPublicationMedia: vi.fn(), expirePublicationMedia: vi.fn() }));
-vi.mock('./media-delivery.js', () => ({ retryPublicationMedia: vi.fn() }));
-vi.mock('./text-delivery.js', () => ({ recoverPublicationText: vi.fn(), retryPublicationText: vi.fn() }));
-vi.mock('./navigation-delivery.js', () => ({ recoverNavigationParts: vi.fn(), retryNavigationParts: vi.fn() }));
 vi.mock('./thread-updates.js', () => ({ prepareThreadUpdates: vi.fn() }));
 vi.mock('../settings.js', async importOriginal => {
   const original = await importOriginal<typeof import('../settings.js')>();
@@ -19,13 +16,12 @@ vi.mock('../settings.js', async importOriginal => {
 vi.mock('./store.js', () => ({ rateLimited: async () => (await mocks.query('AS waiting')).rows[0]?.waiting ?? false, destination: mocks.destination, state: mocks.state,
   locked: async (_name: string, run: () => Promise<unknown>) => run(),
   tryLocked: mocks.tryLock, prepareDigest: mocks.prepare, adoptPreparedPublications: mocks.adopt, unsafeSendAttempt: "a.status IN ('running','unknown')",
-  refreshPrepared: mocks.refresh, publicationSelect: 'SELECT p.*, s.content FROM publications p JOIN publication_snapshots s ON s.id=p.snapshot_id',
+  newsOrderTime: () => 'news.created_at', publicationSelect: 'SELECT p.*, s.content FROM publications p JOIN publication_snapshots s ON s.id=p.snapshot_id',
   saveState: mocks.saveState, testPublication: mocks.testPublication }));
 vi.mock('./ready.js', () => ({ prepareReadyStories: mocks.ready }));
-vi.mock('./admission.js', () => ({ checkPublicationAdmission: mocks.admission }));
 vi.mock('./delivery.js', () => ({ sendPrepared: mocks.send, reconcile: mocks.reconcile, editPublication: mocks.edit }));
 vi.mock('./updates.js', () => ({ prepareUpdates: vi.fn(), retryEdits: mocks.retryEdits }));
-vi.mock('./repair.js', () => ({ repairExistingPublications: vi.fn(), retryReplacements: mocks.retryReplacements }));
+vi.mock('./repair.js', () => ({ retryReplacements: mocks.retryReplacements }));
 
 const enabled = { ...defaultSettings, publishingEnabled: true };
 const content = { headline: 'Новость', score: 1, details: 'Отрывок', detailsKind: 'excerpt', sources: [] };
@@ -44,11 +40,9 @@ beforeEach(() => {
   mocks.query.mockReset().mockResolvedValue({ rows: [] });
   mocks.prepare.mockReset().mockResolvedValue(undefined);
   mocks.ready.mockReset().mockResolvedValue(undefined);
-  mocks.admission.mockReset().mockResolvedValue({ allowed: false, reason: 'current_generation_missing' });
   mocks.adopt.mockReset().mockResolvedValue(undefined);
   mocks.retryEdits.mockReset().mockResolvedValue(undefined);
   mocks.retryReplacements.mockReset().mockResolvedValue(undefined);
-  mocks.refresh.mockReset().mockResolvedValue(content);
   mocks.send.mockReset().mockResolvedValue('1');
   mocks.reconcile.mockReset().mockResolvedValue(false);
   mocks.edit.mockReset().mockResolvedValue(true);
@@ -86,18 +80,18 @@ describe('automatic publication resumption', () => {
     await resumePublications(enabled);
     expect(mocks.prepare).not.toHaveBeenCalled();
     expect(mocks.ready).not.toHaveBeenCalled();
-    expect(mocks.refresh).toHaveBeenCalledWith(prepared,enabled);
+    expect(mocks.send).toHaveBeenCalledWith(prepared,expect.any(BotApi),enabled);
     expect(mocks.send).toHaveBeenCalledOnce();
     const selection = mocks.query.mock.calls.find(call => String(call[0]).includes('SELECT p.*') && String(call[0]).includes("p.status='prepared'"));
     expect(selection?.[0]).toContain('p.next_retry_at<=now()');
   });
 
-  it('adopts previously prepared alias work before refreshing a resumed send', async () => {
+  it('adopts previously prepared alias work before resuming a send', async () => {
     mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('AS pending') ? [{ pending: true }]
       : sql.includes("p.status='prepared'") && sql.includes('SELECT p.*') ? [publication(1)] : [] }));
     await resumePublications(enabled);
     expect(mocks.adopt).toHaveBeenCalledWith(enabled,'-100123');
-    expect(mocks.adopt.mock.invocationCallOrder[0]).toBeLessThan(mocks.refresh.mock.invocationCallOrder[0]!);
+    expect(mocks.adopt.mock.invocationCallOrder[0]).toBeLessThan(mocks.send.mock.invocationCallOrder[0]!);
     expect(mocks.prepare).not.toHaveBeenCalled();
   });
   it('waits for the durable Telegram rate-limit deadline before resuming', async () => {
@@ -162,16 +156,6 @@ describe('automatic publication resumption', () => {
     expect(mocks.send).not.toHaveBeenCalled();
   });
 
-  it('rechecks eligibility but never regenerates or selects stale prepared stories', async () => {
-    mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('AS pending') ? [{ pending: true }]
-      : sql.includes("p.status='prepared'") && sql.includes('SELECT p.*') ? [publication(1)] : [] }));
-    mocks.refresh.mockResolvedValue(null);
-    await resumePublications(enabled);
-    expect(mocks.refresh).toHaveBeenCalledOnce();
-    expect(mocks.send).not.toHaveBeenCalled();
-    expect(mocks.prepare).not.toHaveBeenCalled();
-  });
-
   it('requires the publishing toggle and matching successful bot verification', async () => {
     await resumePublications(defaultSettings);
     expect(mocks.tryLock).not.toHaveBeenCalled();
@@ -205,14 +189,13 @@ describe('digest safety and completeness', () => {
     expect(mocks.prepare).not.toHaveBeenCalled();
   });
 
-  it('sends all eligible stories without a cap, after rechecking their current versions', async () => {
+  it('sends all eligible stories without a cap, through the request admission boundary', async () => {
     const publications = Array.from({ length: 111 }, (_, index) => publication(index));
     mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes("p.status='prepared'") ? publications : [] }));
     await publishDigest(enabled);
     expect(mocks.ready).toHaveBeenCalledWith(enabled,'-100123');
     expect(mocks.prepare).not.toHaveBeenCalled();
     expect(mocks.send).toHaveBeenCalledTimes(111);
-    expect(mocks.refresh).toHaveBeenCalledTimes(111);
   });
 
   it('reconciles uncertain sends and does not feed them to the sender', async () => {

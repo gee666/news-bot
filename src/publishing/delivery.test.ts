@@ -4,18 +4,16 @@ import { defaultSettings as baseSettings } from '../settings.js';
 const defaultSettings = { ...baseSettings, publishingEnabled: true };
 import { BotApi, BotError } from './bot-api.js';
 import { editPublication, reconcile, sendPrepared } from './delivery.js';
-import { PublicationRenderError } from './render.js';
+import * as mediaPlan from './media-plan.js';
 import type { Publication } from './store.js';
 import { publicationSnapshotSchema } from '../types.js';
 import { publicationAdmission } from './freshness.js';
 import { publicationMedia } from '../media/story-media.js';
-import * as mediaPlan from './media-plan.js';
-import * as mediaDelivery from './media-delivery.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: mocks.transaction }));
 vi.mock('../media/story-media.js', () => ({ publicationMedia: vi.fn().mockResolvedValue([]), releaseStoryMedia: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('./freshness.js', () => ({ publicationAdmission: vi.fn().mockResolvedValue({ allowed: true }) }));
+vi.mock('./freshness.js', async importOriginal => ({ ...await importOriginal<typeof import('./freshness.js')>(), publicationAdmission: vi.fn().mockResolvedValue({ allowed: true }) }));
 vi.mock('./edit-reconciliation.js', () => ({ reconcileUnknownEdit: vi.fn().mockResolvedValue(null) }));
 const publication: Publication = {
   id: 'id', story_id: 'story', snapshot_id: 'snap', pending_snapshot_id: null, format_version: 1, bot_id: '123', destination_id: '-100123', message_id: null,
@@ -39,7 +37,7 @@ beforeEach(() => {
 
 describe('durable publication delivery', () => {
   it.each(['send', 'edit'] as const)('records preflight %s denials without attempts, dispatch or content', async operation => {
-    vi.mocked(publicationAdmission).mockResolvedValue({ allowed: false, reason: 'consolidation_unresolved' });
+    vi.mocked(publicationAdmission).mockResolvedValue({ allowed: false, reason: 'story_ineligible' });
     const api = new BotApi('123:synthetic');
     const send = vi.spyOn(api, 'send'); const edit = vi.spyOn(api, 'edit');
     if (operation === 'send') expect(await sendPrepared(publication, api, defaultSettings)).toBeNull();
@@ -48,11 +46,10 @@ describe('durable publication delivery', () => {
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO request_attempts'))).toBe(false);
     const diagnostic = mocks.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO operational_state'));
     expect(JSON.parse(String(diagnostic?.[1]?.[1]))).toEqual({ publicationId: 'id', snapshotId: 'snap', operation,
-      reason: 'consolidation_unresolved', at: expect.any(String), lastSeenAt: expect.any(String), occurrences: 1 });
+      reason: 'story_ineligible', at: expect.any(String), lastSeenAt: expect.any(String), occurrences: 1 });
   });
   it('records an admission change at the attempt boundary before any send', async () => {
-    vi.mocked(publicationAdmission).mockResolvedValueOnce({ allowed: true })
-      .mockResolvedValueOnce({ allowed: false, reason: 'settings_changed' });
+    vi.mocked(publicationAdmission).mockResolvedValue({ allowed: false, reason: 'settings_changed' });
     const api = new BotApi('123:synthetic'); const send = vi.spyOn(api, 'send');
     expect(await sendPrepared(publication, api, defaultSettings)).toBeNull();
     expect(send).not.toHaveBeenCalled();
@@ -82,22 +79,6 @@ describe('durable publication delivery', () => {
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO request_attempts'))).toBe(false);
   });
 
-  it('retains legacy canonical text separate from media and does not report incomplete attachments as success', async () => {
-    const api = new BotApi('123:synthetic');
-    const events: string[] = [];
-    vi.spyOn(mediaPlan, 'preparePublicationMedia').mockImplementation(async () => { events.push('prepare'); return true; });
-    const send = vi.spyOn(api, 'send').mockImplementation(async () => { events.push('text'); return '9'; });
-    vi.spyOn(mediaDelivery, 'deliverPublicationMedia').mockImplementation(async (canonical) => {
-      events.push('media');
-      expect(canonical).toMatchObject({ message_id: '9', status: 'published', bot_id: '123' });
-      expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes("status='published'"))).toBe(true);
-      return false;
-    });
-    const long = { ...publication, content: { headline: 'News', details: 'word '.repeat(600), score: 7, detailsKind: 'summary', sources: [] } };
-    expect(await sendPrepared(long, api, defaultSettings)).toBeNull();
-    expect(events).toEqual(['prepare', 'text', 'media']);
-    expect(send.mock.calls[0]?.[1].plainText.length).toBeGreaterThan(1024);
-  });
 
   it('sends a review-failed summary with a warning and commits it as published', async () => {
     const api = new BotApi('123:synthetic');
@@ -170,10 +151,9 @@ describe('durable publication delivery', () => {
     const api = new BotApi('123:synthetic');
     const edit = vi.spyOn(api,'edit').mockResolvedValue(undefined);
     const broken = { ...publication, status: 'published' as const, message_id: '9', content: { invalid: true } };
-    await expect(editPublication(broken,api,defaultSettings)).rejects.toBeInstanceOf(PublicationRenderError);
+    expect(await editPublication(broken,api,defaultSettings)).toBe(false);
     expect(edit).not.toHaveBeenCalled();
-    const failure = mocks.query.mock.calls.find(call => String(call[0]).includes('UPDATE request_attempts SET status=$1'));
-    expect(failure?.[1]?.slice(0,3)).toEqual(['failed','publication_snapshot_invalid',null]);
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('publication_navigation_requires_new_edition'))).toBe(true);
   });
 
   it('supersedes and inserts a replacement edit in one committed transaction before dispatch', async () => {
@@ -187,12 +167,12 @@ describe('durable publication delivery', () => {
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql.includes('edit_superseded')) events.push('supersede');
       if (sql.includes('INSERT INTO request_attempts')) events.push('insert');
-      return { rows: sql.includes('publication_text_parts') ? [] : [{ id: 'attempt' }] };
+      return { rows: sql.includes('publication_destination_reservations') ? [] : [{ id: 'attempt' }] };
     });
     const api = new BotApi('123:synthetic');
     vi.spyOn(api,'edit').mockImplementation(async () => { events.push('dispatch'); });
     await editPublication({ ...publication,status: 'published',message_id: '9' },api,defaultSettings);
-    expect(events.slice(0,7)).toEqual(['begin','commit','begin','supersede','insert','commit','dispatch']);
+    expect(events.slice(0,7)).toEqual(['begin','supersede','insert','commit','dispatch','begin','commit']);
   });
 
   it('edits solely from the stored snapshot and records desired snapshot for restart retry', async () => {

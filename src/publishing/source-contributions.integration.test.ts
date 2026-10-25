@@ -61,6 +61,8 @@ describe.skipIf(!url)('source-only publication contributions in PostgreSQL', () 
     store = await import('./store.js'); updates = await import('./updates.js');
   });
   beforeEach(async () => {
+    await store.saveState('telegram_destination',{channelId:'-100123'});
+    await store.saveState('bot_verified',{verified:true,destinationId:'-100123',botId:123});
     vi.restoreAllMocks(); vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({ id: 123,is_bot: true });
     vi.spyOn(BotApi.prototype,'send').mockRejectedValue(new Error('Live sends forbidden'));
     await database.db.query('TRUNCATE stories,sources,publications,publication_snapshots,story_merges CASCADE');

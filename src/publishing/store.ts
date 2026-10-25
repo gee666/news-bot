@@ -2,11 +2,21 @@ import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
-import { newsOrderTime } from './ordering.js';
-import { publicationSnapshotSchema,type PublicationSnapshot } from '../types.js';
+import type { PublicationSnapshot } from '../types.js';
 import { eligible, snapshotFor, type StoryContent } from './content.js';
 import { generationIsCurrent } from '../pipeline/generation-freshness.js';
 export { eligible, snapshotFor, mergeSources, type StoryContent } from './content.js';
+
+/** Oldest current relevant source date first. Unknown dates use immutable first-collection retention time. */
+export function newsOrderTime(storyAlias: 's' | 'news'): string {
+  return `coalesce((SELECT coalesce(min(i.published_at),min(i.retention_at)) FROM source_items i
+    JOIN item_revisions r ON i.current_revision_id=r.id WHERE r.id IN (
+      SELECT m.revision_id FROM story_mentions m WHERE m.story_id=${storyAlias}.id
+      UNION SELECT l.revision_id FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
+        WHERE sl.story_id=${storyAlias}.id AND sl.classification='relevant'
+    )),${storyAlias}.created_at)`;
+}
+
 
 export interface Publication {
   id: string; story_id: string | null; destination_id: string; message_id: string | null;
@@ -21,9 +31,7 @@ export const publicationSelect = `SELECT p.*, s.content FROM publications p
 export const publicationEditSelect = `SELECT p.*, s.content FROM publications p
   JOIN publication_snapshots s ON s.id = coalesce(p.pending_snapshot_id,p.snapshot_id)`;
 // Explicit 429 rejections and proven connection failures cannot have sent a message.
-export const unsafeSendAttempt = `(a.status IN ('running','unknown','succeeded')
-  OR (a.status='retryable' AND coalesce(a.error_code,'') NOT IN ('telegram_rate_limit','telegram_connect_failed'))
-  OR coalesce(a.error_code,'') LIKE '%unknown%')`;
+export const unsafeSendAttempt = `(a.status IN ('running','unknown','succeeded'))`;
 export async function supersedeAttempts(client: Pick<PoolClient,'query'>, ids: string[], operation: 'send' | 'edit'): Promise<void> {
   if (!ids.length) return;
   // Cancel logical retries without erasing Telegram's bot-wide cooldown.
@@ -160,32 +168,6 @@ export async function prepareDigest(settings: AppSettings, destinationId: string
       [`run_now_publications:${manual.runId}`, JSON.stringify({ ids, destinationId, botId: manual.botId, limit,
         omitted: Math.max(0, stories.rows.length - capacity) })]);
     return ids;
-  });
-}
-
-// Recheck versions and replace an unsent snapshot when a prepared send was delayed.
-export async function refreshPrepared(publication: Publication, settings: AppSettings): Promise<PublicationSnapshot | null> {
-  if (!publication.story_id) return null;
-  return transaction(async client => {
-    await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
-    const story = (await client.query<StoryContent>(`SELECT s.* FROM stories s WHERE ${eligible} AND $1::text IS NOT NULL AND s.id=$5 FOR UPDATE`,
-      [publication.destination_id,settings.minimumPublicationScore,settings.profileVersion,settings.modelVersion,publication.story_id])).rows[0];
-    if (!story || !await generationIsCurrent(story.id, settings, client.query.bind(client))) return null;
-    const current = (await client.query<Publication & { snapshot_story_id:string | null }>(`SELECT p.*,snap.content,snap.story_id AS snapshot_story_id
-      FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id WHERE p.id=$1 FOR UPDATE OF p`,[publication.id])).rows[0];
-    if (!current || current.status !== 'prepared' || current.message_id || current.pending_snapshot_id
-      || current.snapshot_id !== publication.snapshot_id || current.story_id !== story.id || current.destination_id !== publication.destination_id) return null;
-    const frozen = await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND (operation='send' OR operation LIKE 'send_media:%')
-      UNION ALL SELECT 1 FROM publication_destination_reservations WHERE publication_id=$1`, [publication.id]);
-    if (frozen.rows.length) return publicationSnapshotSchema.parse(current.content);
-    const content = await snapshotFor(client,story);
-    const previous = publicationSnapshotSchema.safeParse(current.content);
-    if (previous.success && JSON.stringify(previous.data) === JSON.stringify(content) && current.snapshot_story_id === story.id) return content;
-    const snapshot = (await client.query<{ id:string }>('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id',
-      [story.id,JSON.stringify(content)])).rows[0];
-    if (!snapshot) throw new Error('Prepared snapshot insert failed');
-    await client.query('UPDATE publications SET snapshot_id=$1,updated_at=now() WHERE id=$2',[snapshot.id,publication.id]);
-    return content;
   });
 }
 

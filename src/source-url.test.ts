@@ -4,7 +4,7 @@ import { extractLinks } from './sources/links.js';
 import { extractMarkdownLinks } from './sources/markdown.js';
 import { mergeSources } from './publishing/content.js';
 import { visibleSources } from './publishing/sources.js';
-import { renderCanonicalText } from './publishing/canonical-text.js';
+import { render as renderCanonicalText } from './publishing/render.js';
 import { normalizedResearchUrl } from './pipeline/research-priority.js';
 const url = 'https://www.reddit.com/r/StableDiffusion/comments/1xdoh8k/i_tested_the_rtx_30series_gpu_unlock_up_to_59/';
 const dirty = url + '?solution=old&js_challenge=1&jsc_token=one&jsc_orig_r=&solution=new&jsc_token=two';
