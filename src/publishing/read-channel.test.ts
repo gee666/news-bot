@@ -41,6 +41,14 @@ describe('read-only send reconciliation without buttons', () => {
     expect(mocks.invoke).toHaveBeenCalledOnce();
     expect(mocks.invoke.mock.calls[0]?.[0]).toBeInstanceOf(Api.messages.CheckChatInvite);
   });
+  it.each([new Api.MessageMediaPhoto({}), new Api.MessageMediaDocument({})])('never adopts a media-first caption as the canonical text receipt: %s', async media => {
+    const captioned = message(2); captioned.media = media;
+    mocks.messages = [captioned];
+    const mediaFirst = { ...publication, delivery_kind: 'media_first' as const };
+    expect(await readSentMessage(mediaFirst)).toBeNull();
+    mocks.messages = [message(3),captioned];
+    expect(await readSentMessage(mediaFirst)).toBe('3');
+  });
   it('rejects identical visible text with a different source target', async () => {
     mocks.messages = [message(3,rendered.plainText,1,'https://other.org')];
     expect(await readSentMessage(publication)).toBeNull();

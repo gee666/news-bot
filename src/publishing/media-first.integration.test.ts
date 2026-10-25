@@ -5,7 +5,7 @@ import { BotApi, BotError, type PublicationMedia } from './bot-api.js';
 import { acceptFixtureStories } from './publishing.test-helpers.js';
 import type { AppSettings } from '../settings.js';
 import type { Publication } from './store.js';
-
+import type { RenderedMessage } from './render.js';
 const media = vi.hoisted(() => ({ publicationMedia: vi.fn(), releaseStoryMedia: vi.fn() }));
 vi.mock('../media/story-media.js', () => media);
 const url = process.env.TEST_DATABASE_URL;
@@ -44,10 +44,9 @@ async function due(): Promise<void> {
   await database.db.query("UPDATE publications SET next_retry_at=now()-interval '1 second'");
   await database.db.query("UPDATE publication_text_parts SET next_retry_at=now()-interval '1 second'");
 }
-async function uploadIds(_destination: string, _reply: string | undefined, items: PublicationMedia[]): Promise<string[]> {
+async function uploadIds(_destination: string, _caption: RenderedMessage, items: PublicationMedia[]): Promise<string[]> {
   return items.map((_,index) => String(100+index));
 }
-
 // Disposable PostgreSQL schemas, synthetic bytes, and no network/model requests.
 describe.skipIf(!url)('durable media-first publication ordering', () => {
   beforeAll(async () => {
@@ -68,8 +67,8 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     api = new BotApi('123:synthetic');
     vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({ id:123,is_bot:true });
     vi.spyOn(BotApi.prototype,'send').mockResolvedValue('900');
-    vi.spyOn(BotApi.prototype,'sendMedia').mockImplementation(uploadIds);
-    vi.spyOn(BotApi.prototype,'sendAlbum').mockRejectedValue(new Error('Legacy album forbidden for new posts'));
+    vi.spyOn(BotApi.prototype,'sendAlbum').mockImplementation(uploadIds);
+    vi.spyOn(BotApi.prototype,'sendMedia').mockRejectedValue(new Error('Caption-free media forbidden for new posts'));
     media.publicationMedia.mockReset().mockResolvedValue([image(0),image(1)]);
     media.releaseStoryMedia.mockReset().mockResolvedValue(undefined);
   });
@@ -79,7 +78,6 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
-
   it('selects the first ten distinct combined images/videos, preserves bytes and finishes all compatible batches before text', async () => {
     const selected = Array.from({ length:12 },(_,index): PublicationMedia => index % 3 === 1
       ? { type:'video',mimeType:'video/webm',data:Buffer.from(`WEBM ${index}`) }
@@ -88,8 +86,9 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     const publication = await fixture();
     const uploaded: PublicationMedia[] = [];
     const events: string[] = [];
-    vi.mocked(api.sendMedia).mockImplementation(async (target,reply,items) => {
-      events.push('media'); expect(reply).toBeUndefined(); expect(target).toBe('-100123');
+    vi.mocked(api.sendAlbum).mockImplementation(async (target,caption,items) => {
+      events.push('media'); expect(caption.plainText).toContain('Complete text with facts');
+      expect(caption.plainText.length).toBeLessThanOrEqual(1024); expect(target).toBe('-100123');
       expect(await order.reservedPublication(target)).toBe(publication.id);
       expect((await load(publication.id)).message_id).toBeNull();
       expect((await database.db.query('SELECT status FROM publication_text_parts')).rows).toEqual([{ status:'prepared' }]);
@@ -107,19 +106,57 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(await load(publication.id)).toMatchObject({ delivery_kind:'media_first',message_id:'900',media_status:'complete',status:'published' });
     expect((await database.db.query('SELECT data,message_id FROM publication_media_items')).rows)
       .toEqual(Array.from({ length:10 },(_,index) => ({ data:null,message_id:String(100+index) })));
-    expect(await order.reservedPublication('-100123')).toBeNull(); expect(api.sendAlbum).not.toHaveBeenCalled();
+    expect(await order.reservedPublication('-100123')).toBeNull(); expect(api.sendMedia).not.toHaveBeenCalled();
   });
-
+  it('publishes a real WebP and three MP4s as one native captioned album, followed by the complete canonical text', async () => {
+    const webp = Buffer.from('UklGRnAAAABXRUJQVlA4IGQAAAAQBwCdASqAAIAAPjEYi0SiIaEQRAAgAwS0t3C6TLgPwA/AAAC1YSrOcgjYgqOe2IvEFRz2xF4gqOe2IvEFRz2wuAD+/zwb//+xmP2jP8kr//+DMfwZj+DMf/CfGxI0QAAAAAAA', 'base64');
+    media.publicationMedia.mockResolvedValue([{ type:'image',mimeType:'image/webp',data:webp },
+      ...Array.from({ length:3 },(_,index): PublicationMedia => ({ type:'video',mimeType:'video/mp4',data:Buffer.from(`MP4 ${index}`) }))]);
+    const original = await fixture();
+    const details = 'Complete text with facts. '.repeat(80);
+    await database.db.query('UPDATE stories SET summary=$2 WHERE id=$1',[original.story_id,details]);
+    if (!original.story_id) throw new Error('Expected fixture story');
+    await acceptFixtureStories(settings,[original.story_id]); await store.refreshPrepared(original,settings);
+    const publication = await load(original.id);
+    vi.mocked(api.sendAlbum).mockRestore(); vi.mocked(api.send).mockRestore();
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url,options) => {
+      if (String(url).endsWith('/sendMediaGroup')) {
+        const form = options?.body;
+        if (!(form instanceof FormData)) throw new Error('Expected multipart upload');
+        const entries = JSON.parse(String(form.get('media')));
+        expect(entries.map((entry: { type:string }) => entry.type)).toEqual(['photo','video','video','video']);
+        expect(entries[0].caption).toContain('Complete text with facts');
+        expect(entries[0].parse_mode).toBe('HTML'); expect(form.get('reply_parameters')).toBeNull();
+        const photo = form.get('file0');
+        if (!(photo instanceof Blob)) throw new Error('Expected PNG photo');
+        expect(photo.type).toBe('image/png');
+        expect(Buffer.from(await photo.arrayBuffer()).subarray(0,8)).toEqual(Buffer.from('89504e470d0a1a0a','hex'));
+        return new Response(JSON.stringify({ ok:true,result:entries.map((_: unknown,index: number) => ({ message_id:100+index,chat:{ id:-100123 } })) }));
+      }
+      expect(String(url)).toMatch(/\/sendMessage$/u);
+      expect(JSON.parse(String(options?.body)).text).toContain(details.trimEnd());
+      return new Response(JSON.stringify({ ok:true,result:{ message_id:900,chat:{ id:-100123 } } }));
+    });
+    expect(await delivery.sendPrepared(publication,new BotApi('123:synthetic',fetcher),settings)).toBe('900');
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(webp.subarray(0,4).toString()).toBe('RIFF');
+    const attempts = (await database.db.query<{ operation:string; response_metadata:Record<string,unknown> }>(
+      'SELECT operation,response_metadata FROM request_attempts ORDER BY dispatched_at')).rows;
+    expect(attempts[0]).toMatchObject({ operation:'send_media:0',response_metadata:{
+      uploadTypes:['photo','video','video','video'],caption:{ fingerprint:expect.any(String) } } });
+    expect(attempts[0]?.response_metadata).not.toHaveProperty('fingerprint');
+    expect(await load(publication.id)).toMatchObject({ message_id:'900',status:'published',media_status:'complete' });
+  });
   it('does not reserve a destination for zero media', async () => {
     media.publicationMedia.mockResolvedValue([]);
     const publication = await fixture();
     expect(await delivery.sendPrepared(publication,api,settings)).toBe('900');
-    expect(api.sendMedia).not.toHaveBeenCalled(); expect(await order.reservedPublication('-100123')).toBeNull();
+    expect(api.sendAlbum).not.toHaveBeenCalled(); expect(await order.reservedPublication('-100123')).toBeNull();
   });
 
   it.each(['unknown','failed'] as const)('retains the reservation after a %s media outcome and blocks every ancillary send path', async outcome => {
     const owner = await fixture(); const other = await fixture();
-    vi.mocked(api.sendMedia).mockRejectedValue(new BotError('media_outcome',outcome));
+    vi.mocked(api.sendAlbum).mockRejectedValue(new BotError('media_outcome',outcome));
     expect(await delivery.sendPrepared(owner,api,settings)).toBeNull();
     expect(await order.reservedPublication('-100123')).toBe(owner.id);
     await digest.recoverSends('-100123'); await plans.recoverPublicationMedia('-100123');
@@ -134,13 +171,13 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     await (await import('./navigation-delivery.js')).retryNavigationParts(api,settings,'-100123');
     expect(await (await import('./index.js')).verifyBot()).toMatchObject({ verified:false,messageId:null });
     await digest.publishDigest(settings);
-    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
+    expect(api.sendAlbum).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
     expect(await load(owner.id)).toMatchObject({ status:'prepared',message_id:null,media_status:outcome });
   });
 
   it('retries rejected media with the exact frozen bytes and snapshot, never adopts or refreshes it', async () => {
     const publication = await fixture();
-    vi.mocked(api.sendMedia).mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',120_000)).mockImplementation(uploadIds);
+    vi.mocked(api.sendAlbum).mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',120_000)).mockImplementation(uploadIds);
     expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
     const frozen = await load(publication.id);
     await digest.recoverSends('-100123'); await plans.recoverPublicationMedia('-100123'); await due();
@@ -148,8 +185,8 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     await store.refreshPrepared(frozen,settings); await store.adoptPreparedPublications(settings,'-100123');
     expect((await load(publication.id)).snapshot_id).toBe(frozen.snapshot_id);
     expect(await delivery.sendPrepared(await load(publication.id),api,settings)).toBe('900');
-    expect(media.publicationMedia).toHaveBeenCalledOnce(); expect(api.sendMedia).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(api.sendMedia).mock.calls[1]?.[2]).toEqual([image(0),image(1)]);
+    expect(media.publicationMedia).toHaveBeenCalledOnce(); expect(api.sendAlbum).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.sendAlbum).mock.calls[1]?.[2]).toEqual([image(0),image(1)]);
   });
 
   it('resumes the destination owner before newly prepared stories after canonical rate limits, without uploading again', async () => {
@@ -161,7 +198,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     vi.mocked(api.send).mockImplementation(async (_target,message) => { events.push(message.plainText); return events.length === 1 ? '900' : '901'; });
     await digest.resumePublications(settings);
     expect((await load(owner.id)).message_id).toBe('900'); expect((await load(other.id)).message_id).toBe('901');
-    expect(api.sendMedia).toHaveBeenCalledTimes(2); // Once for each story, never twice for the owner.
+    expect(api.sendAlbum).toHaveBeenCalledTimes(2); // Once for each story, never twice for the owner.
     expect(await order.reservedPublication('-100123')).toBeNull();
   });
 
@@ -185,7 +222,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
 
   it('quarantines an interrupted media request on restart and keeps its destination blocked even after spool expiry', async () => {
     const publication = await fixture();
-    vi.mocked(api.sendMedia).mockRejectedValue(new BotError('telegram_connect_failed','retryable'));
+    vi.mocked(api.sendAlbum).mockRejectedValue(new BotError('telegram_connect_failed','retryable'));
     await delivery.sendPrepared(publication,api,settings);
     await database.db.query("UPDATE publication_media_batches SET status='running'");
     await database.db.query("UPDATE request_attempts SET status='running'");
@@ -195,26 +232,26 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect((await load(publication.id)).media_status).toBe('unknown');
     expect((await database.db.query('SELECT status FROM request_attempts')).rows).toEqual([{ status:'unknown' }]);
     expect(await order.reservedPublication('-100123')).toBe(publication.id);
-    await digest.resumePublications(settings); expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
+    await digest.resumePublications(settings); expect(api.sendAlbum).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
   });
 
   it.each(['pause','destination','freshness'] as const)('checks %s again between media and canonical text without releasing ownership', async change => {
     const publication = await fixture();
-    vi.mocked(api.sendMedia).mockImplementation(async (...args) => {
+    vi.mocked(api.sendAlbum).mockImplementation(async (...args) => {
       if (change === 'pause') await (await import('../settings.js')).saveSettings({ publishingEnabled:false });
       else if (change === 'destination') await store.saveState('telegram_destination',{ channelId:'-100456' });
       else await database.db.query("UPDATE judgments SET expires_at=now()-interval '1 second'");
       return uploadIds(...args);
     });
     expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
-    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
+    expect(api.sendAlbum).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
     expect(await order.reservedPublication('-100123')).toBe(publication.id);
     expect((await load(publication.id)).message_id).toBeNull();
   });
 
   it('resumes after the last media commit but before canonical dispatch without uploading any media again', async () => {
     const publication = await fixture();
-    vi.mocked(api.sendMedia).mockImplementation(async (...args) => {
+    vi.mocked(api.sendAlbum).mockImplementation(async (...args) => {
       vi.mocked(api.identity).mockRejectedValueOnce(new Error('Process interrupted before text dispatch'));
       return uploadIds(...args);
     });
@@ -224,7 +261,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(api.send).not.toHaveBeenCalled();
     await digest.resumePublications(settings);
     expect((await load(publication.id)).message_id).toBe('900');
-    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledOnce();
+    expect(api.sendAlbum).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledOnce();
     expect(await order.reservedPublication('-100123')).toBeNull();
   });
 
@@ -252,7 +289,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     const calls = vi.mocked(api.send).mock.calls.length;
     await digest.resumePublications(settings);
     expect(await order.reservedPublication('-100123')).toBeNull();
-    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledTimes(calls);
+    expect(api.sendAlbum).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledTimes(calls);
   });
 
   it.each(['retryable','unknown'] as const)('holds the destination through %s text continuations after the canonical receipt', async outcome => {
@@ -273,7 +310,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     await (await import('./text-delivery.js')).deliverPublicationText(await load(publication.id),api,settings);
     expect(vi.mocked(api.send).mock.calls.length).toBe(calls+(outcome === 'retryable' ? 1 : 0));
     expect(await order.reservedPublication('-100123')).toBe(outcome === 'retryable' ? null : publication.id);
-    expect(api.sendMedia).toHaveBeenCalledOnce();
+    expect(api.sendAlbum).toHaveBeenCalledOnce();
   });
 
   it('serializes a concurrent verification behind the whole pair using the existing digest lease', async () => {
@@ -282,7 +319,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     let entered: () => void = () => { throw new Error('Upload observer missing'); };
     const started = new Promise<void>(resolve => { entered = resolve; });
     const pending = new Promise<void>(resolve => { release = resolve; });
-    vi.mocked(api.sendMedia).mockImplementation(async (...args) => { entered(); await pending; return uploadIds(...args); });
+    vi.mocked(api.sendAlbum).mockImplementation(async (...args) => { entered(); await pending; return uploadIds(...args); });
     vi.mocked(api.send).mockResolvedValueOnce('900').mockResolvedValueOnce('901');
     vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
     const publishing = digest.publishDigest(settings);

@@ -8,13 +8,15 @@ import type { DeliveryAuthorization } from './approval.js';
 import { destinationBlocked, reserveDestination } from './destination-order.js';
 import { destination, rateLimited, type Publication } from './store.js';
 import { telegramTimeouts } from './telegram-transport.js';
+import type { RenderedMessage } from './render.js';
+import { sendMetadata } from './reconciliation.js';
 
 interface Batch { id: string; batch_number: number; status: string; attempt_count: number; next_retry_at: Date | null }
 interface Item { id: string; type: PublicationMedia['type']; mime_type: string; digest: string; data: Buffer | null; expires_at: Date }
 
 /** Caller holds the global digest lease. The reservation outlives that lease and every unknown outcome. */
 export async function deliverMediaFirst(publication: Publication, api: BotApi, settings: AppSettings,
-  authorization: DeliveryAuthorization): Promise<boolean> {
+  authorization: DeliveryAuthorization, caption: RenderedMessage): Promise<boolean> {
   if (publication.delivery_kind !== 'media_first' || publication.status !== 'prepared' || publication.message_id) return false;
   const botId = String((await api.identity()).id);
   if (publication.bot_id && publication.bot_id !== botId) return false;
@@ -58,7 +60,7 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
         SELECT $1,'telegram-bot',$2,coalesce(max(attempt_number),0)+1,'running',$3 FROM request_attempts WHERE publication_id=$1 RETURNING id`,
       [publication.id, `send_media:${batch.batch_number}`, JSON.stringify({ deliveryKind: 'media_first', botId,
         snapshotId: publication.snapshot_id, itemIds: items.map(item => item.id), mediaDigests: items.map(item => item.digest),
-        uploadTypes: media.map(mediaUploadType), requestTimeoutMs: telegramTimeouts().uploadMs })])).rows[0];
+        uploadTypes: media.map(mediaUploadType), caption: sendMetadata(caption), requestTimeoutMs: telegramTimeouts().uploadMs })])).rows[0];
       await client.query('UPDATE publications SET bot_id=coalesce(bot_id,$2),updated_at=now() WHERE id=$1', [publication.id,botId]);
       return attempt?.id ?? null;
     });
@@ -67,7 +69,7 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
     publication = { ...publication, bot_id: botId };
     let ids: string[];
     try {
-      ids = await api.sendMedia(publication.destination_id, undefined, media);
+      ids = await api.sendAlbum(publication.destination_id, caption, media);
       if (ids.length !== items.length || new Set(ids).size !== items.length || ids.some(id => !/^[1-9]\d*$/u.test(id))) {
         throw new BotError('telegram_media_response_unknown', 'unknown');
       }

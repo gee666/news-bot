@@ -96,6 +96,8 @@ export async function readSentPublication(publication: Publication): Promise<Alb
       scanned.push(message);
       if (message.date * 1000 < earliest) break;
       if (known.has(String(message.id)) || !windows.some(window => message.date*1000 >= window.start && message.date*1000 <= window.end)) continue;
+      // A caption can equal the canonical text, but cannot complete its send.
+      if (publication.delivery_kind === 'media_first' && message.media && !(message.media instanceof Api.MessageMediaEmpty)) continue;
       // Edited/forwarded content cannot establish the original send outcome.
       if (message.editDate || message.fwdFrom) continue;
       const links = (message.entities ?? []).flatMap(entity => entity instanceof Api.MessageEntityTextUrl

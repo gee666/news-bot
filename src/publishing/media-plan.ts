@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { publicationMedia } from '../media/story-media.js';
+import { normalizeImage } from '../media/codec.js';
 import { BotError, MAX_ALBUM_MEDIA, mediaUploadType, type PublicationMedia } from './bot-api.js';
 import type { Publication } from './store.js';
 
@@ -66,6 +67,13 @@ export async function preparePublicationMedia(publication: Publication, settings
   const downloaded = deduplicateMedia(await publicationMedia(publication.story_id, settings));
   const album = captionFirst && downloaded.length > 0 && selectAlbumMedia(downloaded).length === downloaded.length;
   const media = mediaFirst ? downloaded.slice(0, MAX_ALBUM_MEDIA) : downloaded;
+  // Telegram photos require JPEG/PNG. Freeze the actual upload bytes, not a document fallback.
+  for (const item of media) {
+    if (!mediaFirst || item.type !== 'image' || mediaUploadType(item) !== 'document') continue;
+    item.data = await normalizeImage(item.data, { maxOutputBytes: 9_000_000 });
+    item.mimeType = 'image/png';
+    item.digest = createHash('sha256').update(item.data).digest('hex');
+  }
   if (!media.length && !publication.media_snapshot_id) return false;
   await transaction(async client => {
     const current = (await client.query<Publication>('SELECT * FROM publications WHERE id=$1 FOR UPDATE', [publication.id])).rows[0];

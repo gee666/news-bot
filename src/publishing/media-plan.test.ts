@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
 import { defaultSettings } from '../settings.js';
+import { createHash } from 'node:crypto';
+import { normalizeImage } from '../media/codec.js';
 import { publicationMedia } from '../media/story-media.js';
 import { deduplicateMedia, expirePublicationMedia, partitionMedia, preparePublicationMedia, recoverPublicationMedia, selectAlbumMedia } from './media-plan.js';
 import type { Publication } from './store.js';
@@ -8,6 +10,7 @@ import type { Publication } from './store.js';
 const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: mocks.transaction }));
 vi.mock('../media/story-media.js', () => ({ publicationMedia: vi.fn() }));
+vi.mock('../media/codec.js', () => ({ normalizeImage: vi.fn() }));
 const publication: Publication = { id: 'publication', story_id: 'story', snapshot_id: 'snapshot', pending_snapshot_id: null,
   destination_id: '-100123', status: 'prepared', message_id: null, bot_id: '123', format_version: 1,
   attempt_count: 0, next_retry_at: null, created_at: new Date(), content: {} };
@@ -16,6 +19,7 @@ beforeEach(() => {
   mocks.query.mockReset().mockResolvedValue({ rows: [] });
   mocks.transaction.mockReset().mockImplementation(async (run: (client: Pick<PoolClient, 'query'>) => Promise<unknown>) => run({ query: mocks.query }));
   vi.mocked(publicationMedia).mockReset().mockResolvedValue([]);
+  vi.mocked(normalizeImage).mockReset();
 });
 
 describe('temporary durable media plan', () => {
@@ -40,6 +44,30 @@ describe('temporary durable media plan', () => {
     expect(inserts.map(([, args]) => args[1])).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]);
     expect(inserts.every(([, args]) => Buffer.isBuffer(args[5]))).toBe(true);
   });
+  it('converts non-native images before freezing a new media-first plan, keeping native media and expiry intact', async () => {
+    const expiresAt = Date.now() + 60_000;
+    const source = { type: 'image' as const, mimeType: 'image/webp', data: Buffer.from('webp'), expiresAt };
+    const png = Buffer.from('converted PNG');
+    const video = { type: 'video' as const, mimeType: 'video/mp4', data: Buffer.from('mp4') };
+    vi.mocked(publicationMedia).mockResolvedValue([source, source, video]);
+    vi.mocked(normalizeImage).mockResolvedValue(png);
+    const current = { ...publication, content: { presentationVersion: 1 } };
+    mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT * FROM publications') ? [current] : [] }));
+    await preparePublicationMedia(current, defaultSettings);
+    expect(normalizeImage).toHaveBeenCalledExactlyOnceWith(source.data, { maxOutputBytes: 9_000_000 });
+    const inserts = mocks.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO publication_media_items'));
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0]?.[1].slice(2)).toEqual(['image', 'image/png', createHash('sha256').update(png).digest('hex'), png, expiresAt]);
+    expect(inserts[1]?.[1][3]).toBe('video/mp4'); expect(inserts[1]?.[1][5]).toBe(video.data);
+    expect(source.mimeType).toBe('image/webp'); expect(source.data.toString()).toBe('webp');
+    expect(mocks.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO publication_media_batches'))).toHaveLength(1);
+  });
+  it('does not persist a partial plan or fall back to documents when image conversion fails', async () => {
+    vi.mocked(publicationMedia).mockResolvedValue([{ type: 'image', mimeType: 'image/webp', data: Buffer.from('invalid') }]);
+    vi.mocked(normalizeImage).mockRejectedValue(new Error('decoder failed'));
+    await expect(preparePublicationMedia({ ...publication, content: { presentationVersion: 1 } }, defaultSettings)).rejects.toThrow('decoder failed');
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
   it('uses the earliest duplicate deadline instead of resetting the cache TTL', () => {
     const deadline = Date.now() + 1000;
     expect(deduplicateMedia([
@@ -51,6 +79,7 @@ describe('temporary durable media plan', () => {
     expect(await preparePublicationMedia({ ...publication, media_snapshot_id: 'snapshot', media_status: 'pending' }, defaultSettings)).toBe(true);
     expect(publicationMedia).not.toHaveBeenCalled();
     expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(normalizeImage).not.toHaveBeenCalled();
   });
   it('does not dispatch or write a partial plan after a failed download', async () => {
     vi.mocked(publicationMedia).mockRejectedValue(new Error('download failed'));
