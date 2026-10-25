@@ -9,7 +9,6 @@ const schema = `source_relevance_${randomUUID().replaceAll('-', '')}`;
 let admin: pg.Pool;
 let database: typeof import('../db.js');
 let snapshotFor: typeof import('./store.js').snapshotFor;
-let expectedSourceUrls: typeof import('./preview-sources.js').expectedSourceUrls;
 let sourceId: string;
 const sharedUrl = 'https://publisher.org/unrelated';
 
@@ -58,7 +57,6 @@ describe.skipIf(!url)('typed fetched-source relevance', () => {
     database = await import('../db.js');
     await database.migrate();
     ({ snapshotFor } = await import('./store.js'));
-    ({ expectedSourceUrls } = await import('./preview-sources.js'));
     sourceId = await one("INSERT INTO sources(connector_type,external_id,name,access) VALUES('telegram','relevance','Channel','public') RETURNING id");
   });
   afterAll(async () => {
@@ -72,7 +70,6 @@ describe.skipIf(!url)('typed fetched-source relevance', () => {
     await link(current.id);
     await evidence(current.id, 'uncertain', sharedUrl, null);
     expect(await urls(current)).not.toContain(sharedUrl);
-    expect(await expectedSourceUrls(database.db, current.id, current)).not.toContain(sharedUrl);
     expect((await database.db.query('SELECT relevance FROM story_evidence WHERE story_id=$1', [current.id])).rows).toEqual([{ relevance: 'uncertain' }]);
   });
 
@@ -91,13 +88,11 @@ describe.skipIf(!url)('typed fetched-source relevance', () => {
       ] })]);
     await database.db.query("INSERT INTO publications(story_id,snapshot_id,destination_id) VALUES($1,$2,'test')", [loser.id, snap]);
     expect(await urls(current)).not.toContain(sharedUrl);
-    expect(await expectedSourceUrls(database.db, current.id, current)).not.toContain(sharedUrl);
     expect((await database.db.query('SELECT classification FROM mention_links ml JOIN item_links l ON l.id=ml.link_id WHERE l.url=$1', [sharedUrl])).rows)
       .toEqual(expect.arrayContaining([{ classification: 'relevant' }]));
     const { resetResearchFixture } = await import('../pipeline/generation.test-helpers.js');
     await resetResearchFixture(current.id);
     expect(await urls(current)).not.toContain(sharedUrl);
-    expect(await expectedSourceUrls(database.db, current.id, current)).not.toContain(sharedUrl);
     const other = await story();
     await link(other.id);
     await evidence(other.id, 'relevant');
@@ -106,7 +101,6 @@ describe.skipIf(!url)('typed fetched-source relevance', () => {
     await database.db.query(`UPDATE story_evidence SET relevance='relevant',role='supporting',verified_at=now(),assessed_at=now(),assessment='Relevant now'
       WHERE story_id=$1 AND evidence_id=$2`, [current.id, document]);
     expect(await urls(current)).toContain(sharedUrl);
-    expect(await expectedSourceUrls(database.db, current.id, current)).toContain(sharedUrl);
   });
 
   it('keeps archived irrelevance through an actual merge and cache invalidation until a new relevant assessment', async () => {
@@ -128,7 +122,6 @@ describe.skipIf(!url)('typed fetched-source relevance', () => {
     expect((await database.db.query('SELECT relevance FROM story_merge_evidence WHERE evidence_id=$1 AND merged_story_id=$2', [document, loser.id])).rows)
       .toEqual([{ relevance: 'irrelevant' }]);
     expect(await urls(current)).not.toContain(sharedUrl);
-    expect(await expectedSourceUrls(database.db, current.id, current)).not.toContain(sharedUrl);
     await database.db.query("UPDATE evidence_documents SET expires_at=now()-interval '1 second' WHERE id=$1", [document]);
     const { loadEvidence } = await import('../pipeline/generation-store.js');
     expect(await loadEvidence(current.id, 'new-hash')).toEqual([]);

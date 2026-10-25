@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { JSDOM } from 'jsdom';
 import { publicationSnapshotSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
-import { render } from './render.js';
-import { renderCaption } from './caption.js';
-import { renderFullText, withUpdateMarker } from './full-text.js';
-import { withoutUpdateMarker } from './message-render.js';
+import { render, withUpdateMarker } from './render.js';
 import { normalizeMarkedLists, presentationSourceLabel } from './presentation.js';
 
 const source = (label: string, url: string, flags: Partial<PublicationSource> = {}): PublicationSource => ({
@@ -46,9 +43,6 @@ describe('versioned publication presentation', () => {
 
   it.each([
     ['text', (input: PublicationSnapshot) => [render(input)]],
-    ['caption', (input: PublicationSnapshot) => [renderCaption(input)]],
-    ['full text', (input: PublicationSnapshot) => renderFullText(input)],
-    ['navigation footer', (input: PublicationSnapshot) => renderFullText(input, true)],
   ] as const)('uses separate bullet lines and exact escaped link offsets in %s', (_name, renderParts) => {
     const input = { ...snapshot, sources: [
       source('Название <AI> & "SDK"', 'https://www.github.com/org/repo?x=1&y=2'),
@@ -77,21 +71,21 @@ describe('versioned publication presentation', () => {
       .replace('• Третий', '🔸 Третий').replace('1. Четвёртый', '🔸 Четвёртый')
       .replace('+ [x] Готово', '🔸 Готово').replace('🔹 Пятый', '🔸 Пятый').replace('- `inline`', '🔸 `inline`'));
     expect(normalizeMarkedLists(normalized)).toBe(normalized);
-    expect(renderFullText({ ...snapshot, details: body })[0]?.plainText).toContain(normalized);
     expect(render({ ...snapshot, details: body }).plainText).toContain(normalized);
-    expect(renderFullText({ ...snapshot, presentationVersion: undefined, details: body })[0]?.plainText).toContain(body);
+    expect(render({ ...snapshot, details: body }).plainText).toContain(normalized);
+    expect(render({ ...snapshot, presentationVersion: undefined, details: body }).plainText).toContain(body);
   });
 
   it('keeps the unversioned default and rejects unsupported presentation versions', () => {
     const legacy = { ...snapshot, presentationVersion: undefined, details: '- Факт', sources: [source('Бэкдор · №32444', 'https://t.me/backdoor/32444')] };
     const expected = '••••••••◦◦\nНовость\n\n- Факт\n\nВторичные источники\nБэкдор · №32444';
     expect(render(legacy).plainText).toBe(expected);
-    expect(renderFullText(legacy)[0]?.plainText).toBe(expected);
+    expect(render(legacy).plainText).toBe(expected);
     expect(publicationSnapshotSchema.parse(legacy).presentationVersion).toBeUndefined();
     expect(publicationSnapshotSchema.safeParse({ ...snapshot, presentationVersion: 2 }).success).toBe(false);
   });
 
-  it('formats a versioned UPD link and removes only its exact verified prefix', () => {
+  it('formats a versioned UPD link', () => {
     const base = render(snapshot);
     const url = 'https://t.me/c/123/1330';
     const options = { presentationVersion: 1 as const, headline: 'Новая <версия> & SDK' };
@@ -100,10 +94,5 @@ describe('versioned publication presentation', () => {
     expect(marked.text).toContain('>#1330 · Новая &lt;версия&gt; &amp; SDK</a>');
     const link = marked.links[0]!;
     expect(marked.plainText.slice(link.offset, link.offset + link.length)).toBe('#1330 · Новая <версия> & SDK');
-    expect(withoutUpdateMarker(marked, url, options)).toEqual(base);
-    expect(withoutUpdateMarker(marked, url, { ...options, headline: 'Другой текст' })).toEqual(marked);
-    expect(withoutUpdateMarker({ ...marked, links: [] }, url, options).plainText).toBe(marked.plainText);
-    const legacy = withUpdateMarker(base, url);
-    expect(withoutUpdateMarker(legacy, url)).toEqual(base);
   });
 });

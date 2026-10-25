@@ -1,157 +1,67 @@
 import type { PoolClient } from 'pg';
-import { z } from 'zod';
-import { settingsSchema, type AppSettings } from '../settings.js';
-import { publicationSnapshotSchema } from '../types.js';
-import { blockedStoriesCte } from '../pipeline/item-failures.js';
-import { generationIsCurrent } from '../pipeline/generation-freshness.js';
-import { eligible, snapshotFor, snapshotSources } from './content.js';
-import { fullRepairPlan, fullRepairPlanHash, loadAction, snapshotHash, type DeliveryAuthorization } from './approval.js';
-import { rateLimited,unsafeSendAttempt,type Publication } from './store.js';
-import { desiredNavigation, navigationOnlyChange } from './navigation.js';
-import { destinationBlocked } from './destination-order.js';
-import { lockAdmissionInputs } from './admission-locks.js';
+import type { AppSettings } from '../settings.js';
+import type { Publication } from './store.js';
 
-type Reason = 'settings_changed' | 'publishing_paused' | 'snapshot_changed' | 'story_ineligible'
-  | 'retained_provenance_unknown' | 'current_generation_missing'
-  | 'destination_reserved' | 'delivery_outcome_unknown' | 'approval_invalid' | 'publication_removed' | 'telegram_cooldown' | 'consolidation_unresolved';
+export interface DeliveryAuthorization { verificationTest?: boolean }
+type Operation = 'send' | 'edit';
+type Reason = 'publishing_paused' | 'snapshot_changed' | 'story_ineligible' | 'settings_changed' | 'delivery_outcome_unknown';
 export type PublicationAdmission = { allowed: true } | { allowed: false; reason: Reason };
-const deny = (reason: Reason): PublicationAdmission => ({ allowed: false, reason });
-const storySchema = z.object({ id: z.uuid(), headline: z.string(), summary: z.string().nullable(),
-  translated_excerpt: z.string().nullable(), chosen_excerpt: z.string().nullable(), researched: z.boolean(),
-  interest_score: z.number().int(), content_version: z.number().int() });
 
-/** Read-only policy check. The attempt boundary calls it while holding history/publication row locks. */
-export async function publicationAdmission(client: Pick<PoolClient,'query'>, publication: Publication, settings: AppSettings,
-  operation: 'send' | 'edit', authorization: DeliveryAuthorization = {}): Promise<PublicationAdmission> {
-  try {
-    if (await destinationBlocked(publication.destination_id, operation === 'send' && publication.delivery_kind === 'media_first' ? publication.id : undefined, client)) return deny('destination_reserved');
-    if (publication.delivery_kind === 'media_first' && operation === 'send') {
-      const target = (await client.query<{ value: unknown }>("SELECT value FROM operational_state WHERE key='telegram_destination' FOR SHARE")).rows[0]?.value;
-      if (!z.object({ channelId: z.literal(publication.destination_id) }).safeParse(target).success) return deny('snapshot_changed');
-    }
-    const saved = settingsSchema.parse((await client.query<{ value: unknown }>('SELECT value FROM app_settings WHERE id=1 FOR SHARE')).rows[0]?.value);
-    if (await rateLimited(client)) return deny('telegram_cooldown');
-    if (JSON.stringify(saved) !== JSON.stringify(settingsSchema.parse(settings))) return deny('settings_changed');
-    const canonicalId = await lockAdmissionInputs(client,publication.id);
-    if (canonicalId === undefined) return deny('snapshot_changed');
-    const row = (await client.query<Publication & { canonical_story_id: string | null; desired_story_id: string | null; story: unknown; eligible: boolean }>(`
-      SELECT p.*,desired.content,desired.story_id AS desired_story_id,coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id) AS canonical_story_id,
-        to_jsonb(s) AS story,coalesce((${eligible}),false) AS eligible
-      FROM publications p JOIN publication_snapshots desired ON desired.id=coalesce(p.pending_snapshot_id,p.snapshot_id)
-      LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id
-      LEFT JOIN stories s ON s.id=coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id)
-      WHERE p.id=$5 AND $1::text IS NOT NULL FOR UPDATE OF p`,
-    [publication.destination_id,saved.minimumPublicationScore,saved.profileVersion,saved.modelVersion,publication.id])).rows[0];
-    if (!row || row.canonical_story_id !== canonicalId || row.destination_id !== publication.destination_id || row.message_id !== publication.message_id
-      || row.bot_id !== publication.bot_id || row.delivery_kind !== publication.delivery_kind
-      || row.media_snapshot_id !== publication.media_snapshot_id
-      || row.status !== publication.status || row.snapshot_id !== publication.snapshot_id || row.pending_snapshot_id !== publication.pending_snapshot_id
-      || snapshotHash(row.content) !== snapshotHash(publication.content)) return deny('snapshot_changed');
-    if ((await client.query('SELECT 1 FROM operational_state WHERE key=$1', [`publication_removal:${row.id}`])).rows.length) return deny('publication_removed');
-    if (operation === 'send' && (row.status !== 'prepared' || row.message_id)) return deny('delivery_outcome_unknown');
-    if (operation === 'edit' && (row.status !== 'published' || !row.message_id)) return deny('delivery_outcome_unknown');
-    const unsafe = await client.query(`SELECT 1 FROM request_attempts a WHERE a.publication_id=$1 AND a.operation=$2
-      AND (($2='send' AND ${unsafeSendAttempt}) OR ($2='edit' AND a.status IN ('running','unknown'))) LIMIT 1`,[row.id,operation]);
-    if (unsafe.rows.length) return deny('delivery_outcome_unknown');
-    // A reviewed repair owns its pending target even when its logical content is unchanged.
-    if (operation === 'edit' && row.pending_snapshot_id) {
-      const reserved = await client.query<{ approval_id:string }>(`SELECT value->>'approvalId' AS approval_id FROM operational_state
-        WHERE key LIKE 'publication_action:%' AND value->>'operation'='edit' AND value ? 'fullContentRepair'
-          AND value->>'publicationId'=$1 AND value->>'desiredSnapshotId'=$2`,[row.id,row.pending_snapshot_id]);
-      if (reserved.rows.length && (!authorization.fullContentRepair || reserved.rows.length !== 1
-        || reserved.rows[0]?.approval_id !== authorization.approvalId)) return deny('approval_invalid');
-    }
-    let explicit = false;
-    let reviewedFullRepair = false;
-    let approvedReceiptId: string | undefined;
-    if (authorization.approvalId) {
-      const action = await loadAction(client,authorization.approvalId);
-      if (!action || action.state !== 'approved' || Date.parse(action.expiresAt) <= Date.now() || action.operation !== operation
-        || action.publicationId !== row.id || action.destinationId !== row.destination_id || action.messageId !== row.message_id
-        || action.priorSnapshotId !== row.snapshot_id || action.desiredSnapshotId !== row.pending_snapshot_id
-        || action.snapshotHash !== snapshotHash(row.content) || action.storyId !== row.canonical_story_id) return deny('approval_invalid');
-      const story = storySchema.safeParse(row.story);
-      if (!story.success || story.data.content_version !== action.contentVersion) return deny('approval_invalid');
-      if (action.fullContentRepair) {
-        const repair = action.fullContentRepair;
-        const prior = (await client.query<{ content: unknown }>('SELECT content FROM publication_snapshots WHERE id=$1 FOR SHARE',[row.snapshot_id])).rows[0];
-        const destination = (await client.query<{ value: unknown }>("SELECT value FROM operational_state WHERE key='telegram_destination' FOR SHARE")).rows[0]?.value;
-        if (!authorization.fullContentRepair || authorization.fullRepairPlanHash !== fullRepairPlanHash(fullRepairPlan(row.content,repair.reviewedCaption))
-          || row.delivery_kind !== 'album' || row.bot_id !== repair.botId
-          || (row.media_snapshot_id ?? null) !== repair.mediaSnapshotId || !prior || snapshotHash(prior.content) !== repair.priorSnapshotHash
-          || !z.object({ channelId:z.literal(row.destination_id) }).safeParse(destination).success) return deny('approval_invalid');
-        // Never overwrite existing continuations or proceed through unresolved delivery/removal work.
-        if ((await client.query(`SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND part_number>0
-          UNION ALL SELECT 1 FROM request_attempts WHERE publication_id=$1 AND status IN ('running','unknown')
-          UNION ALL SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=$1 AND status<>'failed'`,[row.id])).rows.length)
-          return deny('delivery_outcome_unknown');
-        reviewedFullRepair = true;
-      } else {
-        if (authorization.fullContentRepair || !action.receiptId) return deny('approval_invalid');
-        approvedReceiptId = action.receiptId;
-      }
-      explicit = true;
-    }
-    if (authorization.verificationTest && row.canonical_story_id === null) {
-      const test = z.object({ publicationId: z.uuid(), destinationId: z.string(), botId: z.number().int().positive() }).safeParse(
-        (await client.query<{ value: unknown }>("SELECT value FROM operational_state WHERE key='bot_verification_test'")).rows[0]?.value);
-      if (test.success && test.data.publicationId === row.id && test.data.destinationId === row.destination_id
-        && (operation === 'send' && !row.bot_id || row.bot_id === String(test.data.botId))
-        && row.desired_story_id === null && publicationSnapshotSchema.parse(row.content).sources.length === 0
-        && !(await client.query(`SELECT 1 FROM story_publication_aliases WHERE publication_id=$1
-          UNION ALL SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=$1`,[row.id])).rows.length) return { allowed: true };
-      return deny('approval_invalid');
-    }
-    if (authorization.fullContentRepair && !reviewedFullRepair) return deny('approval_invalid');
-    if (!saved.publishingEnabled && (!explicit || reviewedFullRepair)) return deny('publishing_paused');
-    if (operation === 'edit' && !reviewedFullRepair) {
-      const sent = publicationSnapshotSchema.parse((await client.query<{ content: unknown }>(
-        'SELECT content FROM publication_snapshots WHERE id=$1', [row.snapshot_id])).rows[0]?.content);
-      const desired = publicationSnapshotSchema.parse(row.content);
-      if (authorization.navigationSlot) {
-        if (row.pending_snapshot_id || desired.navigationVersion !== 2) return deny('approval_invalid');
-        const part = await client.query(`SELECT 1 FROM publication_navigation_parts WHERE publication_id=$1
-          AND slot=$2 AND snapshot_id=$3 AND status IN ('prepared','retryable')`,
-        [row.id,authorization.navigationSlot,row.snapshot_id]);
-        if (!part.rows.length) return deny('approval_invalid');
-      }
-      if (navigationOnlyChange(sent,desired) && (snapshotHash(sent) !== snapshotHash(desired) || authorization.navigationSlot)) {
-        const expected = await desiredNavigation(client,row,sent);
-        return snapshotHash({ ...expected,navigationOverflow:desired.navigationOverflow })===snapshotHash(desired)
-          ? { allowed:true } : deny('snapshot_changed');
-      }
-    }
-    if (!row.canonical_story_id || row.desired_story_id !== row.canonical_story_id) return deny('retained_provenance_unknown');
-    const quarantined=await client.query(`WITH RECURSIVE ${blockedStoriesCte} SELECT 1 WHERE $1::text IN(SELECT id FROM blocked_stories)
+/** Dispatch compares persisted identity and preparation versions, never rebuilds story content. */
+export async function publicationAdmission(client: Pick<PoolClient, 'query'>, publication: Publication, _settings: AppSettings,
+  operation: Operation, authorization: DeliveryAuthorization = {}, botId: string | null = publication.bot_id): Promise<PublicationAdmission> {
+  const row = (await client.query<{ reason: Reason | null }>(`SELECT CASE
+    WHEN coalesce((settings.value->>'publishingEnabled')::boolean,false) IS NOT TRUE THEN 'publishing_paused'
+    WHEN target.value->>'channelId' IS DISTINCT FROM p.destination_id
+      OR p.bot_id IS DISTINCT FROM $5::text
+      OR coalesce(verified.value->>'destinationId',test.value->>'destinationId') IS DISTINCT FROM p.destination_id
+      OR coalesce(verified.value->>'botId',test.value->>'botId') IS DISTINCT FROM $9::text
+      THEN 'settings_changed'
+    WHEN p.snapshot_id<>$2::uuid OR p.pending_snapshot_id IS DISTINCT FROM $3::uuid
+      OR p.status<>$4 OR p.destination_id<>$6 THEN 'snapshot_changed'
+    WHEN EXISTS(SELECT 1 FROM operational_state WHERE key='publication_removal:'||p.id::text)
+      OR s.status IN ('failed','rejected')
+      OR EXISTS(SELECT 1 FROM operational_state failed WHERE failed.key LIKE 'pipeline_failed_item:%'
+        AND failed.value->'storyIds' @> to_jsonb(ARRAY[s.id::text]))
       OR EXISTS(SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
-        JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=$1::uuid
-        AND r.metadata ? 'pipelineFailure' AND r.metadata->'pipelineFailure' IS DISTINCT FROM 'false'::jsonb)`,[row.canonical_story_id]);
-    if(quarantined.rows.length) return deny('story_ineligible');
-    if (z.object({status:z.enum(['failed','rejected'])}).safeParse(row.story).success) return deny('story_ineligible');
-    if (reviewedFullRepair) {
-      if (!row.eligible) return deny('story_ineligible');
-      return { allowed:true };
-    }
-    if (operation === 'edit') {
-      const sent = publicationSnapshotSchema.parse((await client.query<{ content: unknown }>(
-        'SELECT content FROM publication_snapshots WHERE id=$1', [row.snapshot_id])).rows[0]?.content);
-      const desired = publicationSnapshotSchema.parse(row.content);
-      if (snapshotHash({ ...sent, sources: [] }) === snapshotHash({ ...desired, sources: [] })) {
-        const story = storySchema.parse(row.story);
-        const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
-          summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, row.destination_id, { presentation:sent });
-        return snapshotHash({ ...sent, sources }) === snapshotHash(desired) ? { allowed: true } : deny('snapshot_changed');
-      }
-    }
-    if (!row.eligible) return deny('story_ineligible');
-    const story = storySchema.parse(row.story);
-    if (!await generationIsCurrent(story.id,saved,client.query.bind(client),approvedReceiptId)) return deny('current_generation_missing');
-    const currentSnapshot = await snapshotFor(client,story,approvedReceiptId,
-      { presentation:publicationSnapshotSchema.parse(row.content) });
-    if (snapshotHash(currentSnapshot) !== snapshotHash(row.content)) return deny('snapshot_changed');
-    return { allowed: true };
-  } catch (error) {
-    if (error instanceof z.ZodError) return deny('retained_provenance_unknown');
-    throw error;
-  }
+        JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=s.id
+        AND r.metadata @> '{"pipelineFailure":true}'::jsonb) THEN 'story_ineligible'
+    WHEN EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation=$8
+      AND a.status IN ('running','unknown','succeeded') AND ($8='send' OR a.status<>'succeeded')) THEN 'delivery_outcome_unknown'
+    WHEN s.id IS NULL AND NOT coalesce(($7 AND test.value->>'publicationId'=p.id::text
+      AND test.value->>'destinationId'=p.destination_id),false) THEN 'story_ineligible'
+    WHEN s.id IS NOT NULL AND (snap.story_version IS DISTINCT FROM s.content_version
+      OR snap.generation_id IS DISTINCT FROM (SELECT j.id FROM judgments j WHERE j.story_id=s.id
+        AND j.stage='generation_research' AND j.result->>'headline'=s.headline
+        AND j.result->>'summary' IS NOT DISTINCT FROM s.summary ORDER BY j.created_at DESC,j.id DESC LIMIT 1))
+      THEN 'snapshot_changed'
+    ELSE NULL END AS reason
+    FROM publications p JOIN publication_snapshots snap ON snap.id=coalesce(p.pending_snapshot_id,p.snapshot_id)
+    LEFT JOIN stories s ON s.id=snap.story_id
+    LEFT JOIN app_settings settings ON settings.id=1
+    LEFT JOIN operational_state target ON target.key='telegram_destination'
+    LEFT JOIN operational_state verified ON verified.key='bot_verified'
+    LEFT JOIN operational_state test ON test.key='bot_verification_test'
+    WHERE p.id=$1 FOR UPDATE OF p`, [publication.id,publication.snapshot_id,publication.pending_snapshot_id,
+    operation === 'send' ? 'prepared' : 'published',publication.bot_id,publication.destination_id,Boolean(authorization.verificationTest),operation,botId])).rows[0];
+  return row && !row.reason ? { allowed:true } : { allowed:false,reason:row?.reason ?? 'snapshot_changed' };
+}
+
+/** Policy denials are not Telegram attempts and must not change delivery/reconciliation state. */
+export async function recordAdmissionDenial(client: Pick<PoolClient, 'query'>, publication: Publication,
+  operation: Operation, reason: Extract<PublicationAdmission, { allowed: false }>['reason']): Promise<void> {
+  const snapshotId = publication.pending_snapshot_id ?? publication.snapshot_id;
+  const recorded = await client.query<{ first_seen: boolean }>(`INSERT INTO operational_state(key,value) VALUES($1,$2)
+    ON CONFLICT(key) DO UPDATE SET value=operational_state.value||EXCLUDED.value||jsonb_build_object(
+      'at',coalesce(operational_state.value->>'at',EXCLUDED.value->>'at'),
+      'occurrences',CASE WHEN operational_state.value->>'occurrences' ~ '^[0-9]{1,8}$'
+        THEN least((operational_state.value->>'occurrences')::integer+1,99999999) ELSE 2 END),updated_at=now()
+    RETURNING (xmax=0) AS first_seen`,
+  [`publication_admission:${publication.id}:${snapshotId}:${reason}`, JSON.stringify({
+    publicationId: publication.id, snapshotId, operation, reason, at: new Date().toISOString(),
+    lastSeenAt: new Date().toISOString(), occurrences: 1,
+  })]);
+  if (recorded.rows[0]?.first_seen) console.warn('Publication admission denied', {
+    publicationId: publication.id, snapshotId, operation, reason,
+  });
 }

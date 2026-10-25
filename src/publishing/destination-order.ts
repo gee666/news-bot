@@ -24,6 +24,5 @@ export async function reserveDestination(destinationId: string, publicationId: s
 export async function releaseDestination(publicationId: string, client: Pick<PoolClient, 'query'>): Promise<void> {
   await client.query(`DELETE FROM publication_destination_reservations r USING publications p
     WHERE r.publication_id=p.id AND p.id=$1 AND p.delivery_kind='media_first' AND p.status='published'
-      AND p.message_id IS NOT NULL AND p.media_status IN ('none','complete')
-      AND NOT EXISTS(SELECT 1 FROM publication_text_parts t WHERE t.publication_id=p.id AND t.status<>'sent')`, [publicationId]);
+      AND p.message_id IS NOT NULL AND p.media_status IN ('none','complete')`, [publicationId]);
 }

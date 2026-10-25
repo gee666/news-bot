@@ -12,7 +12,7 @@ export interface RenderedMessage {
   reply_markup: { inline_keyboard: [] };
 }
 export const publicationRenderCodes = ['publication_snapshot_invalid', 'publication_entity_limit',
-  'publication_message_too_long', 'publication_text_requires_new_edition', 'publication_sources_unresolved', 'publication_no_details_budget'] as const;
+  'publication_message_too_long'] as const;
 export type PublicationRenderCode = typeof publicationRenderCodes[number];
 export class PublicationRenderError extends Error {
   constructor(readonly code: PublicationRenderCode) { super(code); }
@@ -68,40 +68,35 @@ function reviewNotes(snapshot: PublicationSnapshot): string {
   return reason ? `\n\nЗаметки проверяющего: ${reason}` : '';
 }
 
-export interface RenderOptions { limit?: number; compactSources?: boolean; legacyBudget?: boolean }
+export interface RenderOptions { limit?: number; compactSources?: boolean }
 
 export function render(content: unknown, options: RenderOptions = {}): RenderedMessage {
   const parsed = publicationSnapshotSchema.safeParse(content);
   if (!parsed.success) throw new PublicationRenderError('publication_snapshot_invalid');
-  return renderValidatedSnapshot(parsed.data, options);
-}
-
-/** Presentation shortening need not preserve editorial schema rules, such as a Cyrillic review reason. */
-export function renderValidatedSnapshot(snapshot: PublicationSnapshot, options: RenderOptions = {}): RenderedMessage {
+  const snapshot = parsed.data;
+  const markerOptions = { presentationVersion: snapshot.presentationVersion, headline: snapshot.updatedToHeadline };
   const limit = options.limit ?? MESSAGE_LIMIT;
   if (!Number.isInteger(limit) || limit < 1 || limit > MESSAGE_LIMIT) throw new RangeError('Invalid publication text limit');
-  if (sourceEntityCount(snapshot) > 100) throw new PublicationRenderError('publication_entity_limit');
+  const prefixLength = snapshot.updatedTo ? updateMarkerPrefix(snapshot.updatedTo, markerOptions).plainText.length : 0;
+  if (prefixLength >= limit) throw new PublicationRenderError('publication_message_too_long');
+  const message = renderValidatedSnapshot(snapshot, { ...options, limit: limit - prefixLength });
+  return snapshot.updatedTo ? withUpdateMarker(message, snapshot.updatedTo, limit, markerOptions) : message;
+}
+
+function renderValidatedSnapshot(snapshot: PublicationSnapshot, options: RenderOptions = {}): RenderedMessage {
+  const limit = options.limit ?? MESSAGE_LIMIT;
+  if (sourceEntityCount(snapshot) + Number(Boolean(snapshot.updatedTo)) > 100) throw new PublicationRenderError('publication_entity_limit');
   const headline = stripTrailingCitationMarkers(snapshot.headline).slice(0, 180);
   const notes = reviewNotes(snapshot);
   const bodyPresentation = snapshot.presentationVersion === 1 ? normalizeMarkedLists : (text: string) => text;
-  let details = bodyPresentation(stripTrailingCitationMarkers(snapshot.details ?? ''));
-  let earlier = bodyPresentation(stripTrailingCitationMarkers(snapshot.earlier ?? ''));
+  const details = bodyPresentation(stripTrailingCitationMarkers(snapshot.details ?? ''));
+  const earlier = bodyPresentation(stripTrailingCitationMarkers(snapshot.earlier ?? ''));
   const bodyText = () => header(snapshot, headline) + (details ? `\n\n${details}` : '')
     + (earlier ? `\n\n${earlier}` : '') + notes;
-  // Reconstruct the old trimming budget when freezing a pre-parts publication.
-  // The obsolete labels are never emitted.
-  const legacyBudget = options.legacyBudget && snapshot.earlier ? 'Новое\nРанее было опубликовано\n'.length : 0;
-  let body = bodyText();
+  const body = bodyText();
   let sections = sourceSections(snapshot, false);
-  if ((body + sections.plainText).length + legacyBudget > limit) {
-    if (options.compactSources !== false) sections = sourceSections(snapshot, true);
-    const trim = (text: string, budget: number) => text.slice(0, Math.max(0, budget - 1))
-      .replace(/[\uD800-\uDBFF]$/u, '').trimEnd() + (budget > 0 ? '…' : '');
-    const overflow = () => Math.max(0, bodyText().length + sections.plainText.length + legacyBudget - limit);
-    if (overflow() && earlier) earlier = trim(earlier, Math.max(0, earlier.length - overflow()));
-    if (overflow() && details) details = trim(details, Math.max(0, details.length - overflow()));
-    body = bodyText();
-  }
+  if ((body + sections.plainText).length > limit && options.compactSources !== false)
+    sections = sourceSections(snapshot, true);
 
   const plainText = body + sections.plainText;
   if (plainText.length > limit) throw new PublicationRenderError('publication_message_too_long');
@@ -111,4 +106,29 @@ export function renderValidatedSnapshot(snapshot: PublicationSnapshot, options: 
   text += escapeHtml(notes) + sections.text;
   const links = sections.links.map(link => ({ ...link, offset: body.length + link.offset }));
   return { text, plainText, links, parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: [] } };
+}
+
+export interface UpdateMarkerOptions { presentationVersion?: 1 | undefined; headline?: string | undefined }
+
+export function updateMarkerPrefix(url: string, options: UpdateMarkerOptions = {}): Pick<RenderedMessage, 'text' | 'plainText' | 'links'> {
+  const versioned = options.presentationVersion === 1;
+  const post = versioned ? new URL(url).pathname.split('/').filter(Boolean).at(-1) : undefined;
+  const headline = options.headline?.replace(/\s+/gu, ' ').trim();
+  const label = versioned ? `#${post}` + (headline ? ` · ${headline}` : '') : url;
+  const lead = versioned ? `UPD:\n${LIST_MARKER}` : 'UPD: ';
+  return { text: `${lead}<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>\n\n`,
+    plainText: `${lead}${label}\n\n`, links: [{ offset: lead.length, length: label.length, url }] };
+}
+
+export function withUpdateMarker(message: RenderedMessage, url: string, limit = MESSAGE_LIMIT,
+  options: UpdateMarkerOptions = {}): RenderedMessage {
+  const prefix = updateMarkerPrefix(url, options);
+  if (prefix.plainText.length + message.plainText.length > limit) throw new PublicationRenderError('publication_message_too_long');
+  return { ...message, text: prefix.text + message.text, plainText: prefix.plainText + message.plainText,
+    links: [...prefix.links, ...message.links.map(link => ({ ...link, offset: link.offset + prefix.plainText.length }))] };
+}
+
+/** Existing albums have a caption limit; every other canonical post is text. */
+export function renderPublication(publication: { content: unknown; delivery_kind?: 'text' | 'album' | 'media_first' }): RenderedMessage {
+  return render(publication.content, { limit: publication.delivery_kind === 'album' ? 1024 : MESSAGE_LIMIT });
 }

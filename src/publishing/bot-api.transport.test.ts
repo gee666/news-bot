@@ -51,7 +51,7 @@ describe('Bot API transport timeout selection', () => {
   it.each([
     { request: undefined, upload: undefined, uploadMs: 300_000 },
     { request: '45000', upload: '900000', uploadMs: 900_000 },
-  ])('uses the upload window for single media and groups in both sending modes: %j', async config => {
+  ])('uses the upload window for single media and groups : %j', async config => {
     vi.stubEnv('TELEGRAM_REQUEST_TIMEOUT_MS', config.request);
     vi.stubEnv('TELEGRAM_UPLOAD_TIMEOUT_MS', config.upload);
     const timeout = vi.spyOn(AbortSignal, 'timeout');
@@ -61,9 +61,8 @@ describe('Bot API transport timeout selection', () => {
     const api = new BotApi(token, fetcher);
     for (const media of [[image], [video], [document], [image, video], [document, document]]) {
       await api.sendMedia(destination, undefined, media);
-      await api.sendAlbum(destination, message, media);
     }
-    expect(timeout.mock.calls).toEqual(Array.from({ length: 10 }, () => [config.uploadMs]));
+    expect(timeout.mock.calls).toEqual(Array.from({ length: 5 }, () => [config.uploadMs]));
     for (const [index, call] of fetcher.mock.calls.entries()) {
       expect(call[1]?.body).toBeInstanceOf(FormData);
       expect(call[1]?.signal).toBe(timeout.mock.results[index]?.value);
@@ -73,7 +72,7 @@ describe('Bot API transport timeout selection', () => {
   it('rejects invalid config before touching the network, not as an uncertain transport failure', async () => {
     vi.stubEnv('TELEGRAM_UPLOAD_TIMEOUT_MS', 'private-credential');
     const fetcher = vi.fn<typeof fetch>();
-    await expect(new BotApi(token, fetcher).sendAlbum(destination, message, [image]))
+    await expect(new BotApi(token, fetcher).sendMedia(destination, undefined, [image]))
       .rejects.toThrow(new Error('telegram_upload_timeout_ms_invalid'));
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -86,11 +85,11 @@ describe('Bot API safe transport outcomes', () => {
     systemError('ECONNREFUSED', 'connect'), systemError('ENETUNREACH', 'connect'),
     new AggregateError([systemError('ECONNREFUSED', 'connect'), systemError('ENETUNREACH', 'connect')]),
   ])('returns a sanitized retryable error without internally repeating a mutation: %s', async cause => {
-    for (const operation of ['text', 'album', 'media'] as const) {
+    for (const operation of ['text', 'media'] as const) {
       const fetcher = vi.fn<typeof fetch>().mockRejectedValue(fetchFailure(cause));
       const api = new BotApi(token, fetcher);
       const send = operation === 'text' ? api.send(destination, message)
-        : operation === 'album' ? api.sendAlbum(destination, message, [image]) : api.sendMedia(destination, undefined, [image]);
+        : api.sendMedia(destination, undefined, [image]);
       const error: unknown = await send.catch((failure: unknown) => failure);
       expect(error).toBeInstanceOf(BotError);
       expect(error).toMatchObject({ code: 'telegram_connect_failed', outcome: 'retryable', retryAfterMs: 0 });
@@ -110,11 +109,11 @@ describe('Bot API safe transport outcomes', () => {
     fetchFailure(new AggregateError([systemError('ECONNREFUSED', 'connect'), systemError('ECONNRESET', 'read')])),
     fetchFailure(Object.assign(new AggregateError([]), { code: 'ECONNREFUSED' })),
   ])('keeps ambiguous transport failures unknown and never retries: %s', async failure => {
-    for (const operation of ['text', 'album', 'identity'] as const) {
+    for (const operation of ['text', 'identity'] as const) {
       const fetcher = vi.fn<typeof fetch>().mockRejectedValue(failure);
       const api = new BotApi(token, fetcher);
       const send = operation === 'text' ? api.send(destination, message)
-        : operation === 'album' ? api.sendAlbum(destination, message, [image]) : api.identity();
+        : api.identity();
       await expect(send).rejects.toMatchObject({ code: 'telegram_transport_unknown', outcome: 'unknown' });
       expect(fetcher).toHaveBeenCalledOnce();
     }

@@ -36,14 +36,9 @@ describe('full publication rendering', () => {
     const link=message.links[0]!;
     expect(message.plainText.slice(link.offset,link.offset+link.length)).toContain('Канал <1>');
   });
-  it('trims earlier history before new information and preserves source links', () => {
-    const content={...snapshot,details:'Новые сведения. '.repeat(100),earlier:'Старые сведения. '.repeat(1000)};
-    const message=render(content);
-    expect(message.plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
-    expect(message.text).toContain(content.details);
-    expect(message.text).not.toContain(content.earlier);
-    expect(message.links).toHaveLength(1);
-    expect(render({...content,details:'😀'.repeat(5000)}).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
+  it('rejects oversized body text without truncating it into a different post', () => {
+    expect(() => render({ ...snapshot,details:'Новые сведения. '.repeat(1000) })).toThrow('publication_message_too_long');
+    expect(() => render({ ...snapshot,earlier:'Старые сведения. '.repeat(1000) })).toThrow('publication_message_too_long');
   });
   it('legacy history needs no extra heading entities', () => {
     const sources=Array.from({length:97},(_,index)=>({ ...snapshot.sources[0]!,url:`https://example.org/${index}` }));
@@ -129,8 +124,8 @@ describe('full publication rendering', () => {
   it('trims oversized details but still rejects too many Telegram entities', () => {
     const budget = MESSAGE_LIMIT - render({ ...snapshot, details: '' }).plainText.length - 2;
     expect(render({ ...snapshot, details: 'x'.repeat(budget) }).plainText.length).toBe(MESSAGE_LIMIT);
-    expect(render({ ...snapshot, details: 'x'.repeat(budget+1) }).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
-    expect(render({ ...snapshot, details: '😀'.repeat(Math.floor(budget/2)+1) }).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
+    expect(() => render({ ...snapshot, details: 'x'.repeat(budget+1) },{compactSources:false})).toThrow('publication_message_too_long');
+    expect(() => render({ ...snapshot, details: '😀'.repeat(Math.floor(budget/2)+1) },{compactSources:false})).toThrow('publication_message_too_long');
     const sources = Array.from({ length: SOURCE_LIMIT+1 }, (_, index) => ({
       ...snapshot.sources[0]!,url:`https://t.me/c/123/${index+1}`,
     }));

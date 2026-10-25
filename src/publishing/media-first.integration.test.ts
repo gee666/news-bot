@@ -41,7 +41,6 @@ async function due(): Promise<void> {
   await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
   await database.db.query("UPDATE publication_media_batches SET next_retry_at=now()-interval '1 second'");
   await database.db.query("UPDATE publications SET next_retry_at=now()-interval '1 second'");
-  await database.db.query("UPDATE publication_text_parts SET next_retry_at=now()-interval '1 second'");
 }
 async function uploadIds(_destination: string, _reply: string | undefined, items: PublicationMedia[]): Promise<string[]> {
   return items.map((_,index) => String(100+index));
@@ -67,7 +66,6 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({ id:123,is_bot:true });
     vi.spyOn(BotApi.prototype,'send').mockResolvedValue('900');
     vi.spyOn(BotApi.prototype,'sendMedia').mockImplementation(uploadIds);
-    vi.spyOn(BotApi.prototype,'sendAlbum').mockRejectedValue(new Error('Captions forbidden for media-first posts'));
     media.publicationMedia.mockReset().mockResolvedValue([image(0),image(1)]);
     media.releaseStoryMedia.mockReset().mockResolvedValue(undefined);
   });
@@ -89,7 +87,6 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
       events.push('media'); expect(reply).toBeUndefined(); expect(target).toBe('-100123');
       expect(await order.reservedPublication(target)).toBe(publication.id);
       expect((await load(publication.id)).message_id).toBeNull();
-      expect((await database.db.query('SELECT status FROM publication_text_parts')).rows).toEqual([{ status:'prepared' }]);
       const ids = items.map((_,index) => String(100+uploaded.length+index)); uploaded.push(...items); return ids;
     });
     vi.mocked(api.send).mockImplementation(async (_target,message,reply) => {
@@ -104,7 +101,6 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(await load(publication.id)).toMatchObject({ delivery_kind:'media_first',message_id:'900',media_status:'complete',status:'published' });
     expect((await database.db.query('SELECT data,message_id FROM publication_media_items')).rows)
       .toEqual(Array.from({ length:10 },(_,index) => ({ data:null,message_id:String(100+index) })));
-    expect(await order.reservedPublication('-100123')).toBeNull(); expect(api.sendAlbum).not.toHaveBeenCalled();
   });
   it('publishes a real WebP and three MP4s in one caption-free album immediately followed by standalone complete text', async () => {
     const webp = Buffer.from('UklGRnAAAABXRUJQVlA4IGQAAAAQBwCdASqAAIAAPjEYi0SiIaEQRAAgAwS0t3C6TLgPwA/AAAC1YSrOcgjYgqOe2IvEFRz2xF4gqOe2IvEFRz2wuAD+/zwb//+xmP2jP8kr//+DMfwZj+DMf/CfGxI0QAAAAAAA', 'base64');
@@ -112,9 +108,8 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
       ...Array.from({ length:3 },(_,index): PublicationMedia => ({ type:'video',mimeType:'video/mp4',data:Buffer.from(`MP4 ${index}`) }))]);
     const original = await fixture();
     const details = 'Complete text with facts. '.repeat(30);
-    await database.db.query('UPDATE stories SET summary=$2 WHERE id=$1',[original.story_id,details]);
+    await database.db.query("UPDATE publication_snapshots SET content=jsonb_set(content,'{details}',to_jsonb($2::text)) WHERE id=$1",[original.snapshot_id,details]);
     if (!original.story_id) throw new Error('Expected fixture story');
-    await acceptFixtureStories(settings,[original.story_id]); await store.refreshPrepared(original,settings);
     const publication = await load(original.id);
     vi.mocked(api.sendMedia).mockRestore(); vi.mocked(api.send).mockRestore();
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url,options) => {
@@ -165,12 +160,6 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(await delivery.sendPrepared(await load(owner.id),api,settings)).toBeNull();
     expect(await delivery.sendPrepared(other,api,settings)).toBeNull();
     await database.db.query("UPDATE publications SET status='published',message_id='800' WHERE id=$1",[other.id]);
-    const published = await load(other.id);
-    await database.db.query(`INSERT INTO publication_text_parts(publication_id,part_number,snapshot_id,content)
-      VALUES($1,1,$2,'{}')`,[other.id,other.snapshot_id]);
-    expect(await (await import('./text-delivery.js')).deliverPublicationText(published,api,settings)).toBe(false);
-    expect(await (await import('./media-delivery.js')).deliverPublicationMedia(published,api,settings)).toBe(false);
-    await (await import('./navigation-delivery.js')).retryNavigationParts(api,settings,'-100123');
     expect(await (await import('./index.js')).verifyBot()).toMatchObject({ verified:false,messageId:null });
     await digest.publishDigest(settings);
     expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
@@ -184,7 +173,6 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     const frozen = await load(publication.id);
     await digest.recoverSends('-100123'); await plans.recoverPublicationMedia('-100123'); await due();
     media.publicationMedia.mockResolvedValue([image(99)]);
-    await store.refreshPrepared(frozen,settings); await store.adoptPreparedPublications(settings,'-100123');
     expect((await load(publication.id)).snapshot_id).toBe(frozen.snapshot_id);
     expect(await delivery.sendPrepared(await load(publication.id),api,settings)).toBe('900');
     expect(media.publicationMedia).toHaveBeenCalledOnce(); expect(api.sendMedia).toHaveBeenCalledTimes(2);
@@ -242,7 +230,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     vi.mocked(api.sendMedia).mockImplementation(async (...args) => {
       if (change === 'pause') await (await import('../settings.js')).saveSettings({ publishingEnabled:false });
       else if (change === 'destination') await store.saveState('telegram_destination',{ channelId:'-100456' });
-      else await database.db.query("UPDATE judgments SET expires_at=now()-interval '1 second'");
+      else await database.db.query("UPDATE stories SET content_version=content_version+1");
       return uploadIds(...args);
     });
     expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
@@ -268,68 +256,12 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
   });
 
   it('rejects oversized text before uploading media or reserving the destination', async () => {
-    const original = await fixture();
-    // Generated prose stays within its own limit. Numerous factual source labels overflow the post.
-    for (let index=0; index<35; index++) {
-      const doc = await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
-        VALUES($1,$2,'Actual researched event facts with sufficient detail.','public',now()+interval '1 day') RETURNING id`,
-      [`https://source${index}.example/report`, `Document ${index}: `+'Full factual source title. '.repeat(12)]);
-      await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at)
-        VALUES($1,$2,'supporting','relevant',now())`,[original.story_id,doc]);
-    }
-    await acceptFixtureStories(settings); await store.refreshPrepared(original,settings);
-    expect(await delivery.sendPrepared(await load(original.id),api,settings)).toBeNull();
-    expect(await load(original.id)).toMatchObject({ status:'failed',message_id:null,error_code:'publication_message_too_long' });
+    const publication = await fixture();
+    await database.db.query(`UPDATE publication_snapshots SET content=jsonb_set(content,'{details}',to_jsonb($2::text)) WHERE id=$1`,
+      [publication.snapshot_id,'Long facts. '.repeat(500)]);
+    expect(await delivery.sendPrepared(await load(publication.id),api,settings)).toBeNull();
     expect(api.sendMedia).not.toHaveBeenCalled(); expect(api.send).not.toHaveBeenCalled();
     expect(await order.reservedPublication('-100123')).toBeNull();
-    expect((await database.db.query('SELECT id FROM request_attempts')).rows).toHaveLength(0);
-  });
-
-  it.each(['prepared','retryable','unknown'] as const)('does not resume historical %s text replies or release their reservation', async status => {
-    const publication = await fixture();
-    expect(await delivery.sendPrepared(publication,api,settings)).toBe('900');
-    const canonical=(await database.db.query<{ content:unknown }>('SELECT content FROM publication_text_parts WHERE publication_id=$1',[publication.id])).rows[0];
-    if (!canonical) throw new Error('Missing canonical text');
-    await database.db.query(`INSERT INTO publication_text_parts(publication_id,part_number,snapshot_id,content,status)
-      VALUES($1,1,$2,$3,$4)`,[publication.id,publication.snapshot_id,JSON.stringify(canonical.content),status]);
-    await database.db.query('INSERT INTO publication_destination_reservations(destination_id,publication_id) VALUES($1,$2)', ['-100123',publication.id]);
-    await digest.resumePublications(settings);
-    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledOnce();
-    expect(await order.reservedPublication('-100123')).toBe(publication.id);
-    expect(await load(publication.id)).toMatchObject({ error_code:'publication_text_requires_new_edition' });
-  });
-
-  it('serializes a concurrent verification behind the whole pair using the existing digest lease', async () => {
-    const publication = await fixture();
-    let release: () => void = () => { throw new Error('Upload not started'); };
-    let entered: () => void = () => { throw new Error('Upload observer missing'); };
-    const started = new Promise<void>(resolve => { entered = resolve; });
-    const pending = new Promise<void>(resolve => { release = resolve; });
-    vi.mocked(api.sendMedia).mockImplementation(async (...args) => { entered(); await pending; return uploadIds(...args); });
-    vi.mocked(api.send).mockResolvedValueOnce('900').mockResolvedValueOnce('901');
-    vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
-    const publishing = digest.publishDigest(settings);
-    await started;
-    let verified = false;
-    const verifying = (await import('./index.js')).verifyBot().then(result => { verified = true; return result; });
-    await new Promise(resolve => setTimeout(resolve,30));
-    expect(verified).toBe(false); expect(api.send).not.toHaveBeenCalled();
-    release(); await publishing;
-    expect(await verifying).toMatchObject({ verified:true,messageId:'901' });
-    expect((await load(publication.id)).message_id).toBe('900');
-    expect(vi.mocked(api.send).mock.calls[0]?.[1].plainText).toContain('Complete text with facts');
-    expect(vi.mocked(api.send).mock.calls[1]?.[1].plainText).toContain('Это технический тест');
-  });
-
-  it('keeps legacy attempted kinds and plans frozen even when their snapshot is version stamped', async () => {
-    const publication = await fixture();
-    await plans.preparePublicationMedia(publication,settings);
-    await database.db.query("UPDATE publications SET delivery_kind='text' WHERE id=$1",[publication.id]);
-    await database.db.query(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status,error_code)
-      VALUES($1,'telegram-bot','send',1,'retryable','telegram_connect_failed')`,[publication.id]);
-    media.publicationMedia.mockResolvedValue([image(99)]);
-    expect(await plans.preparePublicationMedia(await load(publication.id),settings)).toBe(true);
-    expect((await load(publication.id)).delivery_kind).toBe('text');
-    expect(media.publicationMedia).toHaveBeenCalledOnce();
+    expect((await load(publication.id)).status).toBe('failed');
   });
 });

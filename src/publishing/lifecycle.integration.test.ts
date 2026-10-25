@@ -73,6 +73,8 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     store = await import('./store.js'); updates = await import('./updates.js'); delivery = await import('./delivery.js'); digest = await import('./digest.js');
   });
   beforeEach(async () => {
+    await store.saveState('telegram_destination',{channelId:'-100123'});
+    await store.saveState('bot_verified',{verified:true,destinationId:'-100123',botId:123});
     vi.restoreAllMocks(); vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({ id: 123,is_bot: true });
     vi.spyOn(BotApi.prototype,'send').mockRejectedValue(new Error('Live sends forbidden'));
     await database.db.query('TRUNCATE stories,publications,publication_snapshots,story_merges,request_attempts,evidence_documents CASCADE');
@@ -88,7 +90,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     if (removed) await database.db.query('DELETE FROM stories WHERE id=$1',[loser]);
     await store.prepareDigest(settings,'-100123');
     const adopted = await row(id);
-    expect(adopted.story_id).toBe(canonical); expect(adopted.status).toBe('prepared'); expect(adopted.content).toEqual(current);
+    expect(adopted.story_id).toBe(canonical); expect(adopted.status).toBe('prepared'); expect(adopted.content).toEqual({...current,presentationVersion:1});
     expect(adopted.snapshot_id).not.toBe(previous.snapshot_id);
     expect((await database.db.query('SELECT id FROM publications')).rows).toEqual([{ id }]);
     expect((await database.db.query('SELECT original_story_id FROM story_publication_aliases WHERE publication_id=$1',[id])).rows[0]?.original_story_id).toBe(loser);
@@ -117,7 +119,7 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     expect((await row(first)).story_id).toBe(canonical); expect((await row(first)).status).toBe('prepared'); expect((await row(second)).status).toBe('failed');
     expect((await database.db.query("SELECT id FROM publications WHERE status='prepared'")).rows).toEqual([{ id: first }]);
   });
-  it.each(['running','unknown','retryable'] as const)('does not adopt a prepared row with an unsafe %s send; recovery reconciles it instead', async status => {
+  it.each(['running','unknown'] as const)('does not adopt a prepared row with an unsafe %s send; recovery reconciles it instead', async status => {
     const canonical = await story(); const loser = await story(); const id = await publication(loser); const previous = await row(id);
     await alias(canonical,loser,id);
     await database.db.query(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status,error_code,response_metadata)

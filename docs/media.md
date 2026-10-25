@@ -1,35 +1,19 @@
-# Images and videos
+# Media delivery
 
-Collectors save media locations in revision metadata, not media bytes. Web articles, feed enclosures and Telegram albums supply images and native video attachments. Embedded players that expose only a player page, such as a YouTube iframe, are not downloadable video attachments.
+New posts with media send caption-free attachments first, then one complete HTML
+text message. Text-only posts send just that message. Media IDs are not canonical
+post IDs, and attachments are never replies or navigation targets.
 
-Each event edition gathers media from its current and ancestor reports, relevant supplementary sources and relevant research pages. Only verified SAME-event ancestry contributes media, not RELATED events or unverified legacy edges. Historical ancestor revisions remain usable while their metadata is retained. Source validity and privacy approval still apply; there is no separate seven-day source-age cutoff. Distinct attachments are retained across all sources, not just the latest report.
+The publisher freezes up to ten distinct images/videos before dispatch. Images
+that Telegram cannot send as photos are normalized. Native photos/videos share
+batches; documents use separate batches. Every batch must finish before text.
+Temporary upload bytes expire after seven days, including unresolved requests.
 
-## Duplicate detection and model calls
+A persisted destination reservation keeps another post from interrupting delivery.
+It is released only when the canonical text receipt commits. Explicit rejections
+can retry the same bytes. Unknown outcomes are never resent; an unknown media
+batch keeps the destination blocked rather than guessing which uploads succeeded.
 
-Repeated locations download once per selection. Exact size and SHA-256 matches need no decoding or model call. Still images can also bypass the model when their full-resolution RGBA pixels and dimensions are identical. Animated images and extracted video frames cannot use that shortcut. Equal grayscale thumbnails alone never prove identity.
-
-Videos with similar duration are compared using frames one third into each video. Different durations skip visual comparison. Grayscale thumbnail differences reject obvious nonmatches. Ambiguous comparisons send two compressed WebP images to the vision model for structured visual evidence. The text-only JEV endpoint makes the final identity decision from that evidence. Failed or unreadable comparisons retain both copies and can be retried later.
-
-Symmetric pair-cache keys include attachment identity and the model, prompt and preparation versions. Explicit same and different verdicts are reused across editions before decoding. Concurrent comparisons share the same request. Unresolved judgments and outages are never cached as reliable verdicts. Compose persists only hashes and decisions in the `media_pair_cache` volume. Cache entries expire after seven days without refreshing on reads.
-
-Summarization and review receive text plus deduplicated still images. Model-only WebP copies use quality 90 and fit inside 2560×2560 without upscaling. Telegram receives original bytes without bot-side recompression. Videos and video frames never enter editorial summarization. `MEDIA_SUMMARY_MAX_IMAGES` defaults to 10 and accepts 1 through 10. It limits model input, not published attachments. `MEDIA_VIDEO_DURATION_TOLERANCE` defaults to 0.2, a fraction of the longer duration. The minimum video-duration tolerance is two seconds.
-
-## Telegram delivery
-
-New editions publish a caption-free media post first, then a standalone canonical HTML text post with the cumulative summary and every source link. A new edition selects at most ten distinct pictures and videos in stable selection order after deduplication. JPEG/PNG pictures and MP4 videos share a native album. Other original formats use separate compatible document batches, all before the text. Editions with no media publish only text.
-
-The canonical text uses Telegram's full 4096-character budget, measured conservatively in UTF-16 units. Full text and every visible source, previous-publication and related link must fit in that one message. Oversized text or excessive entities fail preflight before any media upload. Nothing is truncated or moved to a reply or separate links message. The canonical text and selected upload bytes are frozen before the first media request. The canonical publication ID is always the text message ID, never a media ID. New internal previous/related links and update markers target text posts. Historical caption-only posts remain in place but are not new internal-link targets.
-
-The publisher holds the shared digest lock across the sequence. Migration `205_media_first_delivery.sql` also stores a destination reservation before media dispatch. That reservation survives a restart, rejected request or uncertain outcome. Other automatic, manual, verification and maintenance sends wait until the owner's canonical text is confirmed. Historical incomplete multipart plans remain blocked for operator review rather than resuming reply sends. A known rejection retries only after its saved deadline. An uncertain media upload requires review and blocks the destination instead of risking a duplicate upload or an interleaved post. Telegram has no atomic media-plus-text transaction; other channel administrators or unrelated bots are outside this application's lock.
-
-After the whole edition is confirmed, earlier posts can receive an update link to its text post. Versioned posts show `UPD:` followed by `🔸 #<post number> · <headline>`. Their factual text stays unchanged. Historical attempt fingerprints remain unchanged for reconciliation. Pending text continuations, media replies and navigation footers no longer dispatch. A legacy album send or reviewed repair must fit all content and visible links in its 1024-unit caption, or stop for a new edition. Navigation updates must fit in the canonical text or caption without shortening its original text, otherwise the sent snapshot stays unchanged and reports `publication_navigation_requires_new_edition`. Sent historical replies remain untouched. No automatic reposting, conversion or deletion is part of the rollout.
-
-An incomplete publication does not count as successful in run-now results. Authorized deletion includes tracked continuation and attachment messages. Upload bytes are temporary; hashes and confirmed Telegram IDs remain for audit.
-
-## Temporary storage and limits
-
-Downloaded media is temporary. `tmp/media-cache/` contains per-story bytes, removed after confirmed attachment delivery. Files expire after seven days, checked at startup and hourly. Video decoding uses memory where possible and deletes seekable fallback files immediately; abandoned decoder files expire after 24 hours. Keep `tmp/` private. Media byte caches are not mounted as permanent Docker volumes. The separate persisted pair cache contains no media or source URLs. The seven-day deadline limits cached bytes, not the lifetime of retained source metadata. A later edition can download an older attachment again while its source descriptor remains in PostgreSQL. Metadata lifetime follows configured source/evidence retention and its cleanup rules, not the media cache clock. Expired retained ancestor research can still contribute attachments, just as it contributes historical text; current-draft research must remain unexpired. Superseded or irrelevant research is excluded in either case. Deleted descriptors cannot be reconstructed from text-only publication snapshots; inaccessible downloads fail preparation rather than silently omitting media.
-
-PostgreSQL temporarily spools upload bytes before dispatch for restart safety. Confirmed uploads erase those bytes immediately. Maintenance also erases unpublished or unresolved bytes after seven days. Telegram message IDs and hashes remain for audit and authorized deletion. Backups and WAL can retain prior temporary data according to the operator's database-retention policy.
-
-The runtime requires `ffmpeg` and `ffprobe`; Docker installs both. Web media fetches use public-address validation, DNS pinning, redirect checks and streaming byte limits. Limits are 9 MB per image, 45 MB per video and 256 MB total per event selection. Source gathering and deduplication are not count-limited; new publication plans select at most ten distinct attachments. Unsupported or unavailable downloads and exceeded byte budgets stop preparation explicitly rather than silently dropping requested media.
+Existing album posts can receive caption edits, but new posts never use captions.
+An edit exceeding 1024 characters is skipped with
+`publication_navigation_requires_new_edition`. Text edits have a 4096-character limit.

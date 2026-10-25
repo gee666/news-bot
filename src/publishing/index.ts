@@ -11,8 +11,6 @@ import { destinationBlocked } from './destination-order.js';
 export { publishDigest, resumePublications } from './digest.js';
 
 export { startPublicationMaintenance } from './maintenance.js';
-export { repairExistingPublications } from './repair.js';
-export { previewPublicationRepair } from './preview.js';
 
 /** Explicit invocation authorizes one labeled test send and edit on the resolved target. */
 export async function verifyBot(): Promise<{ verified: boolean; destinationId: string; messageId: string | null }> {

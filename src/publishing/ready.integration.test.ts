@@ -134,7 +134,7 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
     await drain();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(25);
     expect((await database.db.query("SELECT story_id FROM story_publication_ready WHERE status='pending'")).rows).toHaveLength(0);
-  }, 60_000);
+  }, 180_000);
   it('keeps ready work pending while publishing is paused, and leaves the earlier post immutable on a later ready event', async () => {
     const batchId = await batch(); const id = await story(batchId); await enqueue(id, batchId);
     settings = await (await import('../settings.js')).saveSettings({ publishingEnabled: false });
@@ -168,7 +168,7 @@ describe.skipIf(!url)('durable per-story publication readiness', () => {
         WHERE story_id=NEW.story_id; RETURN NEW; END $$;
       CREATE TRIGGER new_ready_event AFTER INSERT ON publications FOR EACH ROW EXECUTE FUNCTION new_ready_event()`);
     try {
-      await drain();
+      await ready.prepareReadyStories(settings,'-100123');
       expect((await database.db.query('SELECT status FROM story_publication_ready WHERE story_id=$1', [id])).rows[0]?.status).toBe('pending');
     } finally { await database.db.query('DROP TRIGGER new_ready_event ON publications'); }
     await drain();

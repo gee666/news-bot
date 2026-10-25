@@ -1,59 +1,38 @@
-# Channel publications
+# Publishing
 
-Every verified same-story incoming report creates a new cumulative edition. Distinct related events remain separate posts and never contribute facts, sources or media to one another. Each edition must be sufficient on its own, with the full event summary, the union of source links and links to every earlier post. A repeated or source-only report does not silently edit the last post's sources. Old posts remain in the channel.
+New posts use one of two delivery kinds:
+- `text`: one canonical HTML message, rendered from its stored snapshot.
+- `media_first`: caption-free media batches, then that canonical text message.
 
-New editions use a canonical HTML text message with a ten-dot interest bar, Russian headline, details and source sections. New editions present the complete cumulative summary, followed by `Первоисточники`, `Вторичные источники` and `Предыдущие публикации`. The obsolete new/earlier headings are not rendered. Legacy history text remains in the body; maintenance removes only the old formatted service headings, not matching literal text in factual paragraphs. Previous-post links are oldest first. Non-empty review remarks appear as `Заметки проверяющего: <причина>`. Review is informational, not an admission gate. New sends still require the minimum score and current generation.
+The canonical message contains the score, headline, details, sources and navigation.
+It must fit Telegram's 4096-character limit. There are no continuation replies,
+separate navigation messages, or caption-first sends.
 
-## Complete text and sources
+`ready.ts` selects completed stories. `store.ts` freezes their snapshots.
+`freshness.ts` checks dispatch in one SQL query: publishing is enabled, the bot
+and destination match, the story is not failed, quarantined or removed, and
+its preparation version and generation still match. It does not rebuild content.
 
-Snapshots retain all text, labels, review notes and sources, including hidden historical navigation for audit. Unverified publication links are not visible sources. New sends use `renderCanonicalText`, which requires the entire rendered post to fit one message. Text uses at most 4096 UTF-16 units. Legacy album captions use at most 1024. Formatting/link entities have a conservative 90-entity rendering budget. HTML escaping and surrogate pairs remain safe. No body text, review note or visible URL is truncated, dropped or sent separately. A limit failure stops before media dispatch and records `publication_message_too_long` or `publication_entity_limit`. Shorten and review the content or prepare a new edition explicitly.
+`media-plan.ts` freezes up to ten distinct attachments and their upload bytes.
+Native photos/videos and documents use compatible batches. Unsupported photo
+formats are normalized before upload. Temporary bytes expire after seven days.
+A destination reservation prevents another post from splitting media and text.
+Only a committed canonical text receipt releases the reservation.
 
-Migration `200_publication_text_parts.sql` still stores the frozen canonical part before dispatch. Historical multipart plans and attempt fingerprints remain available for reconciliation and authorized deletion, but pending continuations do not send. They report `publication_text_requires_new_edition`, retain unknown outcomes and keep an existing media-first destination reservation. The bot does not silently rewrite a dispatched plan or infer that missing text was delivered. `renderFullText` remains the historical split renderer for reproducing old plans, not a permission to dispatch multiple messages. Link previews are disabled and edits clear old inline keyboards.
+Known rejections retry with backoff and Telegram's bot-wide cooldown.
+Unknown outcomes are never resent. Text sends and edits can be reconciled by
+reading the channel. Unknown media batches retain their receipts and block
+further delivery; they are not guessed from captions or retried blindly.
 
-Version-1 source and navigation links each start on a new line with `🔸 `. External Telegram labels retain the channel name and use `#` before the post number, such as `Бэкдор · #32444`. Web labels use the hostname without `www.` plus the readable source title, such as `github.com · Название проекта`. Previous and related publication labels use `#1330 · Заголовок`. Version-1 update markers use `UPD:` followed by a separate `🔸 #1330 · Заголовок` link line; `updatedToHeadline` stores the target title. Existing domain prefixes are not repeated. Explicit body-list markers become `🔸` only for version 1; prose, URLs and code are retained. Stored source labels and factual text are not rewritten by rendering.
+Existing posts are edited, never republished. `thread-updates.ts` stages UPD
+markers and related links inside the canonical post. Text posts use
+`editMessageText`; existing album posts use `editMessageCaption`, limited to
+1024 characters. Navigation-v2 re-stamping remains for unstamped stored posts.
+An edit that cannot fit is skipped and records
+`publication_navigation_requires_new_edition`.
 
-Source links come from current collected mentions, source-only reports and successfully read, relevant research documents. An edition also inherits its verified same-event ancestors' frozen sources. Related-story navigation is not inherited as evidence or as same-event ancestry. The writer's partial URL selection cannot hide eligible mention origins. Primary publications stay distinct from relays. Collected origin links retain their provenance even when a crawler cannot read them. Failed, expired, superseded or irrelevant fetched pages are not newly promoted to sources. Titles come from read content, not advertising anchors.
-
-## Media first, then full text
-
-New `presentationVersion: 1` editions with media use `delivery_kind='media_first'`. They select at most ten distinct pictures/videos after deduplication. Media has no caption and no reply reference. The complete canonical text is sent immediately after the media as a standalone post, not as a caption or a reply. All visible links belong to that text post. The destination reservation prevents other stories or ancillary messages from being inserted between them. Non-native images such as WebP are decoded to PNG before the plan is frozen, so pictures are sent as photos rather than documents. JPEG/PNG images and MP4 videos retain their bytes and share an album; non-native videos use separate compatible document batches without captions before text. Editions without media send only text. `publications.message_id` is assigned only from the canonical text response or its exact reconciliation, never an upload response.
-
-Migration `205_media_first_delivery.sql` adds the delivery kind and a unique destination reservation. The global digest lease covers in-process sequencing. The durable reservation prevents automatic, manual, verification, navigation and continuation sends from another edition between requests or after a restart. It stays until the canonical text is confirmed. Historical incomplete multipart plans require operator review and retain their reservation. Rate limits and known connection failures retain their retry deadlines. Unknown media/canonical requests hold the destination for reconciliation or review, not blind resend. If publishing is paused or admission changes after pictures are sent, the reservation remains rather than letting another post interrupt the pair. Other channel administrators and unrelated bots cannot be serialized by this application.
-
-A durable plan freezes selected upload bytes and every text part before the first request. Each batch has its own attempt ledger, outcome and Telegram IDs. Confirmed uploads erase their temporary bytes immediately; maintenance erases remaining bytes within seven days, including unknown sends. IDs and hashes remain for audit and authorized deletion. A media response never completes the edition or becomes a cross-link target.
-
-Historical fingerprints remain reproducible for reconciliation; attempted plans are never silently converted. Pending text-first media replies are blocked with `publication_replies_forbidden`. Caption-first sends must fit the entire text and all visible links in 1024 units and match any earlier attempted fingerprint, or stop without an upload. The three-source legacy caption renderer is only for reconstructing historical presentation. New internal navigation excludes historical caption-only targets and tracked noncanonical media IDs, while their factual text and source history remain available to cumulative generation.
-
-## Ancestor update markers
-
-Only after the newest edition's canonical message, every continuation and every media batch are confirmed does the publisher stage an UPD link above each ancestor's title. Versioned markers use `UPD:` and a new `🔸 #<post number> · <headline>` line; unversioned posts retain their frozen marker format. All ancestors point directly to the newest complete edition, not merely to their immediate successor. An incomplete, failed or unknown delivery cannot become the update target.
-
-Marker ancestry requires verified same-story classifications or verified edition edges. Legacy unclassified edges and frozen previous-publication links alone cannot authorize UPD. Explicit non-same classifications override old edges; quarantined same classifications cannot establish ancestry. Preparation selects only classification participants, historical navigation, existing markers and legacy heading cleanup candidates, not every published post. It locks and stages only changed candidates. Repeating maintenance with no changes creates no new snapshots or edits. A restart after final delivery can recover the missing marker work.
-
-Marker edits preserve original text and sources. The canonical marker and bottom links share one desired snapshot. Navigation changes preserve all original body text, source labels and media. Full legacy captions are not shortened to make room. If a marker cannot fit without replacing text, maintenance leaves the sent snapshot unchanged and records `publication_navigation_requires_new_edition`. It does not stage an overflow footer. Unknown edits must reconcile against the exact attempted snapshot and fingerprint before a newer marker can replace them. Known rejected edits retain Telegram's global cooldown when superseded.
-
-## Related-story links and historical repair
-
-Confirmed distinct related stories appear in a single `Другие публикации` section at the bottom, after source and same-event previous-publication groups. This heading replaces `Связанные новости` without changing the requirement for confirmed related classification. Each verified same-event component contributes only its latest fully delivered publication, not every edition. Component identity comes from classified same relations and verified edition edges, never headline similarity; quarantined same relations and legacy unclassified edges cannot group targets. Distinct related topics with identical headlines remain separate links. New posts render these links inline. A Telegram limit failure blocks the post instead of creating a separate links message. After a newer aggregate's text and media are fully delivered, maintenance updates old cross-links to it. This does not regenerate headlines or summaries and does not imply an update to the linking event.
-
-`prepareThreadUpdates` composes navigation and marker changes from the sent snapshot. It can remove an obsolete UPD when no verified same-event target remains. Legacy previous-post links become related only after explicit related classification. Otherwise `unverifiedPublication` retains their URLs and labels in the snapshot for audit, without displaying a navigation section or treating them as sources. There is no separate unverified-link section. The title `Другие публикации` is reserved for confirmed related navigation. `Предыдущие публикации` remains available for verified same-event history. Automatically generated related links disappear after explicit unrelated reclassification. Navigation version 2 schedules removal of old visible audit links and renames the confirmed-related heading, including version-1 snapshots whose link metadata has not changed. Other metadata-only version stamps do not trigger a Telegram edit.
-
-Migration `204_publication_navigation_parts.sql` retains historical navigation attempts for audit and reconciliation. New navigation is rendered entirely in the canonical post. The planner does not create footer parts. Once a canonical update fits, it retires only known-unsent historical parts, never sent or ambiguous records. Pending footer sends and edits cannot dispatch, even after restart. Unknown historical edits may still reconcile against their exact fingerprint without another Telegram write. Sent historical replies are not automatically edited or deleted. Authorized deletion retains its tracked-message progress and unknown-outcome checks.
-
-## Explicit lossless repair of legacy albums
-
-`executeReviewedFullRepair(approvalId, api?)` repairs an existing album caption without replacing its message or media. It is an explicit operator action, never an automatic generation bypass. Its reviewed edit action binds the prior and desired snapshot hashes, story version, destination, message, bot, media snapshot and reason. Unknown outcomes, paused publishing, changed ownership and unsafe pending work block the operation. The approval reserves its pending snapshot against ordinary edits and navigation maintenance, including same-content presentation repairs. Explicit retries respect the saved caption retry deadline.
-
-A reviewed repair may execute only when its complete plan fits one caption of at most 1024 UTF-16 units with every visible URL. Historical split plans and reviewed overview-plus-continuation plans remain reproducible for hashes, but execution rejects them with `publication_text_requires_new_edition` before changing the caption. An already committed caption with pending continuations remains incomplete for operator review. No automatic repost, conversion, reply or media replacement occurs.
-
-## Retries, repairs and scheduling
-
-Known rate-limit rejections resume after their saved cooldown. Proven DNS/connect failures retry because no HTTP request reached Telegram. Socket resets, response timeouts and other ambiguous failures remain unknown. Permanent failures do not retry. `TELEGRAM_REQUEST_TIMEOUT_MS` defaults to 30000, range 1000 through 300000. Multipart uploads use `TELEGRAM_UPLOAD_TIMEOUT_MS`, default 300000, range 1000 through 900000. New attempts persist their deadline so reconciliation covers the actual request window without widening historical windows.
-
-Canonical text sends reconcile against the original text/link fingerprint and attempt window. Legacy album reconciliation also requires the whole media group, expected count and first caption message. A matching caption alone cannot complete an album. Unknown edits reconcile before current freshness/admission checks and never authorize another request. Historical attempts keep their own snapshots even if a newer desired snapshot exists.
-
-Automatic source-only edits are disabled. Explicit `sourceRepair` preparation preserves the sent headline, details, earlier summary, score and review. First-part repairs of new text publications must leave every continuation unchanged; otherwise preparation reports `publication_text_requires_new_edition` rather than silently truncating or rewriting the thread. A successful edit switches the snapshot pointer and saves the repaired canonical part. Unknown edits retain their attempted snapshot for reconciliation. Pre-v2 navigation edits can reconcile their historical headings and visible audit links only when the reconstructed frozen request and observed message both match the recorded fingerprint. Unknown full-repair captions remain manual-review-only; generic reconciliation cannot advance their snapshot without the continuation plan. Current settings, destination, bot ownership and cooldowns remain checked at dispatch.
-
-`previewPublicationRepair` inspects tracked posts without writes. `repairExistingPublications` is an explicit repair path, not an incoming-report handler. Authorized duplicate or spurious-post removal deletes tracked continuations and media before the canonical message and records progress for retries. Unknown text/media outcomes block deletion. Unknown or untracked messages are never inferred deletion targets. Ordinary cumulative publication never removes ancestors. No Telegram callback polling runs.
-
-`publishDigest` captures eligible ready events in one query. The default `digestCron` is `0 */3 * * *`. Events arriving during selection wait for the next digest. Manual-origin ownership prevents an automatic path around a manual run's cap. `startPublicationMaintenance` resumes prepared sends, text/media delivery, reconciliation, markers and authorized edits/deletions. It does not select new ready events. `PUBLICATION_READY_INTERVAL_MS` accepts 1000 to 60000 milliseconds, default 5000. See [timing and ownership](../../docs/immediate-publishing.md).
+`digest.ts` and `run-now.ts` resume durable work under the digest lease.
+`maintenance.ts` runs recovery without selecting new stories.
+`verifyBot` sends and edits one registered technical test while publishing is enabled.
+The production replacement retry in `repair.ts` only finishes already-recorded
+replacement deletions. There is no operator repair or approval entry point.

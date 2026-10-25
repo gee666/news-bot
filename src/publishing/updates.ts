@@ -6,8 +6,7 @@ import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js
 import { snapshotSources } from './content.js';
 import { BotApi } from './bot-api.js';
 import { editPublication } from './delivery.js';
-import { renderStoredPublication } from './message-render.js';
-import { PublicationRenderError } from './render.js';
+import { renderPublication, PublicationRenderError } from './render.js';
 import { eligible, locked, publicationEditSelect, rateLimited, supersedeAttempts, type Publication, type StoryContent } from './store.js';
 
 /** One tracked survivor per canonical event and destination. Alias audit survives story pruning. */
@@ -85,15 +84,13 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
         const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
           summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, destinationId, { presentation:sent });
         content = publicationSnapshotSchema.parse({ ...sent, sources });
-        await renderStoredPublication(client,story.publication_id,content,story.delivery_kind);
+        renderPublication({content,delivery_kind:story.delivery_kind ?? 'text'});
       }
       catch (error) {
         if (!(error instanceof PublicationRenderError || error instanceof ZodError)) throw error;
         await cancelEdits(client,[story.publication_id]);
-        await client.query(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status,error_code,finished_at)
-          SELECT $1,'telegram-bot','prepare_edit',coalesce(max(attempt_number),0)+1,'failed',$2,now()
-          FROM request_attempts WHERE publication_id=$1`,
-        [story.publication_id,error instanceof PublicationRenderError ? error.code : 'publication_snapshot_invalid']);
+        await client.query(`UPDATE publications SET error_code='publication_navigation_requires_new_edition',updated_at=now() WHERE id=$1`,
+          [story.publication_id]);
         continue;
       }
       const normalized = JSON.stringify(content);

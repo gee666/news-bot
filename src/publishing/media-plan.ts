@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
@@ -45,31 +44,23 @@ export function partitionMedia<T extends PublicationMedia>(media: T[]): T[][] {
   return batches;
 }
 
-/** Legacy caption-first plans must fit whole. Otherwise use complete text/reply delivery. */
-export function selectAlbumMedia<T extends PublicationMedia>(media: T[]): T[] {
-  return media.length <= MAX_ALBUM_MEDIA && partitionMedia(media).length <= 1 ? media : [];
-}
-
 /** Download and commit the entire upload plan before the canonical Telegram request. */
-export async function preparePublicationMedia(publication: Publication, settings: AppSettings, captionFirst = false): Promise<boolean> {
+export async function preparePublicationMedia(publication: Publication, settings: AppSettings): Promise<boolean> {
   if (!publication.story_id) return false;
   // Once a send was authorized, its byte selection never changes, including after a 429.
   const attempted = (await db.query(`SELECT 1 FROM request_attempts
     WHERE publication_id=$1 AND (operation='send' OR operation LIKE 'send_media:%') LIMIT 1`, [publication.id])).rows.length > 0;
-  const mediaFirst = publication.delivery_kind === 'media_first' || !attempted
-    && z.object({ presentationVersion: z.literal(1) }).safeParse(publication.content).success;
-  if (publication.media_snapshot_id === publication.snapshot_id && (!mediaFirst || publication.delivery_kind === 'media_first') || attempted) {
+  if (publication.media_snapshot_id === publication.snapshot_id || attempted) {
     if (publication.media_status === 'failed' || publication.media_status === 'unknown') {
       throw new BotError('publication_media_plan_unavailable', publication.media_status === 'unknown' ? 'unknown' : 'failed');
     }
     return Boolean(publication.media_snapshot_id) && publication.media_status !== 'none';
   }
   const downloaded = deduplicateMedia(await publicationMedia(publication.story_id, settings));
-  const album = captionFirst && downloaded.length > 0 && selectAlbumMedia(downloaded).length === downloaded.length;
-  const media = mediaFirst ? downloaded.slice(0, MAX_ALBUM_MEDIA) : downloaded;
+  const media = downloaded.slice(0, MAX_ALBUM_MEDIA);
   // Telegram photos require JPEG/PNG. Freeze the actual upload bytes, not a document fallback.
   for (const item of media) {
-    if (!mediaFirst || item.type !== 'image' || mediaUploadType(item) !== 'document') continue;
+    if (item.type !== 'image' || mediaUploadType(item) !== 'document') continue;
     item.data = await normalizeImage(item.data, { maxOutputBytes: 9_000_000 });
     item.mimeType = 'image/png';
     item.digest = createHash('sha256').update(item.data).digest('hex');
@@ -86,7 +77,7 @@ export async function preparePublicationMedia(publication: Publication, settings
       FROM publication_media_items i JOIN publication_media_batches b ON b.id=i.batch_id WHERE b.publication_id=$1`, [publication.id])).rows;
     const deadlines = new Map(previous.map(item => [item.digest, item.expires_at.getTime()]));
     await client.query('DELETE FROM publication_media_batches WHERE publication_id=$1', [publication.id]);
-    for (const [batchNumber, batch] of (album ? [media] : partitionMedia(media)).entries()) {
+    for (const [batchNumber, batch] of partitionMedia(media).entries()) {
       const batchId = randomUUID();
       await client.query('INSERT INTO publication_media_batches(id,publication_id,batch_number) VALUES($1,$2,$3)',
         [batchId, publication.id, batchNumber]);
@@ -99,7 +90,7 @@ export async function preparePublicationMedia(publication: Publication, settings
       }
     }
     await client.query(`UPDATE publications SET media_snapshot_id=$2,media_status=$3,delivery_kind=$4,updated_at=now() WHERE id=$1`,
-      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none', mediaFirst ? 'media_first' : album ? 'album' : 'text']);
+      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none', media.length ? 'media_first' : 'text']);
   });
   return media.length > 0;
 }
