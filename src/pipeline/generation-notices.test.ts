@@ -32,3 +32,10 @@ it('a failed review still counts as generated and does not trigger endless regen
     review: { supported: false, reason: 'Версия не подтверждена' } } }] });
   expect(await alreadyGenerated(input, defaultSettings)).toBe(true);
 });
+
+it('does not reuse an overlong automatic summary from an older generation receipt', async () => {
+  const input = storyInput();
+  input.story.headline = 'Короткий заголовок'; input.story.summary = 'Я'.repeat(1001); input.story.researched = true;
+  expect(await alreadyGenerated(input, defaultSettings)).toBe(false);
+  expect(mocks.query).not.toHaveBeenCalled();
+});

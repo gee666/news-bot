@@ -10,6 +10,7 @@ import { jevTemplates } from '../models/templates.js';
 import { generationThread } from './generation-context.js';
 import { publishedThread, type ThreadPost } from './publication-thread.js';
 import { generationHistory } from './generation-history.js';
+import { MAX_HEADLINE_CHARS, summaryMaxChars } from './generation-limits.js';
 
 const accessSchema = z.enum(['public', 'restricted', 'unknown']);
 const storySchema = z.object({
@@ -132,6 +133,9 @@ function isNoticeGeneration(value: unknown): boolean {
 export async function alreadyGenerated(input: StoryInput, settings: AppSettings, query = db.query.bind(db), receiptId?: string): Promise<boolean> {
   if (!input.story.headline || isNoticeGeneration(input.story)
     || !input.story.researched || !input.story.summary) return false;
+  // Reuse acceptable short receipts, but regenerate overlong automatic drafts.
+  // Explicitly pinned historical repair receipts retain their reviewed content.
+  if (!receiptId && (input.story.summary.length > summaryMaxChars() || input.story.headline.length > MAX_HEADLINE_CHARS)) return false;
   const result = await query<{ result: unknown }>(`SELECT result FROM judgments WHERE story_id = $1 AND stage = $2
     AND input_hash = $3 AND model_key = $4 AND prompt_version = '${GENERATION_VERSION}' AND expires_at > now()
     AND result->>'headline' = $5 AND result->>'summary' IS NOT DISTINCT FROM $6

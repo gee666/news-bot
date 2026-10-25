@@ -107,12 +107,11 @@ it('saves a still-unsupported rewrite after exactly one rewrite and re-review', 
   })], defaultSettings);
 });
 
-it('does not reject long output or add a structured repair call', async () => {
-  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, summary: 'Подробности. '.repeat(500) }))
-    .mockResolvedValueOnce(modelResult(passed));
-  await researchStory(storyId, defaultSettings);
-  expect(saveGenerations).toHaveBeenCalledOnce();
-  expect(mocks.generate).toHaveBeenCalledTimes(2);
+it('rejects long output without silently clipping it or adding an unbounded repair call', async () => {
+  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, summary: 'Подробности. '.repeat(500) }));
+  await expect(researchStory(storyId, defaultSettings)).rejects.toMatchObject({ metadata: { kind: 'invalid_output' } });
+  expect(saveGenerations).not.toHaveBeenCalled();
+  expect(mocks.generate).toHaveBeenCalledOnce();
 });
 
 it('fails malformed output after one call without saving a notice', async () => {
@@ -304,4 +303,36 @@ it('retains every prior source URL even when the writer omits them or the origin
   expect(JSON.parse(review.prompt).material).toEqual(material);
   expect(saveGenerations).toHaveBeenCalledWith([input],[expect.objectContaining({ sourceUrls:sources.map(source => source.url) })],defaultSettings);
   expect(mocks.generate).toHaveBeenCalledTimes(2);
+});
+
+it('enforces a 1000-character news body and a 180-character headline in the generation schema', async () => {
+  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, summary: 'Я'.repeat(1000) }))
+    .mockResolvedValueOnce(modelResult(passed));
+  await researchStory(storyId, defaultSettings);
+  const request = mocks.generate.mock.calls[0]?.[0];
+  expect(request.responseSchema.schema.properties.summary.maxLength).toBe(1000);
+  expect(request.responseSchema.schema.properties.headline.maxLength).toBe(180);
+  expect(request.systemPrompt).toContain('600–900');
+  expect(request.systemPrompt).toContain('строго не более 1000');
+  expect(request.systemPrompt).not.toContain('Используй столько коротких абзацев, сколько нужно');
+  expect(saveGenerations).toHaveBeenCalledOnce();
+});
+
+it.each(['summary', 'headline'] as const)('never saves an overlong %s or clips it into a partial sentence', async field => {
+  mocks.generate.mockResolvedValueOnce(modelResult({ ...draft, [field]: 'Я'.repeat(field === 'summary' ? 1001 : 181) }));
+  await expect(researchStory(storyId, defaultSettings)).rejects.toMatchObject({ metadata: { kind: 'invalid_output' } });
+  expect(saveGenerations).not.toHaveBeenCalled();
+});
+
+it('uses the configured summary cap on both initial drafts and review rewrites', async () => {
+  vi.stubEnv('NEWS_SUMMARY_MAX_CHARS', '500');
+  mocks.generate.mockResolvedValueOnce(modelResult(draft)).mockResolvedValueOnce(modelResult(failed))
+    .mockResolvedValueOnce(modelResult({ ...draft, summary: 'Я'.repeat(501) }));
+  await researchStory(storyId, defaultSettings);
+  for (const index of [0, 2]) {
+    const request = mocks.generate.mock.calls[index]?.[0];
+    expect(request.responseSchema.schema.properties.summary.maxLength).toBe(500);
+    expect(request.systemPrompt).toContain('строго не более 500');
+  }
+  expect(saveGenerations).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({ summary: draft.summary })], defaultSettings);
 });
