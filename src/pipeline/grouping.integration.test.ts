@@ -157,32 +157,21 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect(BotApi.prototype.edit).toHaveBeenCalled(); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2], '102'));
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
   });
-  it('creates cumulative posts through the whole thread even when the incoming report is a duplicate', async () => {
+  it('records later same candidates as related rather than bridging published groups', async () => {
     await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
     const first=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%выпустила Compiler 2%'");
     await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.'])); await publish();
+    const calls=model.groupingCalls;
     await processIntake(await intake(['Compiler 2 получила поддержку Linux.'])); await publish();
-    const { latestThreadStory, publishedThread }=await import('./publication-thread.js');
-    const latest=await latestThreadStory(first);
-    expect(await publishedThread(latest)).toHaveLength(3);
-    const text=vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text ?? '';
-    expect(text).toContain('выпустила Compiler 2'); expect(text).toContain('40 долларов'); expect(text).toContain('поддержку Linux');
-    expect(text).not.toContain('<b>Новое</b>'); expect(text).not.toContain('<b>Ранее было опубликовано</b>');
-    expect(text.match(/https:\/\/t.me\/c\/123\//gu)).toHaveLength(2);
-    await processIntake(await intake(['Ещё один пересказ выпуска Compiler 2 без новых сведений.'])); await publish();
-    const next=await latestThreadStory(first);
-    expect(next).not.toBe(latest);
-    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE text LIKE 'Ещё один пересказ%' ")).rows)
-      .toEqual([{previous:latest}]);
-    expect((await database.db.query('SELECT story_id FROM publications WHERE pending_snapshot_id IS NOT NULL')).rows).toEqual([]);
-    expect(BotApi.prototype.send).toHaveBeenCalledTimes(4);
-    for (const message of ['101','102','103']) {
-      const edits = vi.mocked(BotApi.prototype.edit).mock.calls.filter(call => call[1] === message);
-      expectFollowupMarker(edits.at(-1)?.[2], '104');
-    }
-    vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2]));
-    const final=vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text ?? '';
-    expect(final).toContain('выпустила Compiler 2'); expect(final).toContain('40 долларов'); expect(final).toContain('поддержку Linux');
+    const next=await one("SELECT story_id AS id FROM story_mentions WHERE text LIKE '%поддержку Linux%'");
+    expect(model.groupingCalls-calls).toBe(1);
+    expect((await database.db.query(`SELECT relation FROM story_relations
+      WHERE lower_story_id=$1 OR upper_story_id=$1 ORDER BY relation`,[next])).rows)
+      .toEqual([{relation:'related'},{relation:'same'}]);
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
+    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(3);
+    expect(BotApi.prototype.send).toHaveBeenCalledTimes(3);
+    expect(next).not.toBe(first);
   });
   it('keeps PHP discovery and a consequent Alderon shutdown separate, without same-event ancestry or UPD', async () => {
     await processIntake(await intake(['OpenAI model discovered a PHP vulnerability.'])); await publish();
@@ -312,7 +301,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows).toEqual([{story_id:canonical}]);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
   });
-  it('keeps a historical published owner unchanged when a source edit joins a live draft', async () => {
+  it('keeps a historical published owner unchanged and relates a lower-ranked live draft', async () => {
     const first=await intake(['Acme выпустила Compiler 2.']); await processIntake(first); await publish();
     const original=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[first]);
     const item=await one('SELECT item_id AS id FROM item_revisions WHERE id=$1',[original]);
@@ -331,10 +320,14 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[update,edited]);
     await processIntake(update); await publish();
     const attached=(await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[edited])).rows[0]?.story_id;
-    expect(attached).toBe(duplicate);
-    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:null}]);
+    expect(attached).not.toBe(duplicate);
+    expect(attached).not.toBe(canonical);
+    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:canonical}]);
+    expect((await database.db.query(`SELECT relation FROM story_relations
+      WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`,[attached,duplicate])).rows)
+      .toEqual([{relation:'related'}]);
     expect((await database.db.query("SELECT id FROM judgments WHERE stage='published_update'")).rows).toEqual([]);
-    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
+    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(3);
     expect((await database.db.query('SELECT headline FROM stories WHERE id=$1',[canonical])).rows[0]?.headline).not.toBeNull();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2]));
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[update])).rows).toEqual([{status:'completed'}]);

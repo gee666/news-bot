@@ -3,6 +3,7 @@ import { defaultSettings } from '../settings.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 import { ProcessingYield } from './processing-slice.js';
 import { prepareStoryFailureUpdates, storyWork } from './story-failures.js';
+import { recordProcessingDiagnostic } from './processing-diagnostics.js';
 import { prepareUpdates } from '../publishing/updates.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), boundary: vi.fn(), markers: new Map<string, unknown>() }));
@@ -33,6 +34,8 @@ it.each(['pi','jev','embedding'] as const)('isolates %s failures, retries automa
   await vi.advanceTimersByTimeAsync(settings.retryMaxMs+1);
   expect(await storyWork(id, settings, null, run)).toBe('skipped');
   expect(run).toHaveBeenCalledTimes(2);
+  expect(recordProcessingDiagnostic).toHaveBeenCalledTimes(2);
+  expect(JSON.stringify(mocks.query.mock.calls)).not.toContain('stage_state');
 });
 it('changed collected input gets a fresh budget; success clears the failure marker', async () => {
   const settings = { ...defaultSettings, requestMaxAttempts: 1 };

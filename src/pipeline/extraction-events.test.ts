@@ -71,17 +71,13 @@ describe('multi-span news mentions', () => {
   it.each([
     'Google presented Gemini 4 Argon and Antigravity demos.\nOne demo uses Lyria for background music.\nLyria can generate music in several styles.',
     'A research paper introduces Agent X.\nExperiments use Model Y and Tool Z.\nModel Y also supports image generation.',
-  ])('instructs extraction and review to keep the main topic, not secondary products: %s', async text => {
-    const proposed = { events: [
-      { parts: [range('u0')], context: [] },
-      { parts: [range('u1', 'u2')], context: [] },
-    ], omitted: [] };
-    const reviewed = { events: [{ parts: [range('u0')], context: [range('u1')] }],
+  ])('instructs one extraction call to keep the main topic, not secondary products: %s', async text => {
+    const partition = { events: [{ parts: [range('u0')], context: [range('u1')] }],
       omitted: [{ id: 'u2', last: null, excerpt: null, reason: 'non_news' }] };
-    const generator = { generate: vi.fn().mockResolvedValueOnce(modelResult(proposed)).mockResolvedValueOnce(modelResult(reviewed)) };
+    const generator = { generate: vi.fn().mockResolvedValueOnce(modelResult(partition)) };
     const events = await extractEvents(text, generator, { operationId: 'extract' }, vi.fn(), 'Technology news');
     expect(events.map(event => eventText(text, event))).toEqual([text.split('\n').slice(0, 2).join('\n\n')]);
-    expect(generator.generate).toHaveBeenCalledTimes(2);
+    expect(generator.generate).toHaveBeenCalledOnce();
     for (const [request] of generator.generate.mock.calls) {
       expect(request.systemPrompt).toContain('A source item normally yields exactly ONE event');
       expect(request.systemPrompt).toContain('headline and opening framing');
@@ -91,16 +87,11 @@ describe('multi-span news mentions', () => {
       expect(request.systemPrompt).toContain('A paragraph about a secondary product inside another story is NOT a roundup');
       expect(request.systemPrompt).not.toMatch(/separate independently announced products|Keep every named product update|Restore missing news, recap products|FOUR candidates/u);
     }
-    expect(generator.generate.mock.calls[1]?.[0].systemPrompt).toContain('merge proposed events that split a single research post, paper or article');
   });
-  it('independently reviews omissions and can restore a missing event', async () => {
-    const empty = { events: [], omitted: [{ id: 'u0', last: null, excerpt: null, reason: 'non_news' }] };
-    const restored = { events: [{ parts: [range('u0')], context: [] }], omitted: [] };
-    const generator = { generate: vi.fn().mockResolvedValueOnce(modelResult(empty)).mockResolvedValueOnce(modelResult(restored)) };
-    const text = 'Expected release of Security B.';
-    const events = await extractEvents(text, generator, { operationId: 'extract' }, vi.fn(), 'Technology news');
-    expect(events.map(event => eventText(text,event))).toEqual([text]);
-    expect(generator.generate).toHaveBeenCalledTimes(2);
-    expect(generator.generate.mock.calls[1]?.[0].systemPrompt).toContain('Check every omission');
+  it('accepts a locally valid empty partition without a second model call', async () => {
+    const partition = { events: [], omitted: [{ id: 'u0', last: null, excerpt: null, reason: 'non_news' }] };
+    const generator = { generate: vi.fn().mockResolvedValueOnce(modelResult(partition)) };
+    expect(await extractEvents('No news.', generator, { operationId: 'extract' }, vi.fn(), 'Technology news')).toEqual([]);
+    expect(generator.generate).toHaveBeenCalledOnce();
   });
 });

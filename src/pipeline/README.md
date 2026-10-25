@@ -1,48 +1,39 @@
 # Processing
 
-1. Collect source revisions into durable batches. Group saved unassigned reports first, then process other unfinished items, newest first within each set. Reopened association-only batches use remaining turns instead of starving pending news.
-2. Pi extracts exact source passages and independently reviews the partition. Local validation checks coordinates, overlap and complete source coverage. Save successful extraction once, including empty results.
-3. Pi compares each report with all retained story groups in bounded, resumable requests. Every candidate gets `same`, `related` or `unrelated`. Only same reports attach to drafts or create a new same-event edition after publication. Added details and changed certainty still refresh the matching draft. Related reports form separate stories with durable cross-links. Only same drafts merge; merge transactions preserve publication identity, evidence and canonical aliases.
-4. Pi classifies an item's links together. A source-only recap can support several stories. New enrichment of a sent story queues a cumulative edition instead of editing it. Its assessment runs again when the story catalogue changes. The existing `source_link_processing` row records only the currently applied catalogue; superseded retry stages are skipped, including after a catalogue reversion. Research reads and assesses linked documents; a link decision is not proof of authority.
-5. Refresh affected stories. JEV checks group coherence, selects an unchanged representative, applies news eligibility and scores interest. When its context is too small, Pi applies the same criteria to the full material and caches its own receipt. Pi classifies primary origins versus relays, then searches for a missing primary only at interest >=5 and never below the configured research threshold. Discovery stops when a primary is found. Russian text may attribute claims only to primary origins; relay names appear only in the secondary-source footer. Pi writes and reviews the text. Non-empty reviewer notes appear on the post regardless of verdict; failed reviews do not hold publication.
-6. Enqueue completed current stories. The publisher sends each edition once, adds latest-edition headers to older posts, and reconciles uncertain Telegram outcomes instead of blindly resending.
+- Collect immutable source revisions into durable batches.
+- Extract exact source passages in one structured model call.
+  Local validation checks coordinates, overlap and complete coverage.
+  Save successful extraction once, including empty results.
+- Compare each report with every retained eligible story group.
+  Bounded, cached chunks preserve full reports and provenance.
+  Attach only to the highest-ranked `same` candidate.
+  Record other `same` matches as `related`, without extra comparisons.
+  Related stories stay separate and never contribute generation material.
+- Classify item links together, then read and assess relevant documents.
+  Link relevance and primary origin do not prove factual verification.
+- Check story coherence, select a representative, assess eligibility,
+  rank interest and refresh embeddings. JEV context overflow uses Pi
+  with the same criteria and complete input.
+- Classify primary origins. Search for missing primaries only at interest
+  >=5 and at or above the configured research threshold.
+- Write Russian news from source reports, retained history and research.
+  Review it, with at most one rewrite and re-review.
+  Review failure does not block a valid draft. Nonempty notes are shown.
+- Check completion postconditions and generation freshness once before
+  a guarded update. Enqueue completed current stories for publishing.
 
-Orphan reports older than `collectionWindowHours`, considering collection and revision creation time, retain their text and extraction but receive `outside_collection_window` dispositions. Dropped reports are not recreated on replay. Active manual runs are preserved.
+Revision stages share saved results and a retry budget across batches.
+Stories use only the `story-failures.ts` marker, not stage retry receipts.
+`requestMaxAttempts`, `retryBaseMs` and `retryMaxMs` bound failures.
+Checkpoints and successful calls do not consume attempts.
+Healthy siblings continue while failed units wait or exhaust their budget.
 
-An item uses revision-stage receipts for independent retries. A story has one automatic failure budget, not another set of stage receipts. Settings `requestMaxAttempts`, `retryBaseMs` and `retryMaxMs` bound failed work. Successful calls and checkpoints do not spend that budget. Exhausted units are skipped; healthy siblings and later batches continue. Link-enrichment failures cannot strand committed news.
-
-Generated news bodies target 600–900 characters and cannot exceed `NEWS_SUMMARY_MAX_CHARS`, 1000 by default, configurable from 200 to 2000. Headlines are limited to 180 characters; source links are rendered separately and are not removed to fit the body. The writer selects main facts and essential caveats rather than listing every detail. The same cap applies to cumulative editions and review rewrites. Overlong automatic generation receipts no longer count as current, so unpublished drafts regenerate instead of being clipped. Explicit historical repair receipts and already-sent text remain unchanged.
-
-Batch model/profile settings remain fixed. Older batches cannot overwrite newer completed shared-story output. Generation freshness uses the saved input/model/output contract at story completion and again at delivery. No review verdict can authorize stale output.
-
-Embeddings order matching candidates but no longer exclude candidates. Pi sees every retained group allowed by the inference privacy policy, including full reports and provenance. `GROUPING_MAX_PROMPT_BYTES` bounds each evidence JSON payload to 98304 UTF-8 bytes by default, and `GROUPING_MAX_CANDIDATES` bounds it to 32 candidates. Limits accept 16384..262144 bytes and 1..64 candidates. System/schema instructions add a small fixed overhead. Repairs never append the prior output. Complete pairs that cannot fit fail explicitly rather than losing evidence. Each validated chunk is cached by full input, prompt and model configuration, so retries and processing checkpoints resume without repeating successful calls. Same-event matches from different chunks must also pass pairwise comparisons before any merge. Private/unknown groups are excluded unless `ALLOW_PRIVATE_INFERENCE=true`; they cannot block unrelated public intake. Source edits also compare against the source's previous story even when that story has no current mentions. Historical snapshots are rechecked under source locks before a merge, so its earlier Telegram identity survives.
-
-Migration `206_bounded_grouping_retry.sql` reopens failed grouping requests in unfinished automatic batches, preserving successful receipts, manual work, request audits and publication identities.
-
-Pi's required requests default to a configurable five-minute deadline, so a dead stream backs off instead of holding the serial processor for twenty minutes. Migration `194_pi_request_deadline.sql` updates the old default in automatic unfinished batches without changing custom deadlines or manual snapshots.
-
-Leases serialize processing. `PROCESSING_SLICE_MS` defaults to 120000 and allows 1000 to 3600000. Checkpoints stop new dispatch without cancelling requests, release the lease, and resume on the 15-second recovery tick. A digest refreshes stories before source-only link enrichment in one leased sweep. Publication runs outside that lease. Scheduled digest ticks select ready stories even after a checkpoint; recovery continuations select only when the sweep finishes.
-
-Migration `193_simple_association.sql` strips retired candidate/headline settings from saved settings and batch snapshots, skips unfinished removed stages, and reopens retained source-only work and unfinished associated legacy intake through normal processing. It preserves successful extraction, collected data, request audits, publication receipts and all tables. Older associated intake uses the same Pi grouping decision to finish merges; its existing revision receipt prevents repeat comparisons.
-
-The Activity tab's manual run shares the same retries and cooldowns. See [manual runs](../../docs/run-now.md).
-
-Published story text and source lists are immutable. Grouping applies the headline test: two reports are same only if both can safely share the same specific headline without losing their main subject or action. A broad topic headline or a headline joining separate actions does not pass. OpenAI discovering a PHP vulnerability and Alderon shutting down a game because of it are related, not same. JEV applies this same test to group integrity before choosing a representative; matching itself uses Pi, not an extra JEV request. Every incoming report matching a published event creates a linked new post, including duplicates. Follow-ups retain `previous_story_id` in mention metadata and durable `story_publication_threads` rows, pointing to the latest published post. Generation receives the full retained ancestor and current source excerpts, supplementary reports and read evidence, not just earlier summaries. Each headline and summary covers the entire event as one self-contained account, without separate new/earlier sections or suppression for repeated information. Previous posts provide publication context. Their sources and previous-post links remain available to publishing. Images inform generation without imposing an album-caption summary limit.
-
-## Relationship storage and legacy repair
-
-Migration `203_story_relations.sql` adds canonical undirected pairs in `story_relations`, keyed by `lower_story_id < upper_story_id`. Rows store an explicit `same`, `related` or `unrelated` classification, classifier version, provenance and classification time. Matching rechecks source fingerprints under locks before writing distinct-event decisions. Missing, repeated or invented candidate IDs fail output validation; omitted candidates never erase stored relations. A duplicate mention omitting causal context cannot erase an existing related edge; changing it to unrelated requires a full-aggregate comparison or user decision. `grouping-v2` invalidates old grouping receipts without repeating successful extraction.
-
-`recordStoryRelations` in `story-relations.ts` writes classifications transactionally. Use `provenance.origin='user'` for authorized manual decisions. Automated decisions cannot overwrite those rows or contradict an all-user same path. A proposed same edge cannot join components containing an explicit non-same pair. Reclassifying a connected component as non-same quarantines conflicting same proofs instead of choosing an arbitrary path. Quarantined rows remain for audit with `provenance.quarantined=true`; graph readers must exclude them.
-
-`groupReport` decides same, related or unrelated in the original bounded comparison. Its prompt requires a documented cause, consequence, direct response or separate development in the same identifiable incident. Shared vendors, products, skills, security risks and hypothetical mitigations are not enough. Missing or ambiguous connections are unrelated. There is no second relatedness model call or supporting-quote verification pass. Original comparison results are cached by the complete input, prompt and model settings.
-
-Automated related decisions carry `provenance.relatedPromptVersion` identifying the original comparison prompt. Navigation uses decisions from the corrected prompt, so the old broad classifications do not reappear after removing the extra verifier. Authorized user classifications remain authoritative. Old rows and former verification metadata stay available for audit; neither verification receipts nor quoted evidence are required by the current policy. Existing completed matching receipts are not replayed automatically. A later normal comparison or authorized repair can supply a fresh original-model decision.
-
-`relatedStoryIds(storyId, query?)` reads verified related links in both directions through verified same components on both sides. Any explicit, nonquarantined unrelated pair between those components vetoes the inherited link, so a later edition cannot reintroduce a target already classified unrelated. It does not follow related-of-related links and never imports related reports, sources, evidence or media into generation. Same components include current classified same rows and verified edition edges, not legacy merge aliases.
-
-Publishing selects the newest fully delivered canonical text post from each eligible related component, then at most five components by publication time descending and ID descending. Incomplete media/text, removed or replaced posts and legacy album captions remain ineligible. `visibleSources` also caps persisted related sources at five unique URLs without capping previous-publication or factual-source links. Navigation refresh demotes no-longer-verified stored links to hidden `unverifiedPublication` audit entries instead of discarding them. Event text, same-story history and standalone media-first delivery do not change.
-
-Existing `story_publication_threads` edges get a NULL `classification_version`. They remain available for audit and authorized repair but cannot supply generation ancestry or new UPD headers. Mention metadata is not a fallback for proof of identity. A direct explicit related/unrelated classification also overrides an already verified thread edge. New matched editions stamp `grouping-v2`; source-only copies stamp `source-copy-v1` and can inherit only ancestors that remain verified. Rebase follows verified edges only.
-
-This migration does not edit Telegram or guess classifications for legacy posts. An authorized repair must classify each retained pair, restore only proven same threads, and refresh navigation from those decisions. Old aggregates that combined different main developments fail the stricter integrity check rather than selecting a misleading broad-topic representative. Splitting such source ownership requires an explicit repair, not a guessed merge reversal.
+`GROUPING_MAX_PROMPT_BYTES` defaults to 98304; candidates per chunk to 32.
+Complete pairs that exceed the byte limit fail rather than lose evidence.
+Private inference requires approval or `ALLOW_PRIVATE_INFERENCE=true`.
+`NEWS_SUMMARY_MAX_CHARS` defaults to 1000. Headlines allow 180 characters.
+Links render separately. Published text stays immutable; matching reports
+create cumulative editions with verified same-event ancestry.
+Leases serialize processing; checkpoints resume through recovery.
+See [manual runs](../../docs/run-now.md) and
+[reliability](../../docs/news-reliability.md).
