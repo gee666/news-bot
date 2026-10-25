@@ -1,3 +1,4 @@
+import { cleanSourceUrl } from '../source-url.js';
 import type { TextLink } from "./types.js";
 import { extractMarkdownLinks, markdownTree } from "./markdown.js";
 import type { Nodes } from "mdast";
@@ -21,7 +22,7 @@ function explicitUrl(value: string): string | null {
   if (!candidate || [...candidate].some(character => character.charCodeAt(0) <= 32 || character.charCodeAt(0) === 127)) return null;
   try {
     const parsed = new URL(/^[a-z][a-z\d+.-]*:/iu.test(candidate) ? candidate : "https://" + candidate);
-    return parsed.href;
+    return cleanSourceUrl(parsed.href);
   } catch { return null; }
 }
 

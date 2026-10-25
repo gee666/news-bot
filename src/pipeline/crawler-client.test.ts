@@ -265,3 +265,13 @@ function zRequest(value: unknown) {
   return z.object({ urls: z.array(z.string()), browser_config: z.unknown(),
     crawler_config: z.unknown() }).parse(JSON.parse(init.body));
 }
+
+it('uses a clean Reddit permalink and does not publish transient challenge redirect parameters', async () => {
+  const reddit = 'https://www.reddit.com/r/StableDiffusion/comments/1xdoh8k/gpu_unlock/';
+  const dirty = reddit+'?solution=one&js_challenge=1&jsc_token=token&jsc_orig_r=';
+  respond({ success:true,results:[result({ url:reddit,redirected_url:dirty+'#discussion' })] });
+  const page = await fetchCrawlerPage(dirty);
+  expect(page.url).toBe(dirty);
+  expect(page.canonicalUrl).toBe(reddit);
+  expect(zRequest(mocks.fetch.mock.calls[0]?.[1]).urls).toEqual([reddit]);
+});

@@ -247,7 +247,7 @@ describe.skipIf(!url)('publication navigation in PostgreSQL',()=>{
       'SELECT content FROM publication_text_parts WHERE publication_id=$1 ORDER BY part_number',[a.id])).rows;
     expect(changed.flatMap(part=>part.content.links).map(link=>link.url)).not.toContain(postUrl('20'));
     expect(changed.map(part=>part.content.plainText).join('')).toContain('Полные исходные факты. '.repeat(300));
-    expect((await load(a.id)).content).toMatchObject({ sources:[] });
+    expect((await load(a.id)).content).toMatchObject({ sources:[{ url:postUrl('20'),unverifiedPublication:true }] });
     expect(api.send).not.toHaveBeenCalled();
   });
 
@@ -323,12 +323,12 @@ describe.skipIf(!url)('publication navigation in PostgreSQL',()=>{
     await database.db.query('INSERT INTO story_publication_threads(story_id,previous_story_id) VALUES($1,$2)',[d.story,c.story]);
     const { relatedPublicationSources }=await import('./navigation.js');
     const targets=async()=>(await relatedPublicationSources(database.db,b.story,'-100123','123')).map(source=>source.url);
-    expect(await targets()).toEqual([postUrl('20'),postUrl('30')]);
+    expect(await targets()).toEqual([postUrl('30'),postUrl('20')]);
     await classify(c.story,d.story,'same');
     await database.db.query(`UPDATE story_relations SET provenance=provenance||'{"quarantined":true}'::jsonb
       WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`,[c.story,d.story]);
     await database.db.query("UPDATE story_publication_threads SET classification_version='old-verified' WHERE story_id=$1",[d.story]);
-    expect(await targets()).toEqual([postUrl('20'),postUrl('30')]);
+    expect(await targets()).toEqual([postUrl('30'),postUrl('20')]);
   });
 
   it('uses only text canonical IDs as internal targets, never historical captions or attached pictures',async()=>{

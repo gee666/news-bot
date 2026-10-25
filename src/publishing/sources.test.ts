@@ -3,7 +3,7 @@ import type { PublicationSnapshot,PublicationSource } from '../types.js';
 import { render } from './render.js';
 import { renderCaption } from './caption.js';
 import { renderFullText } from './full-text.js';
-import { orderSources,sourceGroup,SOURCE_GROUPS } from './sources.js';
+import { orderSources,sourceGroup,SOURCE_GROUPS,visibleSources } from './sources.js';
 
 const audit:PublicationSource={ label:'Непроверенная историческая ссылка',url:'https://t.me/c/123/10',primary:false,
   unverifiedPublication:true,access:'public',classification:'relevant' };
@@ -42,4 +42,28 @@ describe('visible navigation and audit-only historical links',()=>{
     expect(plain.match(/Другие публикации/gu)).toHaveLength(1);
     expect(plain).toContain('Предыдущие публикации');
   });
+});
+
+it('caps persisted related links at five unique URLs without capping previous or factual sources or mutating audit',()=>{
+  const related=Array.from({length:26},(_,index)=>({...audit,unverifiedPublication:undefined,relatedPublication:true as const,
+    label:`Related ${index}`,url:`https://t.me/c/123/${index+200}`}));
+  const previous=Array.from({length:8},(_,index)=>({...audit,unverifiedPublication:undefined,previousPublication:true as const,
+    url:`https://t.me/c/123/${index+300}`}));
+  const sources=[...snapshot.sources.filter(source=>!source.relatedPublication),{...audit,...related[0],url:'https://t.me/c/123/200',label:'Duplicate',primary:false},...related,...previous];
+  const before=structuredClone(sources);
+  expect(visibleSources(sources).filter(source=>source.relatedPublication)).toHaveLength(5);
+  expect(visibleSources(sources).filter(source=>source.previousPublication)).toHaveLength(9);
+  expect(visibleSources(sources).some(source=>source.unverifiedPublication)).toBe(false);
+  expect(sources).toEqual(before);
+  expect(orderSources(sources)).toHaveLength(sources.length);
+});
+
+it.each(['text','caption','full text','overflow footer'] as const)('caps actual persisted sources in %s rendering without mutating the snapshot',kind=>{
+  const stored={...snapshot,sources:[...snapshot.sources,...Array.from({length:26},(_,index)=>({...audit,
+    unverifiedPublication:undefined,relatedPublication:true as const,label:`Related ${index}`,url:`https://t.me/c/123/${index+200}`}))]};
+  const before=structuredClone(stored);
+  const parts=kind==='text' ? [render(stored)] : kind==='caption' ? [renderCaption(stored)] : renderFullText(stored,kind==='overflow footer');
+  const relatedUrls=new Set(stored.sources.filter(source=>source.relatedPublication).map(source=>source.url));
+  expect(parts.flatMap(part=>part.links).filter(link=>relatedUrls.has(link.url)).length).toBeLessThanOrEqual(5);
+  expect(stored).toEqual(before);
 });

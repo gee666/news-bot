@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
-import { defaultSettings } from '../settings.js';
+import { defaultSettings as baseSettings } from '../settings.js';
+const defaultSettings = { ...baseSettings, publishingEnabled: true };
 import { BotApi, BotError } from './bot-api.js';
 import { editPublication, reconcile, sendPrepared } from './delivery.js';
 import { PublicationRenderError } from './render.js';
@@ -138,17 +139,31 @@ describe('durable publication delivery', () => {
     expect(failure?.[1]?.[2].getTime()).toBeGreaterThanOrEqual(before+120_000);
   });
 
-  it('freezes oversized details and sources as complete continuation parts', async () => {
+  it('rejects oversized text before dispatch rather than moving sources to replies', async () => {
     const api = new BotApi('123:synthetic');
     const send = vi.spyOn(api,'send').mockResolvedValue('9');
     const broken = { ...publication, content: { headline: 'Новость', score: 3, details: 'Текст'.repeat(1500), detailsKind: 'excerpt', sources: [{ label: 'Источник',
       url: 'https://example.org/', access: 'public', primary: false, classification: 'relevant' }] } };
-    expect(await sendPrepared(broken,api,defaultSettings)).toBe('9');
-    expect(send).toHaveBeenCalledOnce();
-    expect(send.mock.calls[0]?.[1].plainText.length).toBeLessThanOrEqual(4096);
+    expect(await sendPrepared(broken,api,defaultSettings)).toBeNull();
+    expect(send).not.toHaveBeenCalled();
     const parts = mocks.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO publication_text_parts'));
-    expect(parts.length).toBeGreaterThan(1);
-    expect(parts.some(([,args]) => String(args[3]).includes('https://example.org/'))).toBe(true);
+    expect(parts).toHaveLength(0);
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO request_attempts'))).toBe(false);
+    expect(mocks.query.mock.calls.find(([sql]) => String(sql).includes("SET status='failed'"))?.[1])
+      .toEqual(['id','publication_message_too_long']);
+  });
+
+  it('rejects oversized media-first text before uploading any media', async () => {
+    vi.spyOn(mediaPlan,'preparePublicationMedia').mockResolvedValue(true);
+    const original = mocks.query.getMockImplementation();
+    mocks.query.mockImplementation(async (sql:string) => sql.includes('SELECT delivery_kind')
+      ? { rows:[{ delivery_kind:'media_first',media_status:'pending',media_snapshot_id:'snap' }] } : original?.(sql));
+    const api = new BotApi('123:synthetic');
+    const send = vi.spyOn(api,'send'); const upload = vi.spyOn(api,'sendMedia');
+    const long = { ...publication,content:{ headline:'Новость',score:7,details:'Факт. '.repeat(1000),detailsKind:'summary',sources:[] } };
+    expect(await sendPrepared(long,api,defaultSettings)).toBeNull();
+    expect(send).not.toHaveBeenCalled(); expect(upload).not.toHaveBeenCalled();
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO request_attempts'))).toBe(false);
   });
 
   it('persists terminal render failures without dispatching an edit', async () => {

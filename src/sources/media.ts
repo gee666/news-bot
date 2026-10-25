@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Nodes } from 'mdast';
 import { publicUrl } from '../pipeline/research-fetch.js';
 import { markdownTree } from './markdown.js';
+import { decorativeImage } from './media-policy.js';
 
 export const webMediaSchema = z.object({ type: z.enum(['image', 'video']), url: z.string().max(4096) });
 export type WebMedia = z.infer<typeof webMediaSchema>;
@@ -21,7 +22,8 @@ export function validatedMedia(input: unknown, base: string): WebMedia[] {
   return mergeMedia(input.slice(0, 100).flatMap(value => {
     const result = webMediaSchema.safeParse(value);
     const url = result.success ? mediaUrl(result.data.url, base) : null;
-    return result.success && url ? [{ type: result.data.type, url }] : [];
+    return result.success && url && (result.data.type !== 'image' || !decorativeImage(url))
+      ? [{ type: result.data.type, url }] : [];
   }));
 }
 function srcset(value: string | null): string | null {
@@ -36,8 +38,10 @@ function imageSource(image: Element): string | null {
 function decorative(image: Element): boolean {
   const size = ['width', 'height'].map(name => Number.parseFloat(image.getAttribute(name) ?? ''));
   return size.some(value => value > 0 && value <= 2)
-    || /(?:^|[\s/_-])(?:avatar|icon|logo|emoji|tracking|pixel)(?:[\s/_.-]|$)/iu.test(
-      [image.getAttribute('class'), image.getAttribute('alt'), image.getAttribute('src')].join(' '));
+    || decorativeImage(image.getAttribute('class'), image.getAttribute('id'), image.getAttribute('alt'),
+      image.getAttribute('title'), imageSource(image))
+    || Boolean(image.closest('[class*="author-bio"],[class*="author-card"],[class*="author-info"],'
+      + '[class*="avatar"],[class*="site-brand"],[class*="social-share"]'));
 }
 
 /** Run on selected content only. Never executes scripts or requests image/video resources. */
@@ -101,7 +105,10 @@ export function discoverMedia(content: string, base: string, format: 'markdown' 
     if (url) {
       const image = node.type === 'image' || node.type === 'imageReference';
       const video = node.type === 'link' && (node.title === 'video' || /\.(?:mp4|webm|mov|m4v|ogv)$/iu.test(new URL(url).pathname));
-      if (image || video) media.push({ type: video ? 'video' : 'image', url });
+      const alt = node.type === 'image' || node.type === 'imageReference' ? node.alt : null;
+      if (video || image && !decorativeImage(url, alt, 'title' in node ? node.title : null)) {
+        media.push({ type: video ? 'video' : 'image', url });
+      }
     }
     if (node.type === 'html') media.push(...discoverMedia(node.value, base, 'html'));
     if ('children' in node) node.children.forEach(visit);

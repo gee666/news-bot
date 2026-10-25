@@ -7,6 +7,13 @@ const token = '123:synthetic';
 function response(body: object, status = 200): Response { return new Response(JSON.stringify(body),{ status }); }
 
 describe('Telegram Bot API', () => {
+  it.each(['9','0',''])('rejects text/media reply references %j before any network request', async replyTo => {
+    const fetcher = vi.fn<typeof fetch>(); const api = new BotApi(token,fetcher);
+    await expect(api.send('-100123',message,replyTo)).rejects.toMatchObject({ code:'publication_replies_forbidden',outcome:'failed' });
+    await expect(api.sendMedia('-100123',replyTo,[{ type:'image',mimeType:'image/png',data:Buffer.from('image') }]))
+      .rejects.toMatchObject({ code:'publication_replies_forbidden',outcome:'failed' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it('clears old inline keyboards on a full-post edit', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ ok: true, result: { message_id: 9, chat: { id: -100123 } } }));
     await new BotApi(token,fetcher).edit('-100123','9',message);
@@ -49,9 +56,9 @@ describe('Telegram Bot API', () => {
 describe('Telegram multipart attachments', () => {
   const image = { type: 'image' as const, data: Buffer.from('image'), mimeType: 'image/png' };
   const video = { type: 'video' as const, data: Buffer.from('video'), mimeType: 'video/mp4' };
-  it.each([['sendPhoto', image, 'photo'], ['sendVideo', video, 'video']] as const)('uploads a single %s replying to the canonical text', async (method, media, field) => {
+  it.each([['sendPhoto', image, 'photo'], ['sendVideo', video, 'video']] as const)('uploads a single %s without replies', async (method, media, field) => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ ok: true, result: { message_id: 10, chat: { id: -100123 } } }));
-    expect(await new BotApi(token, fetcher).sendMedia('-100123', '9', [media])).toEqual(['10']);
+    expect(await new BotApi(token, fetcher).sendMedia('-100123', undefined, [media])).toEqual(['10']);
     expect(fetcher.mock.calls[0]?.[0]).toContain(`/${method}`);
     const form = fetcher.mock.calls[0]?.[1]?.body;
     expect(form).toBeInstanceOf(FormData);
@@ -62,14 +69,14 @@ describe('Telegram multipart attachments', () => {
     expect(Buffer.from(await upload.arrayBuffer())).toEqual(media.data);
     expect(upload.type).toBe(media.mimeType);
     expect(form.get('caption')).toBeNull();
-    expect(JSON.parse(String(form.get('reply_parameters')))).toEqual({ message_id: 9, allow_sending_without_reply: false });
+    expect(form.get('reply_parameters')).toBeNull();
     expect(fetcher.mock.calls[0]?.[1]?.headers).toBeUndefined();
   });
   it('uploads mixed albums with attach references, no captions or dropped text', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ ok: true, result: [
       { message_id: 10, chat: { id: -100123 } }, { message_id: 11, chat: { id: -100123 } },
     ] }));
-    expect(await new BotApi(token, fetcher).sendMedia('-100123', '9', [image, video])).toEqual(['10', '11']);
+    expect(await new BotApi(token, fetcher).sendMedia('-100123', undefined, [image, video])).toEqual(['10', '11']);
     expect(fetcher.mock.calls[0]?.[0]).toContain('/sendMediaGroup');
     const form = fetcher.mock.calls[0]?.[1]?.body;
     if (!(form instanceof FormData)) throw new Error('Missing multipart body');
@@ -98,7 +105,7 @@ describe('Telegram multipart attachments', () => {
   });
   it('rejects oversized batches before touching the network', async () => {
     const fetcher = vi.fn<typeof fetch>();
-    await expect(new BotApi(token, fetcher).sendMedia('-100123', '9', Array.from({ length: 11 }, () => image)))
+    await expect(new BotApi(token, fetcher).sendMedia('-100123', undefined, Array.from({ length: 11 }, () => image)))
       .rejects.toMatchObject({ outcome: 'failed' });
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -106,7 +113,7 @@ describe('Telegram multipart attachments', () => {
     for (const result of [[], [{ message_id: 10, chat: { id: -100124 } }, { message_id: 11, chat: { id: -100124 } }],
       [{ message_id: 10, chat: { id: -100123 } }, { message_id: 10, chat: { id: -100123 } }]]) {
       const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ ok: true, result }));
-      await expect(new BotApi(token, fetcher).sendMedia('-100123', '9', [image, video])).rejects.toMatchObject({ outcome: 'unknown' });
+      await expect(new BotApi(token, fetcher).sendMedia('-100123', undefined, [image, video])).rejects.toMatchObject({ outcome: 'unknown' });
     }
   });
 });
@@ -119,7 +126,7 @@ describe('original-format document uploads', () => {
   ] as const)('sends original %s %s bytes as a document, never relabels as MP4/JPEG', async (type, mimeType, extension) => {
     const data = Buffer.from([0, 1, 255, 128, 13, 10, 0, 42]);
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ ok: true, result: { message_id: 10, chat: { id: -100123 } } }));
-    await new BotApi(token, fetcher).sendMedia('-100123', '9', [{ type, mimeType, data }]);
+    await new BotApi(token, fetcher).sendMedia('-100123', undefined, [{ type, mimeType, data }]);
     expect(fetcher.mock.calls[0]?.[0]).toContain('/sendDocument');
     const form = fetcher.mock.calls[0]?.[1]?.body;
     if (!(form instanceof FormData)) throw new Error('Missing multipart body');
@@ -140,7 +147,7 @@ describe('original-format document uploads', () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ ok: true, result: [
       { message_id: 10, chat: { id: -100123 } }, { message_id: 11, chat: { id: -100123 } },
     ] }));
-    await new BotApi(token, fetcher).sendMedia('-100123', '9', media);
+    await new BotApi(token, fetcher).sendMedia('-100123', undefined, media);
     const form = fetcher.mock.calls[0]?.[1]?.body;
     if (!(form instanceof FormData)) throw new Error('Missing multipart body');
     expect(JSON.parse(String(form.get('media')))).toEqual([
@@ -156,7 +163,7 @@ describe('original-format document uploads', () => {
   });
   it('rejects mixed document/native albums before any Telegram request', async () => {
     const fetcher = vi.fn<typeof fetch>();
-    await expect(new BotApi(token, fetcher).sendMedia('-100123', '9', [
+    await expect(new BotApi(token, fetcher).sendMedia('-100123', undefined, [
       { type: 'video', mimeType: 'video/webm', data: Buffer.from('webm') },
       { type: 'image', mimeType: 'image/jpeg', data: Buffer.from('jpeg') },
     ])).rejects.toMatchObject({ code: 'telegram_media_batch_invalid', outcome: 'failed' });

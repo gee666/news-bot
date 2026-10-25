@@ -80,3 +80,25 @@ describe('content media discovery', () => {
       .not.toBe(revisionHash({ ...item, metadata: { media: [{ type: 'image', url: base + '/two.jpg' }] } }));
   });
 });
+
+it('rejects website branding in Markdown, image references, lazy HTML and RSS attachments', () => {
+  expect(discoverMedia('![Publisher logo](/opaque.png) ![site][brand] ![Chart](/chart.png)\n\n'
+    + '[brand]: /assets/LogoDark.png\n\n<img data-src="/assets/wordmark.webp" src="/placeholder.png">', base))
+    .toEqual([{ type: 'image', url: 'https://publisher.org/chart.png' }]);
+  expect(validatedMedia([{ type: 'image', url: '/publisher%2Dlogo.png' },
+    { type: 'image', url: '/figure.png' }, { type: 'video', url: '/logo-animation.mp4' }], base))
+    .toEqual([{ type: 'image', url: 'https://publisher.org/figure.png' },
+      { type: 'video', url: 'https://publisher.org/logo-animation.mp4' }]);
+  expect(parseFeed(`<rss><channel><item><link>${base}</link>
+    <enclosure url="/site-logo.png" type="image/png"/>
+    <enclosure url="/figure.jpg" type="image/jpeg"/></item></channel></rss>`, source)[0]?.media)
+    .toEqual([{ type: 'image', url: 'https://publisher.org/figure.jpg' }]);
+});
+
+it('removes author-card portraits before Markdown conversion loses their context', () => {
+  const article = cleanArticle(`<html><body><article><h1>Release</h1><p>${prose}</p>
+    <img src="/results.png" alt="Benchmark results">
+    <div class="author-card"><img src="/e.berger-45959.jpg"><p>About the author</p></div>
+    <p>${prose}</p></article></body></html>`, base);
+  expect(article?.media).toEqual([{ type: 'image', url: 'https://publisher.org/results.png' }]);
+});

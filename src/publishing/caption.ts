@@ -1,6 +1,6 @@
 import { publicationSnapshotSchema } from '../types.js';
 import { PublicationRenderError, renderValidatedSnapshot, type RenderedMessage } from './render.js';
-import { orderSources } from './sources.js';
+import { visibleSources } from './sources.js';
 
 /** Bot API captions allow 1024 characters after entity parsing. UTF-16 counting is conservative for emoji. */
 export const CAPTION_LIMIT = 1024;
@@ -22,7 +22,7 @@ export function renderCaption(content: unknown, limit = CAPTION_LIMIT, legacyBud
   const snapshot = parsed.data;
   return renderValidatedSnapshot({ ...snapshot,
     headline: shorten(snapshot.headline, 140),
-    sources: orderSources(snapshot.sources).filter(source => !source.unverifiedPublication).slice(0, LEGACY_CAPTION_SOURCE_LIMIT).map(source => ({ ...source,
+    sources: visibleSources(snapshot.sources).filter(source => !source.unverifiedPublication).slice(0, LEGACY_CAPTION_SOURCE_LIMIT).map(source => ({ ...source,
       label: shorten(source.label, 48),
     })),
     ...(snapshot.earlier ? { earlier: shorten(snapshot.earlier, 120) } : {}),

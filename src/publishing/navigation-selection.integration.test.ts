@@ -1,0 +1,70 @@
+import { randomUUID } from 'node:crypto';
+import pg from 'pg';
+import { afterAll,beforeAll,beforeEach,describe,expect,it,vi } from 'vitest';
+import type { PublicationSnapshot } from '../types.js';
+
+const url=process.env.TEST_DATABASE_URL;
+const schema=`nav_selection_${randomUUID().replaceAll('-','')}`;
+let admin:pg.Pool;
+let database:typeof import('../db.js');
+let navigation:typeof import('./navigation.js');
+let relations:typeof import('../pipeline/story-relations.js');
+const body:PublicationSnapshot={headline:'Новость',details:'Исходные факты',score:8,detailsKind:'summary',sources:[]};
+async function fixture(message:string,seconds:number,content=body) {
+  const story=(await database.db.query<{id:string}>("INSERT INTO stories(status) VALUES('completed') RETURNING id")).rows[0]?.id;
+  if (!story) throw new Error('Missing story');
+  const snapshot=(await database.db.query<{id:string}>('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id',
+    [story,JSON.stringify(content)])).rows[0]?.id;
+  const id=(await database.db.query<{id:string}>(`INSERT INTO publications(story_id,snapshot_id,destination_id,bot_id,status,message_id,published_at)
+    VALUES($1,$2,'-100123','123','published',$3,'2026-10-25T10:00:00Z'::timestamptz+$4::int*interval '1 second') RETURNING id`,
+  [story,snapshot,message,seconds])).rows[0]?.id;
+  if (!id) throw new Error('Missing publication');
+  return {id,story_id:story,destination_id:'-100123',bot_id:'123'};
+}
+async function classify(a:string,b:string,relation:'same'|'related'|'unrelated') {
+  await relations.recordStoryRelations(a,[{storyId:b,relation}],'fixture',{origin:'user'});
+}
+
+describe.skipIf(!url)('verified bounded navigation selection',()=>{
+  beforeAll(async()=>{
+    admin=new pg.Pool({connectionString:url}); await admin.query(`CREATE SCHEMA ${schema}`);
+    const scoped=new URL(url??''); scoped.searchParams.set('options',`-c search_path=${schema},public`);
+    vi.stubEnv('DATABASE_URL',scoped.toString()); database=await import('../db.js'); await database.migrate();
+    navigation=await import('./navigation.js'); relations=await import('../pipeline/story-relations.js');
+  });
+  beforeEach(async()=>{await database.db.query('TRUNCATE publications,publication_snapshots,stories CASCADE');});
+  afterAll(async()=>{await database?.db.end(); if(admin){await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);await admin.end();}vi.unstubAllEnvs();});
+
+  it('selects recent useful five after eligibility and same-component deduplication, deterministically',async()=>{
+    const own=await fixture('100',100);
+    const targets=[];
+    for(let index=0;index<8;index++) {
+      const target=await fixture(String(200+index),index);
+      await classify(own.story_id,target.story_id,'related'); targets.push(target);
+    }
+    const edition=await fixture('300',9); const first=targets[0];
+    if(!first) throw new Error('Missing target');
+    await classify(first.story_id,edition.story_id,'same');
+    const pending=await fixture('400',20); await classify(own.story_id,pending.story_id,'related');
+    await database.db.query("UPDATE publications SET media_status='pending' WHERE id=$1",[pending.id]);
+    const links=await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123');
+    expect(links.map(source=>source.url)).toEqual(['300','207','206','205','204'].map(id=>`https://t.me/c/123/${id}`));
+    expect(await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123')).toEqual(links);
+    expect((await database.db.query("SELECT count(*)::int n FROM story_relations WHERE relation='related'")).rows[0]?.n).toBe(9);
+  });
+  it('withholds old topical links and preserves every frozen link as hidden audit, leaving event text and previous links alone',async()=>{
+    const target=await fixture('200',0); const previous=await fixture('90',-10);
+    const related={url:'https://t.me/c/123/200',label:'Старая широкая связь',primary:false,access:'public' as const,
+      classification:'relevant' as const,relatedPublication:true as const};
+    const prior={...related,url:'https://t.me/c/123/90',relatedPublication:undefined,previousPublication:true as const};
+    const sent={...body,sources:[related,prior]}; const own=await fixture('100',10,sent);
+    await relations.recordStoryRelations(own.story_id,[{storyId:target.story_id,relation:'related'}],'grouping-v2',{origin:'model'});
+    await classify(own.story_id,previous.story_id,'same');
+    const desired=await navigation.desiredNavigation(database.db,own,sent);
+    expect(desired.sources).toContainEqual({...related,relatedPublication:undefined,unverifiedPublication:true});
+    expect(desired.sources).toContainEqual(prior);
+    expect(desired).toMatchObject({headline:body.headline,details:body.details,score:body.score});
+    expect(navigation.navigationOnlyChange(sent,desired)).toBe(true);
+    expect(sent.sources).toContainEqual(related);
+  });
+});

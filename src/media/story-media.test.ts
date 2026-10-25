@@ -2,14 +2,18 @@ import { randomUUID } from 'node:crypto';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { defaultSettings, type AppSettings } from '../settings.js';
 const mocks = vi.hoisted(() => ({ query: vi.fn(), load: vi.fn(), save: vi.fn(), release: vi.fn(),
-  download: vi.fn(), dedup: vi.fn(), normalize: vi.fn(), privacy: vi.fn(), judge: vi.fn() }));
+  download: vi.fn(), dedup: vi.fn(), normalize: vi.fn(), privacy: vi.fn(), judge: vi.fn(),
+  context: vi.fn(), relevance: vi.fn(), publishable: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('./cache.js', () => ({ MEDIA_TTL_MS: 604800000, MediaCache: class { load = mocks.load; save = mocks.save; release = mocks.release; } }));
 vi.mock('./download.js', async original => ({ ...await original<typeof import('./download.js')>(), downloadMedia: mocks.download }));
 vi.mock('./comparison.js', () => ({ deduplicateMedia: mocks.dedup, compressModelImage: mocks.normalize }));
+vi.mock('./codec.js', () => ({ isPublishableImage: mocks.publishable }));
 vi.mock('./judgment.js', () => ({ judgeMedia: mocks.judge,
   mediaJudgmentVersion: (settings: AppSettings) => JSON.stringify(settings) }));
 vi.mock('../pipeline/generation-model.js', () => ({ requireInferenceApproval: mocks.privacy }));
+vi.mock('./relevance.js', () => ({ loadMediaStoryContext: mocks.context, filterRelevantMedia: mocks.relevance,
+  mediaRelevanceVersion: (settings: AppSettings) => `relevance-v1:${settings.piProvider}:${settings.piModel}:${settings.modelVersion}` }));
 import { publicationMedia, summaryImages, releaseStoryMedia } from './story-media.js';
 
 const image = { type: 'image' as const, data: Buffer.from('image'), mimeType: 'image/jpeg' };
@@ -25,7 +29,10 @@ beforeEach(() => {
   mocks.save.mockResolvedValue(Date.now() + 604800000);
   mocks.download.mockResolvedValueOnce(image).mockResolvedValueOnce(video);
   mocks.dedup.mockImplementation(async items => items);
+  mocks.publishable.mockResolvedValue(true);
   mocks.normalize.mockResolvedValue(Buffer.from('png'));
+  mocks.context.mockResolvedValue({ headline: 'Rocket Lab launches HawkEye 360', summary: 'Mission details', chosenExcerpt: null, mentions: [] });
+  mocks.relevance.mockImplementation(async media => ({ media, resolved: true }));
 });
 afterEach(() => { vi.unstubAllEnvs(); });
 
@@ -136,4 +143,61 @@ it('does not impose a second seven-day retention window on retained source rows 
   expect(sql).not.toContain("interval '7 days'");
   expect(sql).toContain('se.story_id<>$1 OR e.expires_at>now()');
   expect(sql).toContain('se.superseded_at IS NULL');
+});
+
+it('filters after deduplication and caches only story-relevant attachments', async () => {
+  const id = randomUUID();
+  const logo = { ...image, data: Buffer.from('logo') };
+  mocks.dedup.mockResolvedValue([logo, image, video]);
+  mocks.relevance.mockResolvedValue({ media: [image, video], resolved: true });
+  expect(await publicationMedia(id, defaultSettings)).toEqual([
+    expect.objectContaining(image), expect.objectContaining(video),
+  ]);
+  expect(mocks.relevance).toHaveBeenCalledAfter(mocks.dedup);
+  expect(mocks.relevance).toHaveBeenCalledWith([logo, image, video], await mocks.context.mock.results[0]?.value, id, defaultSettings);
+  expect(mocks.save).toHaveBeenCalledAfter(mocks.relevance);
+  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [image, video]);
+});
+
+it('omits unresolved relevance images and retries rather than caching an outage as final', async () => {
+  const id = randomUUID();
+  mocks.relevance.mockResolvedValue({ media: [video], resolved: false });
+  expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(video)]);
+  expect(mocks.save).toHaveBeenCalledWith(id, `unresolved:${mocks.load.mock.calls[0]?.[1]}`, [video]);
+  mocks.download.mockResolvedValue(image);
+  await publicationMedia(id, defaultSettings);
+  expect(mocks.relevance).toHaveBeenCalledTimes(2);
+});
+
+it('invalidates cached relevance decisions when the specific story context changes', async () => {
+  const id = randomUUID();
+  await publicationMedia(id, defaultSettings);
+  const first = mocks.load.mock.calls[0]?.[1];
+  mocks.context.mockResolvedValue({ headline: 'Different mission', summary: null, chosenExcerpt: null, mentions: [] });
+  mocks.download.mockResolvedValue(image);
+  await publicationMedia(id, defaultSettings);
+  expect(mocks.load.mock.calls[1]?.[1]).not.toBe(first);
+});
+
+it('does not load story text or classify images on a video-only source', async () => {
+  mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media: [
+    { type: 'video', url: 'https://example.org/a.mp4' },
+  ] }, source_metadata: {}, access: 'public' }] });
+  mocks.download.mockReset().mockResolvedValue(video);
+  expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(1);
+  expect(mocks.context).not.toHaveBeenCalled();
+  expect(mocks.relevance).toHaveBeenCalledWith([expect.objectContaining(video)], null, expect.any(String), defaultSettings);
+});
+
+it('drops decoded spacer images before deduplication, vision and cache, regardless of URL or claimed metadata', async () => {
+  const id = randomUUID();
+  const spacer = { ...image, data: Buffer.from('decoded 1x1 JPEG pretending to be image/png') };
+  mocks.download.mockReset().mockResolvedValueOnce(spacer).mockResolvedValueOnce(video);
+  mocks.publishable.mockResolvedValue(false);
+  expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(video)]);
+  expect(mocks.publishable).toHaveBeenCalledExactlyOnceWith(spacer.data);
+  expect(mocks.publishable).toHaveBeenCalledBefore(mocks.dedup);
+  expect(mocks.dedup.mock.calls[0]?.[0]).toEqual([expect.objectContaining(video)]);
+  expect(mocks.relevance).toHaveBeenCalledWith([expect.objectContaining(video)], expect.any(Object), id, defaultSettings);
+  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [expect.objectContaining(video)]);
 });

@@ -1,3 +1,4 @@
+import { cleanSourceUrl } from '../source-url.js';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -9,7 +10,7 @@ const parser = unified().use(remarkParse).use(remarkGfm);
 export function markdownTree(text: string): Root { return parser.parse(text); }
 const ancillaryHeading = /^(?:acknowledg(?:e)?ments?|authors?|contributors?|credits|comments?|discussion|community|related (?:articles|posts|stories)|recommended|share(?: this (?:article|post))?|social(?: links)?)\s*$/iu;
 function destination(value: string, baseUrl?: string): string | null {
-  try { return baseUrl ? new URL(value, baseUrl).href : new URL(value).href; } catch { return null; }
+  try { return cleanSourceUrl(baseUrl ? new URL(value, baseUrl).href : new URL(value).href); } catch { return null; }
 }
 function visibleText(node: Nodes): string {
   if (node.type === 'text') return node.value;

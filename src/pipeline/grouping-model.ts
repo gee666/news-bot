@@ -8,6 +8,7 @@ import { approveRemoteInput } from './privacy.js';
 import type { EventInput } from './consolidation-input.js';
 import { hash, type StageContext } from './state.js';
 import { checkProcessingSlice } from './processing-slice.js';
+import type { StoryRelationDecision } from './story-relations.js';
 import { groupingBudget, groupingChunks, groupingPrompt, type GroupingBudget } from './grouping-budget.js';
 
 // Keep the event-identity version: existing verified publication threads remain valid.
@@ -67,7 +68,7 @@ async function chunksFor(incoming: EventInput, candidates: readonly EventInput[]
 
 /** Compare every retained group in bounded, resumable requests, with no shortlist. */
 export async function groupReport(incoming: EventInput, candidates: readonly EventInput[], settings: AppSettings,
-  context: StageContext, generator?: TextGenerator): Promise<Matches> {
+  context: StageContext, generator?: TextGenerator): Promise<StoryRelationDecision[]> {
   if (!candidates.length) return [];
   for (const candidate of candidates) await approveRemoteInput('https://api.openai.com', context.id, { storyId: candidate.id });
   await approveRemoteInput('https://api.openai.com', context.id, context);
@@ -95,5 +96,6 @@ export async function groupReport(incoming: EventInput, candidates: readonly Eve
       }
     }
   }
-  return decisions;
+  return decisions.map(decision => decision.relation === 'related'
+    ? { ...decision,relatedPromptVersion:jevTemplates.duplicate.version } : decision);
 }

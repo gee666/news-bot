@@ -4,6 +4,7 @@ import { navigationOnlyChange, isNavigationSource } from './navigation.js';
 import { stripNavigationTail } from './navigation-tail.js';
 import { publicationSnapshotSchema } from '../types.js';
 import { snapshotHash } from './approval.js';
+import { assertCanonicalLinks, renderCanonicalText } from './canonical-text.js';
 import { renderCaption, CAPTION_LIMIT } from './caption.js';
 import { renderFullText, renderedMessageSchema, updateMarkerPrefix, withUpdateMarker, type UpdateMarkerOptions } from './full-text.js';
 import { PublicationRenderError, render, type RenderedMessage } from './render.js';
@@ -22,6 +23,7 @@ export async function renderStoredPublication(client: Pick<PoolClient,'query'>, 
   const sent = first ? publicationSnapshotSchema.parse(first.snapshot_content) : publicationSnapshotSchema.parse(
     (await client.query<{ content: unknown }>(`SELECT snap.content FROM publications p
       JOIN publication_snapshots snap ON snap.id=p.snapshot_id WHERE p.id=$1`,[id])).rows[0]?.content ?? content);
+  if (parts.length > 1) throw new PublicationRenderError('publication_text_requires_new_edition');
   if (navigationOnlyChange(sent,snapshot)) {
     const base = first ? renderedMessageSchema.parse(first.content)
       : deliveryKind === 'album' ? renderCaption(sent,CAPTION_LIMIT,true) : render(sent,{ legacyBudget:true });
@@ -29,10 +31,9 @@ export async function renderStoredPublication(client: Pick<PoolClient,'query'>, 
     const navigationSources=[...sent.sources,...parts.flatMap(part=>publicationSnapshotSchema.parse(part.snapshot_content).sources)].filter(isNavigationSource);
     let message=stripNavigationTail(originals,navigationSources)[0];
     if (!message) throw new PublicationRenderError('publication_snapshot_invalid');
-    if (!snapshot.navigationOverflow) {
+    {
       const footer = renderFullText({ ...snapshot,headline:'Links',details:'',earlier:undefined,review:undefined,
         updatedTo:undefined,sources:snapshot.sources.filter(isNavigationSource) },true);
-      if (parts.length > 1 && footer.length) throw new PublicationRenderError('publication_text_requires_new_edition');
       if (footer.length > 1) throw new PublicationRenderError('publication_message_too_long');
       const tail = footer[0];
       const offset=message.plainText.length;
@@ -42,9 +43,8 @@ export async function renderStoredPublication(client: Pick<PoolClient,'query'>, 
     if (message.plainText.length > limit || message.links.length+(message.text.match(/<b>/gu)?.length ?? 0)>98)
       throw new PublicationRenderError('publication_message_too_long');
     const markerOptions = { presentationVersion:snapshot.presentationVersion,headline:snapshot.updatedToHeadline };
-    if (snapshot.updatedTo && (!snapshot.navigationOverflow
-      || message.plainText.length+updateMarkerPrefix(snapshot.updatedTo,markerOptions).plainText.length<=limit))
-      return withUpdateMarker(message,snapshot.updatedTo,limit,markerOptions);
+    if (snapshot.updatedTo) message = withUpdateMarker(message,snapshot.updatedTo,limit,markerOptions);
+    assertCanonicalLinks(snapshot,message,limit);
     return message;
   }
   const markerOptions = { presentationVersion:snapshot.presentationVersion,headline:snapshot.updatedToHeadline };
@@ -64,9 +64,11 @@ export async function renderStoredPublication(client: Pick<PoolClient,'query'>, 
       message = canonical;
     }
   } else {
-    message = deliveryKind === 'album' ? renderCaption(snapshot,limit-markerLength) : render(snapshot,{ limit:limit-markerLength });
+    message = renderCanonicalText({ ...snapshot,updatedTo:undefined },limit-markerLength);
   }
-  return snapshot.updatedTo ? withUpdateMarker(message,snapshot.updatedTo,limit,markerOptions) : message;
+  if (snapshot.updatedTo) message = withUpdateMarker(message,snapshot.updatedTo,limit,markerOptions);
+  assertCanonicalLinks(snapshot,message,limit);
+  return message;
 }
 
 /** Remove only known legacy headings; all body text and link targets survive. */

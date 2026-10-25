@@ -118,6 +118,24 @@ export async function fullImagePixelHash(data: Buffer, run: MediaCommandRunner):
   return `${dimensions}:${hash}`;
 }
 
+/** Inspect decoded dimensions, not HTML attributes or MIME labels. Never upload spacer/tracking pixels. */
+export async function isPublishableImage(data: Buffer, options: MediaCodecOptions = {}): Promise<boolean> {
+  if (!Buffer.isBuffer(data) || !data.length) return false;
+  try {
+    const output = await createMediaRunner(options)('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', 'pipe:0',
+    ], data);
+    const parsed: unknown = JSON.parse(output.toString());
+    if (!isRecord(parsed) || !Array.isArray(parsed.streams)) return false;
+    const stream: unknown = parsed.streams[0];
+    if (!isRecord(stream)) return false;
+    const width = stream.width; const height = stream.height;
+    return typeof width === 'number' && Number.isInteger(width) && width > 2
+      && typeof height === 'number' && Number.isInteger(height) && height > 2
+      && width * height <= 40_000_000;
+  } catch { return false; }
+}
+
 /** Decode the first image to PNG, fitting inside 2560 x 2560 without upscaling. */
 export async function normalizeImage(data: Buffer, options: MediaCodecOptions = {}): Promise<Buffer> {
   if (!Buffer.isBuffer(data) || !data.length) throw new TypeError('Invalid image buffer');

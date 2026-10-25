@@ -6,6 +6,7 @@ import { beginAttempt, recordFailure } from './delivery.js';
 import { sendMetadata } from './reconciliation.js';
 import { locked, publicationEditSelect, type Publication } from './store.js';
 import { deliverPublicationText } from './text-delivery.js';
+import { PublicationRenderError } from './render.js';
 
 /** Explicit operator invocation only. Never called by automatic repair, retries or selection. */
 export async function executeReviewedFullRepair(id: string, api = new BotApi()): Promise<boolean> {
@@ -31,6 +32,7 @@ export async function executeReviewedFullRepair(id: string, api = new BotApi()):
           || publication.snapshot_id !== action.priorSnapshotId || publication.pending_snapshot_id !== action.desiredSnapshotId
           || snapshotHash(publication.content) !== action.snapshotHash) return false;
         const parts = fullRepairPlan(publication.content,repair.reviewedCaption);
+        if (parts.length !== 1) throw new PublicationRenderError('publication_text_requires_new_edition');
         const caption = parts[0];
         if (!caption) throw new Error('Reviewed full-content repair plan empty');
         const attemptId = await beginAttempt(publication,'edit',{

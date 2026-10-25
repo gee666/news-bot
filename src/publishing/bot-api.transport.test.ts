@@ -60,7 +60,7 @@ describe('Bot API transport timeout selection', () => {
     ));
     const api = new BotApi(token, fetcher);
     for (const media of [[image], [video], [document], [image, video], [document, document]]) {
-      await api.sendMedia(destination, '8', media);
+      await api.sendMedia(destination, undefined, media);
       await api.sendAlbum(destination, message, media);
     }
     expect(timeout.mock.calls).toEqual(Array.from({ length: 10 }, () => [config.uploadMs]));
@@ -90,7 +90,7 @@ describe('Bot API safe transport outcomes', () => {
       const fetcher = vi.fn<typeof fetch>().mockRejectedValue(fetchFailure(cause));
       const api = new BotApi(token, fetcher);
       const send = operation === 'text' ? api.send(destination, message)
-        : operation === 'album' ? api.sendAlbum(destination, message, [image]) : api.sendMedia(destination, '8', [image]);
+        : operation === 'album' ? api.sendAlbum(destination, message, [image]) : api.sendMedia(destination, undefined, [image]);
       const error: unknown = await send.catch((failure: unknown) => failure);
       expect(error).toBeInstanceOf(BotError);
       expect(error).toMatchObject({ code: 'telegram_connect_failed', outcome: 'retryable', retryAfterMs: 0 });

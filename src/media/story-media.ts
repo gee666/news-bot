@@ -12,9 +12,11 @@ import { judgeMedia, mediaJudgmentVersion } from './judgment.js';
 import { MediaPairCache } from './pair-cache.js';
 import { distinctSourceMedia } from './source-images.js';
 import { generationThread } from '../pipeline/generation-context.js';
+import { filterRelevantMedia, loadMediaStoryContext, mediaRelevanceVersion } from './relevance.js';
+import { isPublishableImage } from './codec.js';
 
-// Selection policy changes must invalidate previously retained duplicate renditions.
-const preparationVersion = 'media-v5-source-image-variants';
+// Selection policy changes must invalidate previously retained attachments.
+const preparationVersion = 'media-v7-story-visual-relevance-dimensions';
 const cache = new MediaCache();
 const active = new Map<string, Promise<MediaCandidate[]>>();
 const sourceSchema = z.object({ revision_id: z.string(), metadata: z.record(z.string(), z.unknown()),
@@ -49,7 +51,9 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
   if (!descriptors.length) return [];
   await requireInferenceApproval(sources.map(source => source.access), `media:${storyId}`);
   const version = mediaJudgmentVersion(settings);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ version: preparationVersion, judgment: version, descriptors })).digest('hex');
+  const story = descriptors.some(({ descriptor }) => descriptor.type === 'image') ? await loadMediaStoryContext(storyId) : null;
+  const fingerprint = createHash('sha256').update(JSON.stringify({ version: preparationVersion, judgment: version,
+    relevance: mediaRelevanceVersion(settings), story, descriptors })).digest('hex');
   const cached = await cache.load(storyId, fingerprint);
   if (cached) return cached;
   const candidates: MediaCandidate[] = [];
@@ -62,6 +66,7 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
     const media = await downloadMedia(descriptor, { metadata: source.source_metadata });
     bytes += media.data.length;
     if (bytes > 256_000_000) throw new Error('Story media exceeds 256 MB processing budget');
+    if (media.type === 'image' && !await isPublishableImage(media.data)) continue;
     candidates.push({ ...media, expiresAt: Date.now() + MEDIA_TTL_MS });
   }
   let resolved = true;
@@ -73,14 +78,16 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
     pairCache: new MediaPairCache(version),
     durationToleranceRatio: Number(process.env.MEDIA_VIDEO_DURATION_TOLERANCE ?? 0.2),
   });
+  const selection = await filterRelevantMedia(unique, story, storyId, settings);
+  resolved &&= selection.resolved;
   // Keep the first-download deadline even on uncertainty. An incomplete fingerprint
   // can never satisfy a final-selection lookup, so the next publication retries.
-  const expiresAt = await cache.save(storyId, resolved ? fingerprint : `unresolved:${fingerprint}`, unique);
-  return unique.map(item => ({ ...item, expiresAt }));
+  const expiresAt = await cache.save(storyId, resolved ? fingerprint : `unresolved:${fingerprint}`, selection.media);
+  return selection.media.map(item => ({ ...item, expiresAt }));
 }
 
 export function publicationMedia(storyId: string, settings: AppSettings): Promise<MediaCandidate[]> {
-  const key = `${storyId}:${mediaJudgmentVersion(settings)}:${process.env.ALLOW_PRIVATE_INFERENCE ?? ''}`;
+  const key = `${storyId}:${mediaJudgmentVersion(settings)}:${mediaRelevanceVersion(settings)}:${process.env.ALLOW_PRIVATE_INFERENCE ?? ''}`;
   const pending = active.get(key);
   if (pending) return pending;
   const task = prepare(storyId, settings).finally(() => { active.delete(key); });

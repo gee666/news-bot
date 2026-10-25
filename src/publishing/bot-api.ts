@@ -80,9 +80,9 @@ export class BotApi {
   }
 
   async send(destinationId: string, message: RenderedMessage, replyTo?: string): Promise<string> {
+    if (replyTo !== undefined) throw new BotError('publication_replies_forbidden', 'failed');
     const { text, parse_mode, link_preview_options, reply_markup } = message;
-    const value = await this.call('sendMessage', { chat_id: destinationId, text, parse_mode, link_preview_options, reply_markup,
-      ...(replyTo ? { reply_parameters: { message_id: Number(replyTo), allow_sending_without_reply: false } } : {}) });
+    const value = await this.call('sendMessage', { chat_id: destinationId, text, parse_mode, link_preview_options, reply_markup });
     const parsed = messageSchema.safeParse(value);
     if (!parsed.success || String(parsed.data.chat.id) !== destinationId) throw new BotError('telegram_send_response_unknown', 'unknown');
     return String(parsed.data.message_id);
@@ -90,7 +90,8 @@ export class BotApi {
 
   /** Text stays in the canonical message, so attachments never truncate it to a caption. */
   async sendMedia(destinationId: string, replyTo: string | undefined, media: PublicationMedia[]): Promise<string[]> {
-    if (!media.length || media.length > 10 || replyTo !== undefined && !/^\d+$/u.test(replyTo)
+    if (replyTo !== undefined) throw new BotError('publication_replies_forbidden', 'failed');
+    if (!media.length || media.length > 10
       || media.some(item => !item.data.length || !(item.type === 'image' || item.type === 'video'))) {
       throw new BotError('telegram_media_invalid', 'failed');
     }
@@ -99,7 +100,6 @@ export class BotApi {
     if (!documents && uploads.includes('document')) throw new BotError('telegram_media_batch_invalid', 'failed');
     const form = new FormData();
     form.set('chat_id', destinationId);
-    if (replyTo !== undefined) form.set('reply_parameters', JSON.stringify({ message_id: Number(replyTo), allow_sending_without_reply: false }));
     const single = media.length === 1 ? media[0] : undefined;
     media.forEach((item, index) => {
       const field = single ? mediaUploadType(item) : `file${index}`;

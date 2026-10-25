@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
 import { defaultSettings } from '../settings.js';
 import { releaseStoryMedia } from '../media/story-media.js';
-import { BotApi, BotError } from './bot-api.js';
+import { BotApi } from './bot-api.js';
 import { deletePublicationMedia, deliverPublicationMedia, retryPublicationMedia } from './media-delivery.js';
 import type { Publication } from './store.js';
 
@@ -37,29 +37,25 @@ beforeEach(() => {
 });
 
 describe('durable attachment delivery', () => {
-  it('commits the running request before upload, saves ids and deletes bytes immediately after success', async () => {
-    const send = vi.spyOn(api, 'sendMedia').mockImplementation(async () => {
-      expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes("SET status='running'"))).toBe(true);
-      return ['10'];
-    });
-    expect(await deliverPublicationMedia(publication, api, enabled)).toBe(true);
-    expect(send).toHaveBeenCalledWith('-100123', '9', [{ type: 'image', data: item.data, mimeType: 'image/jpeg' }]);
-    expect(mocks.query.mock.calls.find(([sql]) => String(sql).includes('message_id=$2,data=NULL'))?.[1]).toEqual(['item', '10']);
-    expect(releaseStoryMedia).toHaveBeenCalledWith('story');
-  });
-  it.each([
-    ['unknown', 'unknown', null, 'publication_media_requires_review'],
-    ['failed', 'failed', null, 'publication_media_failed'],
-    ['retryable', 'pending', expect.any(Date), 'publication_media_retryable'],
-  ] as const)('keeps %s outcomes distinct', async (outcome, state, retry, errorCode) => {
-    vi.spyOn(api, 'sendMedia').mockRejectedValue(new BotError('safe_error', outcome, 120_000));
+  it.each(['prepared','retryable','running','unknown','failed'])('blocks legacy %s attachment replies without changing their receipt or bytes', async status => {
+    const original = mocks.query.getMockImplementation();
+    mocks.query.mockImplementation(async (sql: string) => sql.includes('SELECT * FROM publication_media_batches')
+      ? { rows: [{ id: 'batch', status }] } : original?.(sql));
+    const send = vi.spyOn(api, 'sendMedia');
     expect(await deliverPublicationMedia(publication, api, enabled)).toBe(false);
-    expect(mocks.query.mock.calls.find(([sql]) => String(sql).includes('SET status=$2'))?.[1])
-      .toEqual(['batch', outcome, 'safe_error', retry]);
-    expect(mocks.query.mock.calls.find(([sql]) => String(sql).includes('media_status=$2'))?.[1])
-      .toEqual(['publication', state, errorCode]);
+    expect(send).not.toHaveBeenCalled();
+    expect(mocks.query.mock.calls.find(([sql]) => String(sql).includes('publication_replies_forbidden'))?.[1]).toEqual(['publication']);
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('data=NULL'))).toBe(false);
     expect(releaseStoryMedia).not.toHaveBeenCalled();
+  });
+  it('finishes an already-confirmed media plan without any upload', async () => {
+    const original = mocks.query.getMockImplementation();
+    mocks.query.mockImplementation(async (sql: string) => sql.includes('SELECT * FROM publication_media_batches')
+      ? { rows: [{ id: 'batch', status: 'sent' }] } : original?.(sql));
+    const send = vi.spyOn(api, 'sendMedia');
+    expect(await deliverPublicationMedia(publication, api, enabled)).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    expect(releaseStoryMedia).toHaveBeenCalledWith('story');
   });
   it('never sends an interrupted, ambiguous or permanently rejected batch again', async () => {
     const send = vi.spyOn(api, 'sendMedia');
@@ -78,12 +74,6 @@ describe('durable attachment delivery', () => {
     const send = vi.spyOn(api, 'sendMedia');
     expect(await deliverPublicationMedia(publication, api, enabled)).toBe(false);
     expect(send).not.toHaveBeenCalled();
-  });
-  it('treats incomplete response ids as unknown even with a fake API', async () => {
-    vi.spyOn(api, 'sendMedia').mockResolvedValue([]);
-    expect(await deliverPublicationMedia(publication, api, enabled)).toBe(false);
-    expect(mocks.query.mock.calls.find(([sql]) => String(sql).includes('SET status=$2'))?.[1])
-      .toEqual(['batch', 'unknown', 'telegram_media_response_unknown', null]);
   });
   it('maintenance selects only known unsent, due attachment batches', async () => {
     await retryPublicationMedia(api, enabled, '-100123');

@@ -1,3 +1,4 @@
+import { cleanSourceUrl } from '../source-url.js';
 import { cleanArticle } from '../sources/article.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
 import { publicUrl, ResearchFetchError } from './research-fetch.js';
@@ -93,7 +94,7 @@ async function fetchReadPage(url: string): Promise<ResearchPage> {
   let fetchedAt = new Date().toISOString();
   const metadata: ResearchPage['metadata'] = { fetchedAt };
   try {
-    const target = publicUrl(url);
+    const target = publicUrl(cleanSourceUrl(url));
     const readUrl = target.href;
     if (process.env.RESEARCH_CRAWLER_URL && process.env.RESEARCH_CRAWLER_API_TOKEN) {
       const page = await fetchCrawlerPage(readUrl, 'article');
@@ -111,7 +112,7 @@ async function fetchReadPage(url: string): Promise<ResearchPage> {
     metadata.fetchedAt = fetchedAt;
     metadata.status = response.status;
     if (response.status < 200 || response.status >= 300) {
-      return { url, canonicalUrl: response.url, title: null, content: null,
+      return { url, canonicalUrl: cleanSourceUrl(response.url), title: null, content: null,
         access: [401, 403].includes(response.status) ? 'restricted' : 'unavailable',
         fetchedAt, metadata };
     }
@@ -120,11 +121,11 @@ async function fetchReadPage(url: string): Promise<ResearchPage> {
     metadata.contentFormat = html ? 'html' : response.contentType === 'application/json' ? 'json' : 'text';
     const failure = readFailure(parsed.title, parsed.content, response.url);
     if (failure) {
-      return { url, canonicalUrl: response.url, title: null, content: null, access: failure, fetchedAt,
+      return { url, canonicalUrl: cleanSourceUrl(response.url), title: null, content: null, access: failure, fetchedAt,
         metadata: { ...metadata, error: failure === 'restricted' ? 'restricted_challenge' : 'page_load_error' } };
     }
     const article = html ? cleanArticle(response.text, response.url) : null;
-    if (html && !article) return { url, canonicalUrl: response.url, title: parsed.title, content: null,
+    if (html && !article) return { url, canonicalUrl: cleanSourceUrl(response.url), title: parsed.title, content: null,
       access: 'unavailable', fetchedAt, metadata: { ...metadata, error: 'article_unavailable' } };
     const content = article?.content ?? parsed.content;
     const dates = html ? publisherDates(response.text) : { publishedAt: null, updatedAt: null };
@@ -135,7 +136,7 @@ async function fetchReadPage(url: string): Promise<ResearchPage> {
       if (article.followupLinks) metadata.followupLinks = article.followupLinks;
       if (article.paper) metadata.paper = article.paper;
     }
-    return { url, canonicalUrl: response.url, title: usefulSourceTitle(article?.title ?? parsed.title, content, response.url),
+    return { url, canonicalUrl: cleanSourceUrl(response.url), title: usefulSourceTitle(article?.title ?? parsed.title, content, response.url),
       content: content || null,
       access: content ? 'public' : 'unavailable',
       ...dates, fetchedAt, metadata: { ...metadata, ...dates } };

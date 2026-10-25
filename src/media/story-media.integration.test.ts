@@ -1,8 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ download: vi.fn() }));
+const mocks = vi.hoisted(() => ({ download: vi.fn(), relevance: vi.fn() }));
+vi.mock('./relevance.js', async original => ({ ...await original<typeof import('./relevance.js')>(),
+  filterRelevantMedia: mocks.relevance }));
 vi.mock('./download.js', async original => ({ ...await original<typeof import('./download.js')>(), downloadMedia: mocks.download }));
+vi.mock('./codec.js', async original => ({ ...await original<typeof import('./codec.js')>(),
+  isPublishableImage: async () => true }));
 vi.mock('./comparison.js', async original => ({ ...await original<typeof import('./comparison.js')>(),
   deduplicateMedia: async (items: unknown[]) => items }));
 const url = process.env.TEST_DATABASE_URL;
@@ -52,7 +56,11 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     settings = (await import('../settings.js')).defaultSettings;
     service = await import('./story-media.js');
   });
-  beforeEach(() => { mocks.download.mockReset(); mocks.download.mockResolvedValue({ type: 'image', mimeType: 'image/png', data: Buffer.from('image') }); });
+  beforeEach(() => {
+    mocks.download.mockReset();
+    mocks.download.mockResolvedValue({ type: 'image', mimeType: 'image/png', data: Buffer.from('image') });
+    mocks.relevance.mockReset().mockImplementation(async media => ({ media, resolved: true }));
+  });
   afterAll(async () => {
     for (const story of stories) await service.releaseStoryMedia(story);
     await database?.db.end();
@@ -155,6 +163,26 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url).sort()).toEqual([
       'https://example.org/aged.png', 'https://example.org/valid.png',
     ]);
+  });
+
+  it('classifies against the specific story, not the full roundup, and invalidates decisions when context changes', async () => {
+    const storyId = await story();
+    const { revision } = await report(storyId, 'mission-patch', 'mention');
+    await database.db.query(`UPDATE stories SET headline='HawkEye 360 launch',summary='Rocket Lab mission',
+      chosen_excerpt='Three HAWK satellites' WHERE id=$1`, [storyId]);
+    await database.db.query("UPDATE story_mentions SET text='We are Not Hawking Around mission' WHERE story_id=$1", [storyId]);
+    await database.db.query("UPDATE item_revisions SET original_text='Full roundup: Aurora, Borealis, unrelated crow' WHERE id=$1", [revision]);
+    const unrelated = await story(); await report(unrelated, 'other-story', 'mention');
+    await database.db.query("UPDATE story_mentions SET text='Another launch entirely' WHERE story_id=$1", [unrelated]);
+    await service.publicationMedia(storyId, settings);
+    expect(mocks.relevance.mock.calls[0]?.[1]).toEqual({ headline: 'HawkEye 360 launch', summary: 'Rocket Lab mission',
+      chosenExcerpt: 'Three HAWK satellites', mentions: ['We are Not Hawking Around mission'] });
+    await service.publicationMedia(storyId, settings);
+    expect(mocks.relevance).toHaveBeenCalledTimes(1);
+    await database.db.query("UPDATE stories SET summary='Updated specific mission context' WHERE id=$1", [storyId]);
+    await service.publicationMedia(storyId, settings);
+    expect(mocks.relevance).toHaveBeenCalledTimes(2);
+    expect(mocks.relevance.mock.calls[1]?.[1].summary).toBe('Updated specific mission context');
   });
 
   it.each([null, 'test-same-v1'])('does not inherit attachments through an unverified or RELATED edge, classification %s', async version => {

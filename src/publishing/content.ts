@@ -1,3 +1,4 @@
+import { cleanSourceUrl } from '../source-url.js';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { publishedThread } from '../pipeline/publication-thread.js';
@@ -24,7 +25,8 @@ export const eligible = `s.status='completed' AND s.headline IS NOT NULL AND len
 export function mergeSources(input: PublicationSource[]): PublicationSource[] {
   const byUrl = new Map<string, PublicationSource>();
   const labels = new Map<string, Set<string>>();
-  for (const source of publicationSourceSchema.array().parse(input)) {
+  for (const original of publicationSourceSchema.array().parse(input)) {
+    const source = { ...original,url:cleanSourceUrl(original.url) };
     const atoms = source.labels ?? [source.label];
     const old = byUrl.get(source.url);
     if (!old) {
@@ -95,7 +97,7 @@ export async function sourceInventory(client: Pick<PoolClient, 'query'>, storyId
   });
   const excludedLinks = await client.query<{ url: string }>(`WITH ${fetchedRelevanceCte}
     SELECT url FROM fetched_relevance WHERE relevance='irrelevant'`, [storyId]);
-  const excludedUrls = new Set(excludedLinks.rows.map(row => row.url));
+  const excludedUrls = new Set(excludedLinks.rows.map(row => cleanSourceUrl(row.url)));
   const originSources: PublicationSource[] = [];
   for (const origin of origins.rows) {
     const telegramUrl = origin.connector_type === 'telegram' && /^-100\d+$/u.test(origin.source_external_id) && /^\d+$/u.test(origin.external_id)
@@ -109,14 +111,15 @@ export async function sourceInventory(client: Pick<PoolClient, 'query'>, storyId
         || readFailure(article.data.title ?? null, origin.parent_text, url, origin.read_metadata)) continue;
       // Redirects retain the original read identity, but exclusions apply to both known URLs.
       try {
-        if (excludedUrls.has(publicUrl(url).href) || excludedUrls.has(publicUrl(article.data.canonicalUrl).href)) continue;
+        if (excludedUrls.has(cleanSourceUrl(publicUrl(url).href))
+          || excludedUrls.has(cleanSourceUrl(publicUrl(article.data.canonicalUrl).href))) continue;
       } catch { continue; }
       label = usefulSourceTitle(article.data.title ?? null, origin.parent_text, url) ?? origin.name;
     }
     originSources.push({ label, url,
       access: url.startsWith('https://t.me/c/') ? 'restricted' : origin.access, primary: false, classification: origin.classification });
   }
-  const admitted = (url: string) => !excludedUrls.has(url.split('#')[0] ?? url);
+  const admitted = (url: string) => !excludedUrls.has(cleanSourceUrl(url.split('#')[0] ?? url));
   return [...verifiedSources, ...originSources].filter(source => admitted(source.url));
 }
 

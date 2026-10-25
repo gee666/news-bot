@@ -4,7 +4,8 @@ import type { PoolClient } from 'pg';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { BotApi, BotError, mediaUploadType } from './bot-api.js';
-import { renderCaption } from './caption.js';
+import { CAPTION_LIMIT } from './caption.js';
+import { renderCanonicalText } from './canonical-text.js';
 import { preparePublicationText, deliverPublicationText } from './text-delivery.js';
 import { freezeEditedCanonical, renderPublication } from './message-render.js';
 import { PublicationRenderError, type RenderedMessage } from './render.js';
@@ -40,8 +41,7 @@ export async function beginAttempt(publication: Publication, operation: 'send' |
   settings?: AppSettings, authorization: DeliveryAuthorization = {}): Promise<string | null> {
   return transaction(async client => {
     if (await destinationBlocked(publication.destination_id, operation === 'send' && publication.delivery_kind === 'media_first' ? publication.id : undefined, client)) return null;
-    const preflight = z.object({ phase: z.literal('preflight') }).safeParse(metadata).success;
-    if (operation === 'send' && !preflight && publication.delivery_kind === 'media_first' && (await client.query(`SELECT 1 FROM publication_media_batches
+    if (operation === 'send' && publication.delivery_kind === 'media_first' && (await client.query(`SELECT 1 FROM publication_media_batches
       WHERE publication_id=$1 AND status<>'sent' LIMIT 1`, [publication.id])).rows.length) return null;
     if (operation !== 'delete') {
       if (!settings) throw new Error('Publication admission requires current settings');
@@ -124,13 +124,17 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
   const albumMetadata = album ? { deliveryKind: 'album', itemIds: album.items.map(item => item.id),
     uploadTypes: album.media.map(mediaUploadType), mediaDigests: album.items.map(item => item.digest) } : { deliveryKind: publication.delivery_kind ?? 'text' };
   let message: RenderedMessage;
-  try { message = publication.delivery_kind === 'album' ? renderCaption(publication.content) : await preparePublicationText(publication); }
+  try {
+    message = publication.delivery_kind === 'album' ? renderCanonicalText(publication.content, CAPTION_LIMIT) : await preparePublicationText(publication);
+    if (album && (await db.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND operation='send'
+      AND response_metadata->>'fingerprint' IS DISTINCT FROM $2 LIMIT 1`, [publication.id,sendMetadata(message).fingerprint])).rows.length)
+      throw new PublicationRenderError('publication_text_requires_new_edition');
+  }
   catch (error) {
     if (error instanceof BotError) return null;
     if (!(error instanceof PublicationRenderError)) throw error;
-    const attemptId = await beginAttempt(publication, 'send', { ...albumMetadata, phase: 'preflight' }, settings, authorization);
-    if (!attemptId) return null;
-    await recordFailure(attemptId, publication, 'send', new BotError(error.code, 'failed'), settings);
+    await db.query(`UPDATE publications SET status='failed',error_code=$2,next_retry_at=NULL,updated_at=now()
+      WHERE id=$1 AND status='prepared'`, [publication.id,error.code]);
     return null;
   }
   if (publication.delivery_kind === 'media_first') {

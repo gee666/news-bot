@@ -47,13 +47,14 @@ export async function prepareThreadUpdates(destinationId: string, latestPublicat
       const pending = publicationSnapshotSchema.safeParse(row.pending_content);
       if (pending.success && !navigationOnlyChange(sent,pending.data)) continue;
       if (pending.success && snapshotHash(pending.data) === snapshotHash(desired)) continue;
-      let content: PublicationSnapshot = desired;
+      const content: PublicationSnapshot = desired;
       try { await renderStoredPublication(client,row.id,content,row.delivery_kind); }
       catch (error) {
         if (!(error instanceof PublicationRenderError)) throw error;
         if (!['publication_message_too_long','publication_entity_limit','publication_text_requires_new_edition'].includes(error.code)) throw error;
-        content = { ...desired,navigationOverflow:true };
-        await renderStoredPublication(client,row.id,content,row.delivery_kind);
+        // Keep the sent snapshot intact. A link-only reply is not a publication.
+        await client.query(`UPDATE publications SET error_code='publication_navigation_requires_new_edition',updated_at=now() WHERE id=$1`,[row.id]);
+        continue;
       }
       if (snapshotHash(sent)===snapshotHash(content) || pending.success && snapshotHash(pending.data)===snapshotHash(content)) continue;
       const snapshot = (await client.query<{ id: string }>(`INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id`,

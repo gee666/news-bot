@@ -2,7 +2,7 @@ import { convertToPng } from '@earendil-works/pi-coding-agent';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
-import { createMediaRunner, extractVideoFrame } from './codec.js';
+import { createMediaRunner, extractVideoFrame, isPublishableImage } from './codec.js';
 import { compressModelImage, normalizeImage, type MediaCommandRunner } from './comparison.js';
 
 const exec = promisify(execFile);
@@ -195,5 +195,35 @@ describe.skipIf(!hasTools.every(Boolean))('real model image compression', () => 
     await expect(compressModelImage(ppm(64, 64), { maxOutputBytes: 8 })).rejects.toThrow('output exceeds limit');
     await expect(compressModelImage(ppm(64, 64), { timeoutMs: 1 })).rejects.toThrow('timed out');
     await expect(compressModelImage(Buffer.from('not an image'))).rejects.toThrow('ffmpeg');
+  });
+});
+
+
+describe('publication image dimensions', () => {
+  it('rejects an actual 1x1 GIF spacer even without declared HTML dimensions', async () => {
+    const spacer = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+    expect(await isPublishableImage(spacer)).toBe(false);
+    expect(await isPublishableImage(ppm(80, 60))).toBe(true);
+    expect(await isPublishableImage(ppm(1, 60))).toBe(false);
+    expect(await isPublishableImage(Buffer.from('not an image'))).toBe(false);
+  });
+  it.each([
+    { width: 1, height: 1 }, { width: 800, height: 2 }, { width: 2, height: 800 },
+    { width: 0, height: 20 }, { width: -10, height: 10 }, { width: 3.5, height: 10 },
+    { width: '600', height: 400 }, { width: 10000, height: 10000 },
+  ])('rejects non-editorial or invalid decoded dimensions %j', async dimensions => {
+    const run = vi.fn<MediaCommandRunner>(async () => Buffer.from(JSON.stringify({ streams: [dimensions] })));
+    expect(await isPublishableImage(Buffer.from('source'), { run })).toBe(false);
+  });
+  it('rejects unavailable and malformed decoder results without allowing the bytes through', async () => {
+    for (const result of ['{}', '{"streams":[]}', '{"streams":[null]}', 'not json']) {
+      expect(await isPublishableImage(Buffer.from('source'), {
+        run: async () => Buffer.from(result),
+      })).toBe(false);
+    }
+    expect(await isPublishableImage(Buffer.alloc(0))).toBe(false);
+    expect(await isPublishableImage(Buffer.from('source'), {
+      run: async () => { throw new Error('decoder unavailable'); },
+    })).toBe(false);
   });
 });

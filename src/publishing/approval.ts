@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { publicationSnapshotSchema } from '../types.js';
 import { renderFullText, renderedMessageSchema } from './full-text.js';
 import { CAPTION_LIMIT } from './caption.js';
+import { visibleSources } from './sources.js';
 import type { Publication } from './store.js';
 
 const actionBase = z.object({
@@ -42,7 +43,7 @@ export function fullRepairPlan(content: unknown, reviewedCaption?: { snapshot: u
     parts = [...caption,...renderFullText(snapshot)];
   }
   const deliveredUrls = new Set(parts.flatMap(part => part.links.map(link => link.url)));
-  if (snapshot.sources.some(source => !source.unverifiedPublication && !deliveredUrls.has(source.url))) throw new Error('publication_full_repair_sources_not_rendered');
+  if (visibleSources(snapshot.sources).some(source => !source.unverifiedPublication && !deliveredUrls.has(source.url))) throw new Error('publication_full_repair_sources_not_rendered');
   return parts;
 }
 

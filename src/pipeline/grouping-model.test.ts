@@ -50,13 +50,21 @@ it('rejects invented or repeated IDs rather than attaching reports to an unrelat
   await expect(groupReport(report('Release.'),[candidate],defaultSettings,context,generator)).rejects.toThrow();
   expect(generator.generate).toHaveBeenCalledTimes(2);
 });
-it('classifies discovery, consequence and unrelated news in the existing single question', async () => {
-  const candidates = [report('OpenAI discovered a PHP vulnerability.'), report('Alderon shut down its game because of the PHP flaw.'), report('Acme released a compiler.')];
-  const matches = candidates.map((candidate, index) => ({ storyId: candidate.id, relation: ['same','related','unrelated'][index] }));
-  const generator = { generate: vi.fn().mockResolvedValue(modelResult({ matches })) };
-  expect(await groupReport(report('OpenAI model found a vulnerability in PHP.'), candidates, defaultSettings, context, generator)).toEqual(matches);
+it('uses only the original comparison for related decisions and caches it without a second model call', async () => {
+  const incoming=report('OpenAI found a critical PHP flaw.');
+  const candidates=[report('Alderon shut down because of that PHP flaw.'),report('A company released unrelated servers.')];
+  const matches=candidates.map((candidate,index)=>({storyId:candidate.id,relation:index===0?'related':'unrelated'}));
+  const generator={generate:vi.fn(async(request:PiRequest)=>{
+    expect(request.systemPrompt).toContain('documented cause, consequence, direct response');
+    expect(request.systemPrompt).toContain('Shared companies, products, skills, security risks');
+    expect(request.systemPrompt).toContain('missing or ambiguous, choose unrelated');
+    return modelResult({matches});
+  })};
+  const decisions=await groupReport(incoming,candidates,defaultSettings,context,generator);
+  expect(decisions).toEqual([{...matches[0],relatedPromptVersion:'duplicate-v6'},matches[1]]);
   expect(generator.generate).toHaveBeenCalledOnce();
-  expect(generator.generate.mock.calls[0]?.[0].systemPrompt).toContain('RELATED, not SAME');
+  expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toEqual(decisions);
+  expect(generator.generate).toHaveBeenCalledOnce();
 });
 it.each(['missing','repeated','retired update'])('rejects %s candidate classifications rather than guessing unrelated', async kind => {
   const candidates = [report('Release.'), report('Other release.')];

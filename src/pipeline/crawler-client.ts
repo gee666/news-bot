@@ -1,3 +1,4 @@
+import { cleanSourceUrl } from '../source-url.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { envInteger, publicUrl, ResearchFetchError, resolvePublicAddress } from './research-fetch.js';
@@ -87,7 +88,7 @@ async function fetchOnce(input: string, settings: CrawlerSettings, signal: Abort
   const { service, token, maxBytes } = settings;
   try {
     signal.throwIfAborted();
-    const target = publicUrl(input);
+    const target = publicUrl(cleanSourceUrl(input));
     // The service independently revalidates and pins at connect time.
     await validateHost(target, signal);
     const response = await fetch(new URL('/crawl', service), {
@@ -135,8 +136,8 @@ async function fetchOnce(input: string, settings: CrawlerSettings, signal: Abort
     const result = parsed.data.results[0];
     if (!result || !parsed.data.success) return unavailable(input, 'crawler_failed');
     const status = result.redirected_status_code ?? result.status_code;
-    if (publicUrl(result.url).href !== target.href) return unavailable(input, 'crawler_result_mismatch');
-    const canonicalUrl = publicUrl(result.redirected_url || result.url).href;
+    if (cleanSourceUrl(publicUrl(result.url).href) !== target.href) return unavailable(input, 'crawler_result_mismatch');
+    const canonicalUrl = cleanSourceUrl(publicUrl(result.redirected_url || result.url).href);
     await validateHost(new URL(canonicalUrl), signal);
     const title = result.metadata?.title?.trim().slice(0, 500) || null;
     const markdown = result.markdown?.raw_markdown.trim() ?? '';

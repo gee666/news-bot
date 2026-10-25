@@ -14,7 +14,7 @@ vi.mock('./extraction-model.js', () => ({ extractEvents: async (text: string) =>
   return text.startsWith('Ссылки') ? [] : [{ parts: [{ start: 0, end: text.length }], context: [] }];
 } }));
 vi.mock('./generation-model.js', async original => ({ ...await original<typeof import('./generation-model.js')>(), recordGenerationFailure: vi.fn(),
-  generationClient: async () => ({ generate: async (request: { prompt: string }) => {
+  generationClient: async () => ({ generate: async (request: { prompt: string; systemPrompt: string }) => {
     const { modelResult } = await import('./generation.test-helpers.js');
     const raw: unknown = JSON.parse(request.prompt);
     const links = z.object({ message: z.string(), links: z.array(z.object({ id:z.uuid() })),
@@ -24,10 +24,11 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
       return modelResult({ associations: links.data.targets.filter(target=>target.reports.some(report=>report.text.includes('Compiler 2')))
         .flatMap(target=>links.data.links.map(link=>({linkId:link.id,targetId:target.id,classification:'relevant'}))) });
     }
-    model.groupingCalls++;
     const event = z.object({ id: z.uuid(), reports: z.array(z.object({ text: z.string() })) })
       .transform(value => ({ ...value, text: value.reports.map(report => report.text).join('\n\n') }));
     const input = z.object({ incoming: event, candidates: z.array(event) }).parse(raw);
+
+    model.groupingCalls++;
     if (input.incoming.text.includes('Сбой')) throw new ModelRequestError(
       failureMetadata(new RequestFault('transient'), 'grouping', 'pi', 1, 0));
     return modelResult({ matches: input.candidates.map(candidate => ({ storyId: candidate.id, relation: model.relation ||

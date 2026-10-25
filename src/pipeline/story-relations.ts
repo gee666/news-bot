@@ -1,9 +1,10 @@
 import type { PoolClient } from 'pg';
 import { db, transaction } from '../db.js';
+import { jevTemplates } from '../models/templates.js';
 import { publicationThreadEdges } from './generation-context.js';
 
 export type StoryRelation = 'same' | 'related' | 'unrelated';
-export interface StoryRelationDecision { storyId: string; relation: StoryRelation }
+export interface StoryRelationDecision { storyId: string; relation: StoryRelation; relatedPromptVersion?: string }
 
 const sameEdges = `same_edges(a,b) AS (
   SELECT lower_story_id,upper_story_id FROM story_relations
@@ -66,7 +67,8 @@ export async function recordStoryRelations(storyId: string, decisions: readonly 
       VALUES(least($1::uuid,$2::uuid),greatest($1::uuid,$2::uuid),$3,$4,$5)
       ON CONFLICT(lower_story_id,upper_story_id) DO UPDATE SET relation=EXCLUDED.relation,
         classifier_version=EXCLUDED.classifier_version,provenance=EXCLUDED.provenance,classified_at=now()`,
-    [storyId, decision.storyId, decision.relation, classifierVersion, JSON.stringify(provenance)]);
+    [storyId, decision.storyId, decision.relation, classifierVersion, JSON.stringify({ ...provenance,...(decision.relation === 'related' && decision.relatedPromptVersion
+      ? { relatedPromptVersion:decision.relatedPromptVersion } : {}) })]);
     accepted.push(decision);
   }
   return accepted;
@@ -81,10 +83,20 @@ export async function relatedStoryIds(storyId: string, query = db.query.bind(db)
     ), related_roots(id) AS (
       SELECT CASE WHEN r.lower_story_id=c.id THEN r.upper_story_id ELSE r.lower_story_id END
       FROM same_component c JOIN story_relations r ON r.lower_story_id=c.id OR r.upper_story_id=c.id
-      WHERE r.relation='related'
+      WHERE r.relation='related' AND r.provenance->>'quarantined' IS DISTINCT FROM 'true'
+        AND (r.provenance->>'origin'='user' OR r.provenance->>'relatedPromptVersion'='${jevTemplates.duplicate.version}')
     ), related_component(id) AS (
       SELECT id FROM related_roots UNION SELECT CASE WHEN e.a=c.id THEN e.b ELSE e.a END
       FROM related_component c JOIN same_edges e ON e.a=c.id OR e.b=c.id
-    ) SELECT id FROM related_component WHERE id NOT IN(SELECT id FROM same_component) ORDER BY id`, [storyId]);
+    ), excluded_roots(id) AS (
+      SELECT CASE WHEN r.lower_story_id=c.id THEN r.upper_story_id ELSE r.lower_story_id END
+      FROM same_component c JOIN story_relations r ON r.lower_story_id=c.id OR r.upper_story_id=c.id
+      WHERE r.relation='unrelated' AND r.provenance->>'quarantined' IS DISTINCT FROM 'true'
+    ), excluded_component(id) AS (
+      SELECT id FROM excluded_roots UNION SELECT CASE WHEN e.a=c.id THEN e.b ELSE e.a END
+      FROM excluded_component c JOIN same_edges e ON e.a=c.id OR e.b=c.id
+    ) SELECT id FROM related_component WHERE id NOT IN(SELECT id FROM same_component)
+      AND id NOT IN(SELECT id FROM excluded_component)
+      ORDER BY id`, [storyId]);
   return result.rows.map(row => row.id);
 }

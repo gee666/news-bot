@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
+import { jevTemplates } from '../models/templates.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const url = process.env.TEST_DATABASE_URL;
@@ -17,7 +18,9 @@ async function edge(next: string, previous: string, verified = true) {
     VALUES($1,$2,$3)`, [next, previous, verified ? 'fixture-verified' : null]);
 }
 async function classify(left: string, right: string, relation: 'same' | 'related' | 'unrelated', origin = 'model') {
-  return relations.recordStoryRelations(left, [{ storyId: right, relation }], 'test-v1', { origin });
+  return relations.recordStoryRelations(left, [{ storyId: right, relation,
+    ...(relation==='related' && origin==='model' ? { relatedPromptVersion:jevTemplates.duplicate.version } : {})
+  }], 'test-v1', { origin });
 }
 async function ancestors(id: string): Promise<string[]> {
   const { generationThread } = await import('./generation-context.js');
@@ -46,7 +49,7 @@ describe.skipIf(!url)('verified same and related relationship storage', () => {
     const rows = (await database.db.query('SELECT * FROM story_relations ORDER BY relation')).rows;
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ lower_story_id: [a, b].sort()[0], upper_story_id: [a, b].sort()[1],
-      relation: 'related', classifier_version: 'test-v1', provenance: { origin: 'model' } });
+      relation: 'related', classifier_version: 'test-v1', provenance: expect.objectContaining({ origin: 'model' }) });
     expect(await relations.relatedStoryIds(a)).toEqual([b]);
     expect(await relations.relatedStoryIds(b)).toEqual([a]);
     await database.db.query('DELETE FROM stories WHERE id=$1', [b]);
@@ -93,6 +96,23 @@ describe.skipIf(!url)('verified same and related relationship storage', () => {
     await classify(a, b, 'same');
     expect(await classify(b, c, 'same')).toEqual([]);
     expect(await relations.relatedStoryIds(b)).toEqual([c]);
+  });
+  it('withholds legacy model positives without deleting them and admits decisions from the corrected original prompt',async()=>{
+    const [a,b]=await Promise.all([story(),story()]);
+    await relations.recordStoryRelations(a,[{storyId:b,relation:'related'}],'grouping-v2',{origin:'model'});
+    expect(await relations.relatedStoryIds(a)).toEqual([]);
+    expect((await database.db.query('SELECT relation FROM story_relations')).rows).toEqual([{relation:'related'}]);
+    await classify(a,b,'related');
+    expect(await relations.relatedStoryIds(a)).toEqual([b]);
+  });
+  it('does not let a same edition reintroduce explicit unrelated targets from either side',async()=>{
+    const [a,edition,b,bEdition]=await Promise.all([story(),story(),story(),story()]);
+    await classify(a,edition,'same'); await classify(b,bEdition,'same');
+    await classify(a,b,'unrelated'); await classify(edition,bEdition,'related');
+    expect(await relations.relatedStoryIds(a)).toEqual([]);
+    expect(await relations.relatedStoryIds(edition)).toEqual([]);
+    expect(await relations.relatedStoryIds(b)).toEqual([]);
+    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation='related'")).rowCount).toBe(1);
   });
   it('does not overwrite authoritative user decisions or use automated disagreements to break a user same path', async () => {
     const [a, b, c] = await Promise.all([story(), story(), story()]);

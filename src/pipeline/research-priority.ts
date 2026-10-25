@@ -1,10 +1,11 @@
+import { cleanSourceUrl } from '../source-url.js';
 import { arxivAddress } from '../sources/arxiv-address.js';
 
 export function normalizedResearchUrl(input: string): string {
   const paper = arxivAddress(input);
   if (paper) return `https://arxiv.org/abs/${paper.id}${paper.version ?? ''}`;
   try {
-    const url = new URL(input);
+    const url = new URL(cleanSourceUrl(input));
     url.hash = '';
     return url.href;
   } catch { return input; }

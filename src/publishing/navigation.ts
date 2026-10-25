@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { relatedStoryIds } from '../pipeline/story-relations.js';
 import { publicationThreadEdges } from '../pipeline/generation-context.js';
 import type { PublicationSnapshot, PublicationSource } from '../types.js';
+import { RELATED_PUBLICATION_LIMIT } from './sources.js';
 import { snapshotHash } from './approval.js';
 
 export const delivered = `p.status='published' AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
@@ -61,7 +62,8 @@ export async function relatedPublicationSources(client: Pick<PoolClient,'query'>
       JOIN component_keys c ON c.root=p.story_id
       WHERE p.destination_id=$2 AND ($3::text IS NULL OR p.bot_id=$3) AND ($4::boolean OR p.delivery_kind<>'album') AND ${validAddress} AND ${delivered}
       ORDER BY c.component,p.published_at DESC,p.id DESC
-    ) SELECT url,headline FROM latest ORDER BY published_at,id`, [ids,destinationId,botId ?? null,options.includeLegacyAlbums ?? false]);
+    ) SELECT url,headline FROM latest ORDER BY published_at DESC,id DESC LIMIT $5`,
+  [ids,destinationId,botId ?? null,options.includeLegacyAlbums ?? false,RELATED_PUBLICATION_LIMIT]);
   return rows.rows.map(row => ({ url:row.url,label:row.headline,primary:false,access:'public',
     classification:'relevant',relatedPublication:true }));
 }
@@ -100,7 +102,6 @@ export async function desiredNavigation(client: Pick<PoolClient,'query'>,
     if (!isNavigationSource(source)) return [source];
     if (source.previousPublication && sameUrls.has(source.url)) return [source];
     if (relatedByUrl.has(source.url)) return [];
-    if (source.relatedPublication && !source.legacyPublication) return [];
     // Retain historical links, but do not present unclassified links as same-event ancestry or sources.
     const retained = { ...source };
     delete retained.previousPublication; delete retained.relatedPublication;

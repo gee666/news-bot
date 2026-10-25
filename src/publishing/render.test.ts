@@ -46,7 +46,7 @@ describe('full publication rendering', () => {
     expect(render({...content,details:'😀'.repeat(5000)}).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
   });
   it('legacy history needs no extra heading entities', () => {
-    const sources=Array.from({length:97},()=>snapshot.sources[0]!);
+    const sources=Array.from({length:97},(_,index)=>({ ...snapshot.sources[0]!,url:`https://example.org/${index}` }));
     expect(()=>render({...snapshot,sources})).not.toThrow();
     expect(()=>render({...snapshot,sources,earlier:'Прежние сведения'})).not.toThrow();
   });
@@ -74,7 +74,8 @@ describe('full publication rendering', () => {
   });
   it('includes each group heading in the entity budget', () => {
     const external = { ...snapshot.sources[0]!,url: 'https://example.org',access: 'public' as const };
-    const sources = [snapshot.sources[0]!,{ ...external,primary: true },...Array.from({ length: 96 }, () => external)];
+    const sources = [snapshot.sources[0]!,{ ...external,primary: true },
+      ...Array.from({ length: 96 }, (_, index) => ({ ...external,url:`https://example.org/${index}` }))];
     expect(() => render({ ...snapshot,sources })).toThrow('publication_entity_limit');
   });
   it('strips only trailing numeric citation markers and keeps source links and offsets intact', () => {
@@ -130,7 +131,11 @@ describe('full publication rendering', () => {
     expect(render({ ...snapshot, details: 'x'.repeat(budget) }).plainText.length).toBe(MESSAGE_LIMIT);
     expect(render({ ...snapshot, details: 'x'.repeat(budget+1) }).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
     expect(render({ ...snapshot, details: '😀'.repeat(Math.floor(budget/2)+1) }).plainText.length).toBeLessThanOrEqual(MESSAGE_LIMIT);
-    expect(() => render({ ...snapshot, sources: Array.from({ length: SOURCE_LIMIT+1 }, () => snapshot.sources[0]!) })).toThrow('publication_entity_limit');
+    const sources = Array.from({ length: SOURCE_LIMIT+1 }, (_, index) => ({
+      ...snapshot.sources[0]!,url:`https://t.me/c/123/${index+1}`,
+    }));
+    expect(() => render({ ...snapshot,sources })).toThrow('publication_entity_limit');
+    expect(render({ ...snapshot,sources:Array.from({ length: SOURCE_LIMIT+1 }, () => snapshot.sources[0]!) }).links).toHaveLength(1);
   });
   it.each([false, true])('renders reviewer notes with supported=%s, retaining links and offsets', supported => {
     const message = render({ ...snapshot, review: { supported, reason: 'Версия <2> не подтверждена\nисточником' } });

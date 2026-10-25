@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { publicationSnapshotSchema, type PublicationSource } from '../types.js';
 import { escapeHtml, MESSAGE_LIMIT, PublicationRenderError, type RenderedMessage } from './render.js';
-import { orderSources, SOURCE_GROUPS, sourceGroup } from './sources.js';
+import { visibleSources, SOURCE_GROUPS, sourceGroup } from './sources.js';
 import { LIST_MARKER, normalizeMarkedLists, presentationSourceLabel } from './presentation.js';
 
 // Frozen unversioned plans retain the original reserved budget and fingerprints.
@@ -83,7 +83,7 @@ export function renderFullText(content: unknown, sourcesOnly = false, firstLimit
   if (snapshot.earlier) append('\n\n' + bodyPresentation(snapshot.earlier));
   if (snapshot.review?.reason.trim()) append('\n\nЗаметки проверяющего: ' + snapshot.review.reason);
   }
-  const sources = orderSources(snapshot.sources);
+  const sources = visibleSources(snapshot.sources);
   for (const group of SOURCE_GROUPS) {
     const selected = sources.filter(source => sourceGroup(source) === group.kind);
     if (!selected.length) continue;

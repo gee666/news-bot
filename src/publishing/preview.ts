@@ -8,9 +8,10 @@ import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js
 import type { RepairOptions } from './repair.js';
 import { repairEditBlocked, trackedVerificationTest, verifiedBotSchema } from './repair-test.js';
 import { expectedSourceUrls } from './preview-sources.js';
-import { renderCaption } from './caption.js';
-import { PublicationRenderError, render } from './render.js';
-import { sourceGroup } from './sources.js';
+import { CAPTION_LIMIT } from './caption.js';
+import { renderCanonicalText } from './canonical-text.js';
+import { PublicationRenderError } from './render.js';
+import { sourceGroup, visibleSources } from './sources.js';
 import { eligible, rateLimited, snapshotFor, type StoryContent, type Publication } from './store.js';
 import { canonicalPublications } from './updates.js';
 
@@ -41,12 +42,13 @@ export interface RepairPreview {
 }
 function hash(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function metrics(snapshot: PublicationSnapshot, deliveryKind: Publication['delivery_kind'] = 'text'): Metrics {
-  const message = deliveryKind === 'album' ? renderCaption(snapshot) : render(snapshot);
-  const expected = new Set(snapshot.sources.map(source => source.url));
+  const message = renderCanonicalText(snapshot, deliveryKind === 'album' ? CAPTION_LIMIT : 4096);
+  const visible = visibleSources(snapshot.sources).filter(source => !source.unverifiedPublication);
+  const expected = new Set(visible.map(source => source.url));
   const rendered = new Set(message.links.map(link => link.url));
   return { characters: message.plainText.length,detailCharacters: snapshot.details.length,sourceUrls: expected.size,
     entities: deliveryKind === 'album' ? message.links.length + (message.text.match(/<b>/gu)?.length ?? 0)
-      : 1 + message.links.length + new Set(snapshot.sources.map(sourceGroup)).size,
+      : 1 + message.links.length + new Set(visible.map(sourceGroup)).size,
     snapshotSha256: hash(JSON.stringify(snapshot)),detailsSha256: hash(snapshot.details),
     allSnapshotLinksRendered: expected.size === rendered.size && [...expected].every(url => rendered.has(url)) };
 }

@@ -1,5 +1,5 @@
 import { publicationSnapshotSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
-import { orderSources, SOURCE_GROUPS, sourceGroup } from './sources.js';
+import { visibleSources, SOURCE_GROUPS, sourceGroup } from './sources.js';
 import { LIST_MARKER, normalizeMarkedLists, presentationSourceLabel } from './presentation.js';
 
 export interface SourceLink { offset: number; length: number; url: string }
@@ -28,13 +28,13 @@ function status(source: PublicationSource): string {
     source.access === 'restricted' ? 'доступ ограничен' : source.access === 'unavailable' ? 'недоступно' : ''].filter(Boolean).join(', ');
 }
 function sourceEntityCount(snapshot: PublicationSnapshot): number {
-  const visible = snapshot.sources.filter(source => !source.unverifiedPublication);
+  const visible = visibleSources(snapshot.sources).filter(source => !source.unverifiedPublication);
   return 1 + visible.length + new Set(visible.map(sourceGroup)).size;
 }
 function sourceSections(snapshot: PublicationSnapshot, compact: boolean): { text: string; plainText: string; links: SourceLink[] } {
   let text = ''; let plainText = ''; let number = 0;
   const links: SourceLink[] = [];
-  const orderedSources = orderSources(snapshot.sources);
+  const orderedSources = visibleSources(snapshot.sources);
   for (const group of SOURCE_GROUPS) {
     const sources = orderedSources.filter(source => sourceGroup(source) === group.kind);
     if (!sources.length) continue;

@@ -1,6 +1,7 @@
 import type { MediaDescriptor } from './download.js';
+import { decorativeImage } from '../sources/media-policy.js';
 
-/** Only collapse a WordPress rendition when this source also supplies its original. */
+/** Reject page furniture and collapse a WordPress rendition only when its original is supplied. */
 export function distinctSourceMedia(descriptors: readonly MediaDescriptor[]): MediaDescriptor[] {
   const images = new Set(descriptors.flatMap(descriptor => {
     const url = descriptor.type === 'image' ? imageUrl(descriptor.url) : null;
@@ -8,6 +9,7 @@ export function distinctSourceMedia(descriptors: readonly MediaDescriptor[]): Me
   }));
   return descriptors.filter(descriptor => {
     if (descriptor.type !== 'image') return true;
+    if (decorativeImage(descriptor.url)) return false;
     const url = imageUrl(descriptor.url);
     if (!url) return true;
     // WordPress generated sizes share the original's upload directory and extension.

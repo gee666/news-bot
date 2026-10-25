@@ -55,3 +55,12 @@ it('does not treat a video URL as evidence that an image original exists', () =>
   const input: MediaDescriptor[] = [{ type: 'video', url: original }, image(rendition)];
   expect(distinctSourceMedia(input)).toEqual(input);
 });
+
+it('rejects stored website logos before download without discarding story graphics or Telegram media', () => {
+  const input: MediaDescriptor[] = [
+    image('https://example.org/assets/LogoDark.png'), image('https://example.org/assets/wordmark.png'),
+    image('https://example.org/author-headshot.jpg'), image('https://example.org/mission-patch.png'),
+    image('https://example.org/biological-results.png'), { type: 'image', telegramMessageId: 123 },
+  ];
+  expect(distinctSourceMedia(input)).toEqual(input.slice(3));
+});
