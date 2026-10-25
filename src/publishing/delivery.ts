@@ -124,11 +124,7 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
   const albumMetadata = album ? { deliveryKind: 'album', itemIds: album.items.map(item => item.id),
     uploadTypes: album.media.map(mediaUploadType), mediaDigests: album.items.map(item => item.digest) } : { deliveryKind: publication.delivery_kind ?? 'text' };
   let message: RenderedMessage;
-  let mediaCaption: RenderedMessage | undefined;
-  try {
-    message = publication.delivery_kind === 'album' ? renderCaption(publication.content) : await preparePublicationText(publication);
-    if (publication.delivery_kind === 'media_first') mediaCaption = renderCaption(publication.content);
-  }
+  try { message = publication.delivery_kind === 'album' ? renderCaption(publication.content) : await preparePublicationText(publication); }
   catch (error) {
     if (error instanceof BotError) return null;
     if (!(error instanceof PublicationRenderError)) throw error;
@@ -138,7 +134,7 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     return null;
   }
   if (publication.delivery_kind === 'media_first') {
-    if (!mediaCaption || !await deliverMediaFirst(publication,api,settings,authorization,mediaCaption)) return null;
+    if (!await deliverMediaFirst(publication,api,settings,authorization)) return null;
     const current = (await db.query<Publication>(`SELECT * FROM publications WHERE id=$1`, [publication.id])).rows[0];
     if (!current) return null;
     publication = { ...publication, ...current };
