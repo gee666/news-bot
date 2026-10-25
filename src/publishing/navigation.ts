@@ -15,12 +15,16 @@ const validAddress = "p.destination_id ~ '^-100[0-9]+$' AND p.message_id ~ '^[1-
 export const isNavigationSource = (source: PublicationSource): boolean => Boolean(
   source.previousPublication || source.relatedPublication || source.unverifiedPublication);
 
+const verifiedSameEdges = `edges(a,b) AS (
+  SELECT story_id,previous_story_id FROM publication_thread_edges
+  UNION SELECT lower_story_id,upper_story_id FROM story_relations
+    WHERE relation='same' AND provenance->>'quarantined' IS DISTINCT FROM 'true'
+)`;
+
 /** Same-event identity requires classification. Old blanket edges and frozen links are not proof. */
 export async function sameStoryIds(client: Pick<PoolClient,'query'>, storyId: string): Promise<string[]> {
-  const rows = await client.query<{ id: string }>(`WITH RECURSIVE ${publicationThreadEdges}, edges(a,b) AS (
-      SELECT story_id,previous_story_id FROM publication_thread_edges
-      UNION SELECT lower_story_id,upper_story_id FROM story_relations WHERE relation='same' AND provenance->>'quarantined' IS DISTINCT FROM 'true'
-    ), component(id) AS (SELECT $1::uuid UNION
+  const rows = await client.query<{ id: string }>(`WITH RECURSIVE ${publicationThreadEdges}, ${verifiedSameEdges},
+    component(id) AS (SELECT $1::uuid UNION
       SELECT CASE WHEN e.a=c.id THEN e.b ELSE e.a END FROM component c JOIN edges e ON e.a=c.id OR e.b=c.id)
     SELECT id FROM component`, [storyId]);
   return rows.rows.map(row => row.id);
@@ -30,10 +34,20 @@ export async function relatedPublicationSources(client: Pick<PoolClient,'query'>
   destinationId: string, botId?: string | null): Promise<PublicationSource[]> {
   const ids = await relatedStoryIds(storyId,client.query.bind(client));
   if (!ids.length) return [];
-  const rows = await client.query<{ url: string; headline: string }>(`SELECT ${postAddress} AS url,snap.content->>'headline' AS headline
-    FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id
-    WHERE p.story_id=ANY($1::uuid[]) AND p.destination_id=$2 AND ($3::text IS NULL OR p.bot_id=$3)
-      AND ${validAddress} AND ${delivered} ORDER BY p.published_at,p.id`, [ids,destinationId,botId ?? null]);
+  const rows = await client.query<{ url: string; headline: string }>(`WITH RECURSIVE
+    ${publicationThreadEdges}, ${verifiedSameEdges}, components(root,id) AS (
+      SELECT id,id FROM unnest($1::uuid[]) AS roots(id)
+      UNION SELECT c.root,CASE WHEN e.a=c.id THEN e.b ELSE e.a END
+        FROM components c JOIN edges e ON e.a=c.id OR e.b=c.id
+    ), component_keys AS (
+      SELECT root,min(id::text) AS component FROM components GROUP BY root
+    ), latest AS (
+      SELECT DISTINCT ON (c.component) ${postAddress} AS url,snap.content->>'headline' AS headline,p.published_at,p.id
+      FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id
+      JOIN component_keys c ON c.root=p.story_id
+      WHERE p.destination_id=$2 AND ($3::text IS NULL OR p.bot_id=$3) AND ${validAddress} AND ${delivered}
+      ORDER BY c.component,p.published_at DESC,p.id DESC
+    ) SELECT url,headline FROM latest ORDER BY published_at,id`, [ids,destinationId,botId ?? null]);
   return rows.rows.map(row => ({ url:row.url,label:row.headline,primary:false,access:'public',
     classification:'relevant',relatedPublication:true }));
 }
@@ -84,7 +98,7 @@ export async function desiredNavigation(client: Pick<PoolClient,'query'>,
       ? { legacyPublication:true as const } : {}) });
   }
   const updatedTo = await latestUpdateTarget(client,publication.id);
-  const result: PublicationSnapshot = { ...sent,sources,navigationVersion:1 };
+  const result: PublicationSnapshot = { ...sent,sources,navigationVersion:2 };
   delete result.updatedTo; delete result.navigationOverflow;
   if (updatedTo) result.updatedTo=updatedTo;
   return result;

@@ -48,13 +48,34 @@ export function stripNavigationTail(messages:RenderedMessage[],sources:Publicati
     return result;
   });
   const plain=messages.map(message=>message.plainText).join(''); let boundary=plain.length;
-  for (const group of SOURCE_GROUPS.filter(group=>['previous','related','unverified'].includes(group.kind))) {
-    const start=plain.lastIndexOf(`\n\n${group.heading}\n`); if (start<0) continue;
-    let covered=start+2;
-    for (const range of bold) if (range.start<=covered && range.end>covered) covered=range.end;
-    if (covered<start+2+group.heading.length) continue;
-    const following=links.filter(link=>link.offset>=start);
-    if (following.length && following.every(link=>urls.has(link.url))) boundary=Math.min(boundary,start);
+  // Recognize both historical related headings; the current title does not make audit links visible.
+  const headings=[...new Set([...SOURCE_GROUPS.filter(group=>['previous','related'].includes(group.kind)).map(group=>group.heading),
+    'Связанные новости'])];
+  const sections:Array<{ start:number; end:number }>=[];
+  for (const heading of headings) {
+    const needle=`\n\n${heading}\n`;
+    for (let start=plain.indexOf(needle); start>=0; start=plain.indexOf(needle,start+needle.length)) {
+      let covered=start+2;
+      for (const range of bold) if (range.start<=covered && range.end>covered) covered=range.end;
+      if (covered>=start+2+heading.length) sections.push({ start,end:start+2+heading.length });
+    }
+  }
+  sections.sort((left,right)=>left.start-right.start);
+  for (const section of sections) {
+    const following=links.filter(link=>link.offset>=section.start);
+    if (!following.length || following.some(link=>!urls.has(link.url))) continue;
+    const suffixSections=sections.filter(item=>item.start>=section.start);
+    if (suffixSections.some((item,index)=>!following.some(link=>link.offset>item.end
+      && link.offset<(suffixSections[index+1]?.start??plain.length)))) continue;
+    const ranges=[...suffixSections,...following.map(link=>({ start:link.offset,end:link.offset+link.length }))]
+      .sort((left,right)=>left.start-right.start);
+    let end=section.start; let safe=true;
+    for (const range of ranges) {
+      if (range.start>end && plain.slice(end,range.start).trim()) { safe=false; break; }
+      end=Math.max(end,range.end);
+    }
+    // A matching URL is not enough: unlinked factual text after/between links must survive.
+    if (safe && !plain.slice(end).trim()) { boundary=section.start; break; }
   }
   offset=0;
   return messages.map(message=>{

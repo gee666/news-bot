@@ -18,6 +18,31 @@ describe('frozen multipart navigation suffix',()=>{
     expect(stripped[0]?.links).toEqual(first.links); expect(stripped[1]?.plainText).toBe('');
     expect(stripped[1]?.links).toEqual([]);
   });
+  it('removes old audit navigation and repeated related groups together, including a split legacy heading',()=>{
+    const first=message('Факты\n\n<b>Другие пуб</b>','Факты\n\nДругие пуб');
+    const secondPlain='ликации\nДругой сюжет\n\nСвязанные новости\nДругой сюжет\n\nСвязанные новости\nДругой сюжет';
+    const second=message(`<b>ликации</b>\n<a href="${source.url}">Другой сюжет</a>\n\n<b>Связанные новости</b>\n<a href="${source.url}">Другой сюжет</a>\n\n<b>Связанные новости</b>\n<a href="${source.url}">Другой сюжет</a>`,secondPlain,
+      [...secondPlain.matchAll(/Другой сюжет/gu)].map(match=>({ offset:match.index,length:match[0].length,url:source.url })));
+    const stripped=stripNavigationTail([first,second],[{ ...source,relatedPublication:undefined,unverifiedPublication:true }]);
+    expect(stripped.map(part=>part.plainText)).toEqual(['Факты','']);
+    expect(stripped.flatMap(part=>part.links)).toEqual([]);
+  });
+  it('keeps factual text after or between matching navigation URLs instead of truncating it',()=>{
+    for (const tail of ['\nДополнительный исходный факт','\nДополнительный факт\nДругой сюжет']) {
+      const plain='Факты\n\nДругие публикации\nДругой сюжет'+tail;
+      const html=`Факты\n\n<b>Другие публикации</b>\n<a href="${source.url}">Другой сюжет</a>`+tail;
+      const value=message(html,plain,[{ offset:'Факты\n\nДругие публикации\n'.length,length:'Другой сюжет'.length,url:source.url }]);
+      expect(stripNavigationTail([value],[source])).toEqual([value]);
+    }
+  });
+  it('keeps a factual-source group even when an earlier heading looks like navigation',()=>{
+    const plain='Факты\n\nДругие публикации\nДругой сюжет\n\nПервоисточники\nДокумент';
+    const value=message(`Факты\n\n<b>Другие публикации</b>\n<a href="${source.url}">Другой сюжет</a>\n\n<b>Первоисточники</b>\n<a href="https://source.example/doc">Документ</a>`,plain,[
+      { offset:'Факты\n\nДругие публикации\n'.length,length:'Другой сюжет'.length,url:source.url },
+      { offset:plain.indexOf('Документ'),length:'Документ'.length,url:'https://source.example/doc' },
+    ]);
+    expect(stripNavigationTail([value],[source])).toEqual([value]);
+  });
   it('does not treat a literal unformatted body paragraph as navigation',()=>{
     const value=message('Факты\n\nСвязанные новости\nЦитата','Факты\n\nСвязанные новости\nЦитата');
     expect(stripNavigationTail([value],[source])).toEqual([value]);

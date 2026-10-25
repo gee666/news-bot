@@ -5,16 +5,16 @@ export const SOURCE_GROUPS: ReadonlyArray<{ kind: SourceGroup; heading: string }
   { kind: 'primary', heading: 'Первоисточники' },
   { kind: 'secondary', heading: 'Вторичные источники' },
   { kind: 'previous', heading: 'Предыдущие публикации' },
-  { kind: 'unverified', heading: 'Другие публикации' },
-  { kind: 'related', heading: 'Связанные новости' },
+  { kind: 'related', heading: 'Другие публикации' },
 ];
 function isTelegram(source: PublicationSource): boolean {
   const host = new URL(source.url).hostname.toLowerCase().replace(/^www\./u, '');
   return host === 't.me' || host === 'telegram.me';
 }
 export function sourceGroup(source: PublicationSource): SourceGroup {
-  if (source.relatedPublication) return 'related';
+  // Unverified historical navigation is retained for audit, never displayed as evidence or related news.
   if (source.unverifiedPublication) return 'unverified';
+  if (source.relatedPublication) return 'related';
   if (source.previousPublication) return 'previous';
   if (source.kind) return source.kind === 'primary' ? 'primary' : 'secondary';
   return source.primary && !isTelegram(source) ? 'primary' : 'secondary';

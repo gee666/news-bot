@@ -67,7 +67,7 @@ export async function retryNavigationParts(api: BotApi, settings: AppSettings, d
           || await destination()!==destinationId || await rateLimited()) return;
         const attemptId = await transaction(async tx => {
           await tx.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
-          if (!(await publicationAdmission(tx,publication,settings,'edit')).allowed) return null;
+          if (!(await publicationAdmission(tx,publication,settings,'edit',{ navigationSlot:part.slot })).allowed) return null;
           const owner = await tx.query(`SELECT 1 FROM publications p WHERE p.id=$1 AND p.snapshot_id=$2
             AND p.pending_snapshot_id IS NULL AND p.bot_id=$3 AND p.destination_id=$4 AND p.status='published'
             AND NOT EXISTS(SELECT 1 FROM operational_state WHERE key='publication_removal:'||p.id::text)

@@ -68,6 +68,12 @@ export async function beginAttempt(publication: Publication, operation: 'send' |
         || duplicate.snapshot_id!==publication.snapshot_id || duplicate.bot_id!==canonical.bot_id
         || duplicate.destination_id!==canonical.destination_id) return null;
     }
+    if (operation === 'edit' && authorization.fullContentRepair) {
+      const waiting = await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND operation='edit'
+        AND status='retryable' AND response_metadata->>'snapshotId'=$2 AND next_retry_at>now() LIMIT 1`,
+      [publication.id,publication.pending_snapshot_id]);
+      if (waiting.rows.length) return null;
+    }
     if (operation === 'send' && publication.delivery_kind === 'album' && !await claimAlbum(client, publication, metadata)) return null;
     // Replace the durable desired edit atomically, including on retry after restart.
     if (operation === 'edit') await client.query(`UPDATE request_attempts SET status='failed',error_code='edit_superseded',finished_at=now(),next_retry_at=NULL

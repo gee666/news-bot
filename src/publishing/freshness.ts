@@ -5,7 +5,7 @@ import { publicationSnapshotSchema } from '../types.js';
 import { blockedStoriesCte } from '../pipeline/item-failures.js';
 import { generationIsCurrent } from '../pipeline/generation-freshness.js';
 import { eligible, snapshotFor, snapshotSources } from './content.js';
-import { loadAction, snapshotHash, type DeliveryAuthorization } from './approval.js';
+import { fullRepairPlan, fullRepairPlanHash, loadAction, snapshotHash, type DeliveryAuthorization } from './approval.js';
 import { rateLimited,unsafeSendAttempt,type Publication } from './store.js';
 import { desiredNavigation, navigationOnlyChange } from './navigation.js';
 import { lockAdmissionInputs } from './admission-locks.js';
@@ -47,7 +47,16 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
     const unsafe = await client.query(`SELECT 1 FROM request_attempts a WHERE a.publication_id=$1 AND a.operation=$2
       AND (($2='send' AND ${unsafeSendAttempt}) OR ($2='edit' AND a.status IN ('running','unknown'))) LIMIT 1`,[row.id,operation]);
     if (unsafe.rows.length) return deny('delivery_outcome_unknown');
+    // A reviewed repair owns its pending target even when its logical content is unchanged.
+    if (operation === 'edit' && row.pending_snapshot_id) {
+      const reserved = await client.query<{ approval_id:string }>(`SELECT value->>'approvalId' AS approval_id FROM operational_state
+        WHERE key LIKE 'publication_action:%' AND value->>'operation'='edit' AND value ? 'fullContentRepair'
+          AND value->>'publicationId'=$1 AND value->>'desiredSnapshotId'=$2`,[row.id,row.pending_snapshot_id]);
+      if (reserved.rows.length && (!authorization.fullContentRepair || reserved.rows.length !== 1
+        || reserved.rows[0]?.approval_id !== authorization.approvalId)) return deny('approval_invalid');
+    }
     let explicit = false;
+    let reviewedFullRepair = false;
     let approvedReceiptId: string | undefined;
     if (authorization.approvalId) {
       const action = await loadAction(client,authorization.approvalId);
@@ -56,8 +65,25 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
         || action.priorSnapshotId !== row.snapshot_id || action.desiredSnapshotId !== row.pending_snapshot_id
         || action.snapshotHash !== snapshotHash(row.content) || action.storyId !== row.canonical_story_id) return deny('approval_invalid');
       const story = storySchema.safeParse(row.story);
-      if (!story.success || story.data.content_version !== action.contentVersion || !action.receiptId) return deny('approval_invalid');
-      approvedReceiptId = action.receiptId;
+      if (!story.success || story.data.content_version !== action.contentVersion) return deny('approval_invalid');
+      if (action.fullContentRepair) {
+        const repair = action.fullContentRepair;
+        const prior = (await client.query<{ content: unknown }>('SELECT content FROM publication_snapshots WHERE id=$1 FOR SHARE',[row.snapshot_id])).rows[0];
+        const destination = (await client.query<{ value: unknown }>("SELECT value FROM operational_state WHERE key='telegram_destination' FOR SHARE")).rows[0]?.value;
+        if (!authorization.fullContentRepair || authorization.fullRepairPlanHash !== fullRepairPlanHash(fullRepairPlan(row.content,repair.reviewedCaption))
+          || row.delivery_kind !== 'album' || row.bot_id !== repair.botId
+          || (row.media_snapshot_id ?? null) !== repair.mediaSnapshotId || !prior || snapshotHash(prior.content) !== repair.priorSnapshotHash
+          || !z.object({ channelId:z.literal(row.destination_id) }).safeParse(destination).success) return deny('approval_invalid');
+        // Never overwrite existing continuations or proceed through unresolved delivery/removal work.
+        if ((await client.query(`SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND part_number>0
+          UNION ALL SELECT 1 FROM request_attempts WHERE publication_id=$1 AND status IN ('running','unknown')
+          UNION ALL SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=$1 AND status<>'failed'`,[row.id])).rows.length)
+          return deny('delivery_outcome_unknown');
+        reviewedFullRepair = true;
+      } else {
+        if (authorization.fullContentRepair || !action.receiptId) return deny('approval_invalid');
+        approvedReceiptId = action.receiptId;
+      }
       explicit = true;
     }
     if (authorization.verificationTest && row.canonical_story_id === null) {
@@ -70,12 +96,20 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
           UNION ALL SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=$1`,[row.id])).rows.length) return { allowed: true };
       return deny('approval_invalid');
     }
-    if (!saved.publishingEnabled && !explicit) return deny('publishing_paused');
-    if (operation === 'edit') {
+    if (authorization.fullContentRepair && !reviewedFullRepair) return deny('approval_invalid');
+    if (!saved.publishingEnabled && (!explicit || reviewedFullRepair)) return deny('publishing_paused');
+    if (operation === 'edit' && !reviewedFullRepair) {
       const sent = publicationSnapshotSchema.parse((await client.query<{ content: unknown }>(
         'SELECT content FROM publication_snapshots WHERE id=$1', [row.snapshot_id])).rows[0]?.content);
       const desired = publicationSnapshotSchema.parse(row.content);
-      if (navigationOnlyChange(sent,desired)) {
+      if (authorization.navigationSlot) {
+        if (row.pending_snapshot_id || desired.navigationVersion !== 2) return deny('approval_invalid');
+        const part = await client.query(`SELECT 1 FROM publication_navigation_parts WHERE publication_id=$1
+          AND slot=$2 AND snapshot_id=$3 AND status IN ('prepared','retryable')`,
+        [row.id,authorization.navigationSlot,row.snapshot_id]);
+        if (!part.rows.length) return deny('approval_invalid');
+      }
+      if (navigationOnlyChange(sent,desired) && (snapshotHash(sent) !== snapshotHash(desired) || authorization.navigationSlot)) {
         const expected = await desiredNavigation(client,row,sent);
         return snapshotHash({ ...expected,navigationOverflow:desired.navigationOverflow })===snapshotHash(desired)
           ? { allowed:true } : deny('snapshot_changed');
@@ -88,6 +122,10 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
         AND r.metadata ? 'pipelineFailure' AND r.metadata->'pipelineFailure' IS DISTINCT FROM 'false'::jsonb)`,[row.canonical_story_id]);
     if(quarantined.rows.length) return deny('story_ineligible');
     if (z.object({status:z.enum(['failed','rejected'])}).safeParse(row.story).success) return deny('story_ineligible');
+    if (reviewedFullRepair) {
+      if (!row.eligible) return deny('story_ineligible');
+      return { allowed:true };
+    }
     if (operation === 'edit') {
       const sent = publicationSnapshotSchema.parse((await client.query<{ content: unknown }>(
         'SELECT content FROM publication_snapshots WHERE id=$1', [row.snapshot_id])).rows[0]?.content);

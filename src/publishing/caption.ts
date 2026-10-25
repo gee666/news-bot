@@ -22,7 +22,7 @@ export function renderCaption(content: unknown, limit = CAPTION_LIMIT, legacyBud
   const snapshot = parsed.data;
   return renderValidatedSnapshot({ ...snapshot,
     headline: shorten(snapshot.headline, 140),
-    sources: orderSources(snapshot.sources).slice(0, LEGACY_CAPTION_SOURCE_LIMIT).map(source => ({ ...source,
+    sources: orderSources(snapshot.sources).filter(source => !source.unverifiedPublication).slice(0, LEGACY_CAPTION_SOURCE_LIMIT).map(source => ({ ...source,
       label: shorten(source.label, 48),
     })),
     ...(snapshot.earlier ? { earlier: shorten(snapshot.earlier, 120) } : {}),

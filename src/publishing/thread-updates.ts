@@ -23,6 +23,7 @@ export async function prepareThreadUpdates(destinationId: string, latestPublicat
       WHERE p.destination_id=$1 AND ${delivered}
         AND (sent.content ? 'updatedTo' OR sent.content->'sources' @> '[{"previousPublication":true}]'::jsonb
           OR sent.content->'sources' @> '[{"relatedPublication":true}]'::jsonb
+          OR sent.content->'sources' @> '[{"unverifiedPublication":true}]'::jsonb
           OR (sent.content ? 'earlier' AND NOT sent.content ? 'navigationVersion')
           OR EXISTS(SELECT 1 FROM story_relations r WHERE r.relation IN ('same','related')
             AND (r.lower_story_id=p.story_id OR r.upper_story_id=p.story_id))
@@ -32,10 +33,17 @@ export async function prepareThreadUpdates(destinationId: string, latestPublicat
         AND NOT EXISTS(SELECT 1 FROM publication_navigation_parts n WHERE n.publication_id=p.id AND n.status IN ('running','unknown'))
       ORDER BY p.id FOR UPDATE OF p`, [destinationId]);
     for (const row of rows.rows) {
+      if (row.pending_snapshot_id && (await client.query(`SELECT 1 FROM operational_state
+        WHERE key LIKE 'publication_action:%' AND value ? 'fullContentRepair'
+          AND value->>'publicationId'=$1 AND value->>'desiredSnapshotId'=$2`,[row.id,row.pending_snapshot_id])).rows.length) continue;
       const sent = publicationSnapshotSchema.parse(row.content);
       const desired = await desiredNavigation(client,row,sent);
-      // A first metadata stamp alone is not a reason to edit an unchanged Telegram post.
-      if (!sent.earlier && snapshotHash({ ...sent,navigationVersion:undefined }) === snapshotHash({ ...desired,navigationVersion:undefined })) continue;
+      // Version 2 hides audit-only links and normalizes the confirmed-related heading even if links are unchanged.
+      const refreshLegacyNavigation = sent.navigationVersion !== 2
+        && sent.sources.some(source => source.unverifiedPublication || source.relatedPublication);
+      // Other metadata-only stamps do not justify a Telegram edit.
+      if (!refreshLegacyNavigation && !sent.earlier
+        && snapshotHash({ ...sent,navigationVersion:undefined }) === snapshotHash({ ...desired,navigationVersion:undefined })) continue;
       const pending = publicationSnapshotSchema.safeParse(row.pending_content);
       if (pending.success && !navigationOnlyChange(sent,pending.data)) continue;
       if (pending.success && snapshotHash(pending.data) === snapshotHash(desired)) continue;

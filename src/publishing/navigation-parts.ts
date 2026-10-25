@@ -1,6 +1,6 @@
 import type { PoolClient } from 'pg';
 import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js';
-import { cleanLegacyHeadings, renderStoredPublication } from './message-render.js';
+import { cleanLegacyHeadings, renderStoredPublication, withoutUpdateMarker } from './message-render.js';
 import { renderFullText, renderedMessageSchema } from './full-text.js';
 import { isNavigationSource } from './navigation.js';
 import { stripNavigationTail } from './navigation-tail.js';
@@ -48,14 +48,38 @@ export async function prepareNavigationParts(client: Pick<PoolClient,'query'>, p
     if (JSON.stringify(original)!==JSON.stringify(cleaned)) desired.set(`cleanup:${part.part_number}`,
       { content:cleaned,messageId:part.message_id,textPart:part.part_number });
   }
-  for (const [index,part] of footers.entries()) desired.set(`footer:${index}`,{ content:part,messageId:null,textPart:null });
-  const old = await client.query<{ slot: string; content: unknown; message_id: string | null; status: string }>(
-    'SELECT slot,content,message_id,status FROM publication_navigation_parts WHERE publication_id=$1 FOR UPDATE',[publicationId]);
-  for (const part of old.rows) {
-    if (desired.has(part.slot) || !part.slot.startsWith('footer:')) continue;
+  const old = await client.query<{ slot: string; content: unknown; snapshot_content:unknown; message_id: string | null; status: string }>(
+    `SELECT n.slot,n.content,s.content AS snapshot_content,n.message_id,n.status FROM publication_navigation_parts n
+      JOIN publication_snapshots s ON s.id=n.snapshot_id WHERE n.publication_id=$1 ORDER BY n.slot FOR UPDATE OF n`,[publicationId]);
+  const oldFooters=old.rows.filter(part=>part.slot.startsWith('footer:'))
+    .sort((left,right)=>Number(left.slot.slice(7))-Number(right.slot.slice(7)));
+  const frozenFooters=oldFooters.filter(part=>part.message_id && JSON.stringify(part.content)!==JSON.stringify(emptyNavigation));
+  const strippedFooters=stripNavigationTail(frozenFooters.map(part=>withoutUpdateMarker(renderedMessageSchema.parse(part.content),
+    publicationSnapshotSchema.parse(part.snapshot_content).updatedTo)),
+    frozenFooters.flatMap(part=>publicationSnapshotSchema.parse(part.snapshot_content).sources).filter(isNavigationSource));
+  const cleanedFooters=new Map(frozenFooters.map((part,index)=>[part.slot,strippedFooters[index]]));
+  for (const part of oldFooters) {
     if (!part.message_id) {
-      await client.query("DELETE FROM publication_navigation_parts WHERE publication_id=$1 AND slot=$2 AND status NOT IN ('running','unknown')",[publicationId,part.slot]);
-    } else desired.set(part.slot,{ content:emptyNavigation,messageId:part.message_id,textPart:null });
+      const footer=footers.shift();
+      if (footer) desired.set(part.slot,{ content:footer,messageId:null,textPart:null });
+      else await client.query("DELETE FROM publication_navigation_parts WHERE publication_id=$1 AND slot=$2 AND status NOT IN ('running','unknown')",[publicationId,part.slot]);
+      continue;
+    }
+    const original=renderedMessageSchema.parse(part.content);
+    let cleaned=cleanLegacyHeadings(cleanedFooters.get(part.slot)??original);
+    if (JSON.stringify(cleaned)===JSON.stringify(emptyNavigation)) cleaned={ ...cleaned,text:'',plainText:'',links:[] };
+    const footer=footers[0];
+    if (footer) {
+      const combined=append(cleaned,footer);
+      if (fits(combined)) { cleaned=combined; footers.shift(); }
+    }
+    // Retired overflow replies may contain frozen source/body prefixes. Never replace those with a placeholder.
+    desired.set(part.slot,{ content:cleaned.plainText ? cleaned : emptyNavigation,messageId:part.message_id,textPart:null });
+  }
+  let index=0;
+  for (const part of footers) {
+    while (desired.has(`footer:${index}`)) index++;
+    desired.set(`footer:${index++}`,{ content:part,messageId:null,textPart:null });
   }
   for (const [slot,part] of desired) {
     await client.query(`INSERT INTO publication_navigation_parts(publication_id,slot,snapshot_id,content,message_id,text_part_number)

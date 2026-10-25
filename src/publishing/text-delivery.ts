@@ -7,6 +7,7 @@ import { telegramTimeouts } from './telegram-transport.js';
 import { destination, publicationSelect, rateLimited, type Publication } from './store.js';
 import { render, type RenderedMessage } from './render.js';
 import { contentFingerprint } from './reconciliation.js';
+import { fullRepairContinuation } from './approval.js';
 
 interface TextPart {
   part_number: number; content: unknown; status: string; attempt_count: number; next_retry_at: Date | null;
@@ -43,7 +44,9 @@ export async function preparePublicationText(publication: Publication): Promise<
 
 /** Match media delivery policy: finish already-started frozen work, never send ambiguous parts twice. */
 export async function deliverPublicationText(publication: Publication, api: BotApi, settings: AppSettings): Promise<boolean> {
-  if (!publication.message_id || publication.status !== 'published' || publication.delivery_kind === 'album') return false;
+  if (!publication.message_id || publication.status !== 'published') return false;
+  const fullRepairId = publication.delivery_kind === 'album' ? await fullRepairContinuation(db,publication) : null;
+  if (publication.delivery_kind === 'album' && !fullRepairId) return false;
   const botId = String((await api.identity()).id);
   if (publication.bot_id !== botId) return false;
   const parts = (await db.query<TextPart>(`SELECT * FROM publication_text_parts WHERE publication_id=$1 AND part_number>0 ORDER BY part_number`, [publication.id])).rows;
@@ -57,19 +60,23 @@ export async function deliverPublicationText(publication: Publication, api: BotA
     const operation = `send_part:${part.part_number}`;
     const attemptId = await transaction(async client => {
       await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
-      const owner = await client.query(`SELECT 1 FROM publications p WHERE p.id=$1 AND p.status='published' AND p.message_id=$2
+      const owner = await client.query<Publication>(`SELECT p.*,s.content FROM publications p
+        JOIN publication_snapshots s ON s.id=p.snapshot_id WHERE p.id=$1 AND p.status='published' AND p.message_id=$2
         AND p.destination_id=$3 AND p.bot_id=$4
         AND NOT EXISTS(SELECT 1 FROM operational_state WHERE key='publication_removal:'||p.id::text)
-        AND NOT EXISTS(SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=p.id AND status<>'failed') FOR UPDATE`,
+        AND NOT EXISTS(SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=p.id AND status<>'failed') FOR UPDATE OF p`,
       [publication.id,publication.message_id,publication.destination_id,botId]);
-      if (!owner.rows.length || await rateLimited(client)) return null;
+      const owned = owner.rows[0];
+      if (!owned || owned.snapshot_id !== publication.snapshot_id || await rateLimited(client)) return null;
+      if (owned.delivery_kind === 'album' && (!fullRepairId || await fullRepairContinuation(client,owned) !== fullRepairId)) return null;
       const claimed = await client.query(`UPDATE publication_text_parts SET status='running',attempt_count=attempt_count+1,
         error_code=NULL,next_retry_at=NULL WHERE publication_id=$1 AND part_number=$2 AND status IN ('prepared','retryable')
         AND (next_retry_at IS NULL OR next_retry_at<=now()) RETURNING part_number`, [publication.id,part.part_number]);
       if (!claimed.rows.length) return null;
       return (await client.query<{ id: string }>(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status,response_metadata)
         SELECT $1,'telegram-bot',$2,coalesce(max(attempt_number),0)+1,'running',$3 FROM request_attempts WHERE publication_id=$1 RETURNING id`,
-      [publication.id,operation,JSON.stringify({ ...sendMetadata(message), requestTimeoutMs: telegramTimeouts().requestMs, botId, replyTo: publication.message_id })])).rows[0]?.id ?? null;
+      [publication.id,operation,JSON.stringify({ ...sendMetadata(message), requestTimeoutMs: telegramTimeouts().requestMs, botId, replyTo: publication.message_id,
+        ...(fullRepairId ? { approvalId:fullRepairId,snapshotId:publication.snapshot_id,fullContentRepair:true } : {}) })])).rows[0]?.id ?? null;
     });
     if (!attemptId) return false;
     let messageId: string;

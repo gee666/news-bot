@@ -101,7 +101,7 @@ export async function freezeEditedCanonical(client: Pick<PoolClient,'query'>, pu
     [publication.id,JSON.stringify(canonical),publication.pending_snapshot_id ?? publication.snapshot_id,publication.message_id]);
 }
 
-function withoutUpdateMarker(message: RenderedMessage, updatedTo?: string): RenderedMessage {
+export function withoutUpdateMarker(message: RenderedMessage, updatedTo?: string): RenderedMessage {
   if (!updatedTo) return message;
   const prefix=`UPD: ${updatedTo}\n\n`;
   const htmlPrefix=`UPD: <a href="${escapeHtml(updatedTo)}">${escapeHtml(updatedTo)}</a>\n\n`;

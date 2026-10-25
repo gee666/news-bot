@@ -27,7 +27,8 @@ function status(source: PublicationSource): string {
     source.access === 'restricted' ? 'доступ ограничен' : source.access === 'unavailable' ? 'недоступно' : ''].filter(Boolean).join(', ');
 }
 function sourceEntityCount(snapshot: PublicationSnapshot): number {
-  return 1 + snapshot.sources.length + new Set(snapshot.sources.map(sourceGroup)).size;
+  const visible = snapshot.sources.filter(source => !source.unverifiedPublication);
+  return 1 + visible.length + new Set(visible.map(sourceGroup)).size;
 }
 function sourceSections(snapshot: PublicationSnapshot, compact: boolean): { text: string; plainText: string; links: SourceLink[] } {
   let text = ''; let plainText = ''; let number = 0;

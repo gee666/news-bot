@@ -23,10 +23,16 @@ function sourceLabel(source: PublicationSource): string {
 }
 
 /** Split decoded text, never raw HTML. Every source and every UTF-16 character survives. */
-export function renderFullText(content: unknown, sourcesOnly = false): RenderedMessage[] {
+export function renderFullText(content: unknown, sourcesOnly = false, firstLimit?: number): RenderedMessage[] {
+  if (firstLimit !== undefined && (!Number.isInteger(firstLimit) || firstLimit < 2 || firstLimit > MESSAGE_LIMIT))
+    throw new PublicationRenderError('publication_message_too_long');
   const parsed = publicationSnapshotSchema.safeParse(content);
   if (!parsed.success) throw new PublicationRenderError('publication_snapshot_invalid');
   const snapshot = parsed.data;
+  // Preserve legacy default fingerprints; explicit caption budgets must include any UPD prefix.
+  const firstBodyLimit = firstLimit === undefined ? FIRST_MESSAGE_LIMIT
+    : firstLimit - (snapshot.updatedTo ? `UPD: ${snapshot.updatedTo}\n\n`.length : 0);
+  if (firstBodyLimit < 2) throw new PublicationRenderError('publication_message_too_long');
   const messages: RenderedMessage[] = [];
   let message = emptyMessage();
   let entities = 0;
@@ -34,7 +40,7 @@ export function renderFullText(content: unknown, sourcesOnly = false): RenderedM
   const append = (value: string, kind?: 'bold' | 'link', url?: string) => {
     let remaining = value;
     while (remaining) {
-      const limit = messages.length ? MESSAGE_LIMIT : FIRST_MESSAGE_LIMIT;
+      const limit = messages.length ? MESSAGE_LIMIT : firstBodyLimit;
       const room = limit - message.plainText.length;
       if (!room || kind && entities >= ENTITY_LIMIT) { flush(); continue; }
       let length = Math.min(remaining.length, room);
@@ -62,14 +68,14 @@ export function renderFullText(content: unknown, sourcesOnly = false): RenderedM
   for (const group of SOURCE_GROUPS) {
     const selected = sources.filter(source => sourceGroup(source) === group.kind);
     if (!selected.length) continue;
-    const room=(messages.length ? MESSAGE_LIMIT : FIRST_MESSAGE_LIMIT)-message.plainText.length;
+    const room=(messages.length ? MESSAGE_LIMIT : firstBodyLimit)-message.plainText.length;
     if (message.plainText && room<group.heading.length+2) flush();
     append('\n\n'); append(group.heading, 'bold');
     for (const source of selected) { append('\n'); append(sourceLabel(source), 'link', source.url); }
   }
   flush();
   if (sourcesOnly && snapshot.updatedTo && !messages.length) messages.push(emptyMessage());
-  if (snapshot.updatedTo && messages[0]) messages[0] = withUpdateMarker(messages[0], snapshot.updatedTo);
+  if (snapshot.updatedTo && messages[0]) messages[0] = withUpdateMarker(messages[0], snapshot.updatedTo, firstLimit ?? MESSAGE_LIMIT);
   return messages;
 }
 

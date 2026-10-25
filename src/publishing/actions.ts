@@ -17,6 +17,8 @@ export async function executeReviewedAction(id: string, api = new BotApi()): Pro
   return locked('news-bot-digest', async () => {
     const action = await loadAction(db,id);
     if (!action) throw new Error('Publication action approval missing');
+    // Full-content media repairs require their own explicit, lossless executor.
+    if (action.operation === 'edit' && action.fullContentRepair) return false;
     if (action.state === 'completed') return true;
     if (action.state !== 'approved' || Date.parse(action.expiresAt) <= Date.now()) return false;
     return locked(`news-bot-publication:${action.publicationId}`,async () => {

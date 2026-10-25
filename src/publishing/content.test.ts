@@ -24,7 +24,8 @@ function client(options: { receipt?: object; primary?: string[]; referenced?: st
     if (sql.includes('jsonb_array_elements_text')) return { rows: (options.primary ?? []).map(url => ({ url })) };
     if (sql.includes('SELECT DISTINCT l.url')) return { rows: (options.referenced ?? []).map(url => ({ url })) };
     if (sql.includes("key='telegram_destination'")) return { rows: [{ id: '-100123' }] };
-    if (sql.includes('publication_thread_edges')) return { rows: (options.posts ?? []).map(post => ({ ...post, destination_id: '-100123' })) };
+    if (sql.includes('SELECT p.story_id,snap.content,p.destination_id,p.message_id'))
+      return { rows: (options.posts ?? []).map(post => ({ ...post, destination_id: '-100123' })) };
     return { rows: [] };
   });
   return { query };
