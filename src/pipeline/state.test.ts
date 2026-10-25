@@ -54,7 +54,7 @@ it.each(['waiting','failed'])('does not redispatch a %s stage', async status => 
   mocks.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [saved({ status,
     next_retry_at: status==='waiting' ? new Date(Date.now()+60_000) : null })] });
   const run = vi.fn();
-  await expect(stage(id, { storyId: id }, 'research', defaultSettings, z.boolean(), run))
+  await expect(stage(id, { revisionId: id }, 'extract', defaultSettings, z.boolean(), run))
     .rejects.toBeInstanceOf(status==='waiting' ? Waiting : FailedStageError);
   expect(run).not.toHaveBeenCalled();
 });

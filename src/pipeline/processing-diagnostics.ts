@@ -30,7 +30,7 @@ const constraints = new Set(['one_active_batch', 'one_active_embedding_config', 
   'stage_state_story_id_fkey', 'stage_state_revision_id_fkey', 'stories_interest_score_check',
   'model_cache_kind_input_hash_model_key_prompt_version_key', 'story_evidence_role_check', 'story_evidence_relevance_check',
   'item_revisions_item_id_content_hash_key', 'story_mentions_revision_id_ordinal_key']);
-const pipelineFiles = `batches state stories story-postconditions story-failures processing-settings item-failures eligibility judgments
+const pipelineFiles = `batches state stories story-failures item-failures eligibility judgments
   generation generation-store generation-freshness generation-model generation-budget generation-verification
   evidence-brief evidence-brief-cache evidence-brief-schema evidence-brief-wire evidence-brief-resolution
   evidence-brief-identity evidence-brief-framing evidence-brief-completeness evidence-brief-verification

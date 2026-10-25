@@ -1,9 +1,9 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { cleanSourceUrl } from '../source-url.js';
 import { cleanArticle } from '../sources/article.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
-import { publicUrl, ResearchFetchError } from './research-fetch.js';
+import { envInteger, fetchPublic, type FetchedResponse, publicUrl, ResearchFetchError } from './research-fetch.js';
 import { fetchCrawlerPage } from './crawler-client.js';
-import { readHttp } from './research-http.js';
 import { readArxiv } from './research-arxiv.js';
 export { searchPages } from './research-search.js';
 
@@ -149,3 +149,17 @@ async function fetchReadPage(url: string): Promise<ResearchPage> {
   }
 }
 
+
+/** Retry transport failures and temporary server errors, never permissions, unsafe URLs or size limits. */
+export async function readHttp(url: string): Promise<FetchedResponse> {
+  const attempts = envInteger('RESEARCH_HTTP_MAX_ATTEMPTS', 2, 3);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetchPublic(url);
+      if (attempt === attempts || ![408, 429, 500, 502, 503, 504].includes(response.status)) return response;
+    } catch (error) {
+      if (!(error instanceof ResearchFetchError) || error.code !== 'fetch_failed' || attempt === attempts) throw error;
+    }
+    await delay(Math.min(1000, 250 * attempt));
+  }
+}

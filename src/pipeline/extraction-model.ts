@@ -33,13 +33,8 @@ export async function extractEvents(text: string, generator: TextGenerator,
     validationCodes: (value: z.infer<typeof validator>) => selectionValidationCodes(text, units, value),
     responseSchema: { name: 'news_event_parts', schema: z.toJSONSchema(validator, { reused: 'ref' }) },
   };
-  const first = await generateStructured(generator, request, context, recordFailure);
-  const reviewed = await generateStructured(generator, {
-    ...request,
-    systemPrompt: extractionPrompt + '\nIndependently review the proposed partition against the WHOLE source. Enforce ONE event for its main topic, based on the headline/opening framing; merge proposed events that split a single research post, paper or article. Demos, tools/models used in demos, components, related products and secondary paragraphs must be parts/context of that main event or explicitly omitted, never separate events. Only an explicit roundup/digest listing unrelated news permits separate list-item events; a secondary-product paragraph is not a roundup. Restore missing main-topic details, pricing/access changes and uncertainty, not side-topic events. Remove historical background promoted to news. Check every omission, including events=[]; never discard news because channel history might contain it.',
-    prompt: request.prompt + '\nProposed partition:\n' + JSON.stringify(first.value),
-  }, { ...context, operationId: context.operationId + ':review' }, recordFailure);
-  const events = selectedEvents(text, units, reviewed.value);
+  const result = await generateStructured(generator, request, context, recordFailure);
+  const events = selectedEvents(text, units, result.value);
   if (!events) throw new Error('Validated extraction is inconsistent');
   return events;
 }

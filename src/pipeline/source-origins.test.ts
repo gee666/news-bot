@@ -1,5 +1,5 @@
 import {beforeEach,expect,it,vi} from 'vitest';
-import {classifySourceOrigins} from './source-origins.js';
+import {classifySourceOrigins} from './generation.js';
 import {modelResult,storyInput,evidenceDocument} from './generation.test-helpers.js';
 vi.mock('./generation-model.js',()=>({recordGenerationFailure:vi.fn()}));
 const generate=vi.fn();

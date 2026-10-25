@@ -127,20 +127,21 @@ it('does not cache incomplete classifications or reuse changed evidence', async 
   await groupReport(incoming,candidates,defaultSettings,context,generator);
   expect(generator.generate).toHaveBeenCalledTimes(3);
 });
-it('rechecks same matches across chunks before allowing a merge', async () => {
-  vi.stubEnv('GROUPING_MAX_CANDIDATES', '1');
+it.each([1, 2])('attaches only to the highest-ranked same candidate with chunk size %i', async size => {
+  vi.stubEnv('GROUPING_MAX_CANDIDATES', String(size));
   const incoming = report('Broad recap');
-  const candidates = [report('A discovered a bug'), report('B shut down a game')];
+  const candidates = [report('A discovered a bug'), report('B shut down a game'), report('Other release')];
   const generator = { generate: vi.fn(async (request: PiRequest) => {
     const chunk = JSON.parse(request.prompt) as { incoming: EventInput; candidates: EventInput[] };
-    return modelResult({ matches: chunk.candidates.map(candidate => ({ storyId: candidate.id,
-      relation: chunk.incoming.id === incoming.id ? 'same' : 'related' })) });
+    expect(chunk.incoming.id).toBe(incoming.id);
+    return modelResult({ matches: [...chunk.candidates].reverse().map(candidate => ({ storyId: candidate.id, relation: 'same' })) });
   }) };
-  // A conflict must fail closed; neither group may be attached or merged.
-  const { generationError } = await import('./generation-model.js');
-  vi.mocked(generationError).mockRejectedValueOnce(new Error('bridge conflict'));
-  await expect(groupReport(incoming,candidates,defaultSettings,context,generator)).rejects.toThrow('bridge conflict');
-  expect(generator.generate).toHaveBeenCalledTimes(3);
+  const decisions = await groupReport(incoming,candidates,defaultSettings,context,generator);
+  expect(decisions.filter(decision => decision.relation === 'same')).toEqual([{ storyId: candidates[0]?.id, relation: 'same' }]);
+  expect(decisions.filter(decision => decision.relation === 'related')).toEqual(candidates.slice(1).map(candidate => ({
+    storyId: candidate.id, relation: 'related', relatedPromptVersion: 'duplicate-v6',
+  })));
+  expect(generator.generate).toHaveBeenCalledTimes(Math.ceil(candidates.length / size));
 });
 it('bounds repair evidence without appending an oversized invalid response', async () => {
   const incoming = report('Release');

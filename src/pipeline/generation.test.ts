@@ -23,7 +23,6 @@ vi.mock('./generation-model.js', async original => ({
 vi.mock('../db.js', () => ({ db: { query: vi.fn().mockResolvedValue({ rows: [] }) } }));
 vi.mock('./publication-thread.js', () => ({ publishedThread: vi.fn(async () => []), rebaseFollowup: vi.fn(),
 }));
-vi.mock('./source-origins.js',()=>({classifySourceOrigins:async()=>[]}));
 vi.mock('./research.js', async original => ({
   ...await original<typeof import('./research.js')>(), researchEvidence: async () => [evidenceDocument()],
 }));
@@ -37,7 +36,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.input.mockResolvedValue(storyInput());
   vi.mocked(alreadyGenerated).mockResolvedValue(false);
-  vi.mocked(generationClient).mockResolvedValue({ generate: mocks.generate });
+  vi.mocked(generationClient).mockResolvedValue({
+    generate: (request, context) => request.responseSchema?.name === 'source_origins'
+      ? Promise.resolve(modelResult({ primary_urls: [] })) : mocks.generate(request, context),
+  });
   mocks.generate.mockReset();
 });
 

@@ -75,26 +75,11 @@ export async function groupReport(incoming: EventInput, candidates: readonly Eve
   const budget = groupingBudget();
   const chunks = await chunksFor(incoming, candidates, budget, context);
   const decisions: Matches = [];
-  const sameChunks: EventInput[][] = [];
-  for (const chunk of chunks) {
-    const matches = await compare(incoming, chunk, settings, context, generator);
-    decisions.push(...matches);
-    const sameIds = new Set(matches.filter(match => match.relation === 'same').map(match => match.storyId));
-    sameChunks.push(chunk.filter(candidate => sameIds.has(candidate.id)));
-  }
-  // A broad incoming recap must not bridge distinct events from different chunks.
-  // Each same pair across chunks must independently pass the specific-headline test.
-  for (let index = 0; index < sameChunks.length; index++) {
-    const earlier = sameChunks.slice(0, index).flat();
-    if (!earlier.length) continue;
-    for (const candidate of sameChunks[index] ?? []) {
-      for (const chunk of await chunksFor(candidate, earlier, budget, context)) {
-        const checked = await compare(candidate, chunk, settings, context, generator);
-        if (checked.some(match => match.relation !== 'same')) {
-          return generationError(context.id, 'invalid_output', 'Grouping would bridge distinct events across request chunks.');
-        }
-      }
-    }
+  for (const chunk of chunks) decisions.push(...await compare(incoming, chunk, settings, context, generator));
+  // Candidate order is the ranking order, even if a model returns decisions in another order.
+  const firstSame = candidates.find(candidate => decisions.some(decision => decision.storyId === candidate.id && decision.relation === 'same'));
+  for (const decision of decisions) {
+    if (decision.relation === 'same' && decision.storyId !== firstSame?.id) decision.relation = 'related';
   }
   return decisions.map(decision => decision.relation === 'related'
     ? { ...decision,relatedPromptVersion:jevTemplates.duplicate.version } : decision);

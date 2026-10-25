@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { readHttp } from './research-http.js';
+import { readHttp } from './research-page.js';
 import { fetchPublic, ResearchFetchError } from './research-fetch.js';
 vi.mock('./research-fetch.js', async importOriginal => ({
   ...await importOriginal<typeof import('./research-fetch.js')>(), fetchPublic: vi.fn(),

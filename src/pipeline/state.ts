@@ -51,23 +51,20 @@ export function retryDecision(error: unknown, attempt: number, settings: AppSett
   };
 }
 
-export async function stage<T>(batchId: string, owner: { revisionId: string } | { storyId: string },
+export async function stage<T>(batchId: string, owner: { revisionId: string },
   name: string, settings: AppSettings, validator: z.ZodType<T>, run: (context: StageContext) => Promise<T>): Promise<T> {
-  const revisionId = 'revisionId' in owner ? owner.revisionId : null;
-  const storyId = 'storyId' in owner ? owner.storyId : null;
+  const { revisionId } = owner;
+  const storyId = null;
   await db.query(`INSERT INTO stage_state(batch_id,revision_id,story_id,stage) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
     [batchId, revisionId, storyId, name]);
   const selected = await db.query(`SELECT id,status,attempts,output,next_retry_at,error_code FROM stage_state
     WHERE batch_id=$1 AND revision_id IS NOT DISTINCT FROM $2::uuid AND story_id IS NOT DISTINCT FROM $3::uuid AND stage=$4`,
   [batchId, revisionId, storyId, name]);
   let saved = stageSchema.parse(selected.rows[0]);
-  if (storyId) await db.query(`UPDATE stage_state SET status='skipped',next_retry_at=NULL,updated_at=now()
-    WHERE batch_id=$1 AND story_id=$2 AND stage<>$3 AND split_part(stage,':',1)=$4
-      AND status IN ('pending','waiting','running')`, [batchId, storyId, name, name.split(':')[0]]);
   // A revision can belong to several collection snapshots. They share one retry
   // budget and inference receipt rather than buying fresh attempts per batch.
   // Reconciliation reads mutable story state, so it must run for each snapshot.
-  if (revisionId && name!=='reconcile_edit' && saved.status!=='completed') {
+  if (name!=='reconcile_edit' && saved.status!=='completed') {
     const previous = await db.query(`SELECT id,status,attempts,output,next_retry_at,error_code FROM stage_state
       WHERE revision_id=$1 AND stage=$2 AND batch_id<>$3 AND status IN ('completed','waiting','failed')
       ORDER BY (status='completed') DESC,attempts DESC,updated_at DESC LIMIT 1`, [revisionId,name,batchId]);

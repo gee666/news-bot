@@ -77,7 +77,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
-  it('refreshes completed v1 output through representative-v3 and current generation persisted stages', async () => {
+  it('refreshes old output without adding story-stage receipts', async () => {
     const { finishBatchStories } = await import('./stories.js');
     const { Judgments } = await import('./judgments.js');
     const { Vectors } = await import('./vectors.js');
@@ -253,7 +253,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
     const judgments=new Judgments(settings);
     try {await refreshDigest(settings,judgments,[storyId]);} finally {await judgments.close();}
     await database.db.query("UPDATE judgments SET model_key=$2 WHERE story_id=$1 AND stage='interest'",[storyId,`${settings.piProvider}/${settings.piModel}`]);
-    const {storyPostconditions}=await import('./story-postconditions.js');
+    const {storyPostconditions}=await import('./stories.js');
     expect((await storyPostconditions(storyId,settings)).rankingCurrent).toBe(true);
     await database.db.query("UPDATE judgments SET model_key='unrelated/model' WHERE story_id=$1 AND stage='interest'",[storyId]);
     expect((await storyPostconditions(storyId,settings)).rankingCurrent).toBe(false);
