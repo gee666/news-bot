@@ -5,13 +5,13 @@ import { stripNavigationTail } from './navigation-tail.js';
 import { publicationSnapshotSchema } from '../types.js';
 import { snapshotHash } from './approval.js';
 import { renderCaption, CAPTION_LIMIT } from './caption.js';
-import { renderFullText, renderedMessageSchema, withUpdateMarker } from './full-text.js';
-import { escapeHtml, PublicationRenderError, render, type RenderedMessage } from './render.js';
+import { renderFullText, renderedMessageSchema, updateMarkerPrefix, withUpdateMarker, type UpdateMarkerOptions } from './full-text.js';
+import { PublicationRenderError, render, type RenderedMessage } from './render.js';
 import type { Publication } from './store.js';
 
 /** Edits may change the canonical part, never silently rewrite or discard continuations. */
 export async function renderStoredPublication(client: Pick<PoolClient,'query'>, id: string, content: unknown,
-  deliveryKind: 'text' | 'album' = 'text'): Promise<RenderedMessage> {
+  deliveryKind: Publication['delivery_kind'] = 'text'): Promise<RenderedMessage> {
   const parsed = publicationSnapshotSchema.safeParse(content);
   if (!parsed.success) throw new PublicationRenderError('publication_snapshot_invalid');
   const snapshot = parsed.data;
@@ -25,7 +25,7 @@ export async function renderStoredPublication(client: Pick<PoolClient,'query'>, 
   if (navigationOnlyChange(sent,snapshot)) {
     const base = first ? renderedMessageSchema.parse(first.content)
       : deliveryKind === 'album' ? renderCaption(sent,CAPTION_LIMIT,true) : render(sent,{ legacyBudget:true });
-    const originals=[cleanLegacyHeadings(withoutUpdateMarker(base,sent.updatedTo)),...parts.slice(1).map(part=>renderedMessageSchema.parse(part.content))];
+    const originals=[cleanLegacyHeadings(withoutUpdateMarker(base,sent.updatedTo,{ presentationVersion:sent.presentationVersion,headline:sent.updatedToHeadline })),...parts.slice(1).map(part=>renderedMessageSchema.parse(part.content))];
     const navigationSources=[...sent.sources,...parts.flatMap(part=>publicationSnapshotSchema.parse(part.snapshot_content).sources)].filter(isNavigationSource);
     let message=stripNavigationTail(originals,navigationSources)[0];
     if (!message) throw new PublicationRenderError('publication_snapshot_invalid');
@@ -41,11 +41,14 @@ export async function renderStoredPublication(client: Pick<PoolClient,'query'>, 
     }
     if (message.plainText.length > limit || message.links.length+(message.text.match(/<b>/gu)?.length ?? 0)>98)
       throw new PublicationRenderError('publication_message_too_long');
-    if (snapshot.updatedTo && (!snapshot.navigationOverflow || message.plainText.length+`UPD: ${snapshot.updatedTo}\n\n`.length<=limit))
-      return withUpdateMarker(message,snapshot.updatedTo,limit);
+    const markerOptions = { presentationVersion:snapshot.presentationVersion,headline:snapshot.updatedToHeadline };
+    if (snapshot.updatedTo && (!snapshot.navigationOverflow
+      || message.plainText.length+updateMarkerPrefix(snapshot.updatedTo,markerOptions).plainText.length<=limit))
+      return withUpdateMarker(message,snapshot.updatedTo,limit,markerOptions);
     return message;
   }
-  const markerLength = snapshot.updatedTo ? `UPD: ${snapshot.updatedTo}\n\n`.length : 0;
+  const markerOptions = { presentationVersion:snapshot.presentationVersion,headline:snapshot.updatedToHeadline };
+  const markerLength = snapshot.updatedTo ? updateMarkerPrefix(snapshot.updatedTo,markerOptions).plainText.length : 0;
   let message: RenderedMessage;
   if (first) {
     if (snapshotHash({ ...sent, updatedTo: undefined }) === snapshotHash({ ...snapshot, updatedTo: undefined })) {
@@ -63,7 +66,7 @@ export async function renderStoredPublication(client: Pick<PoolClient,'query'>, 
   } else {
     message = deliveryKind === 'album' ? renderCaption(snapshot,limit-markerLength) : render(snapshot,{ limit:limit-markerLength });
   }
-  return snapshot.updatedTo ? withUpdateMarker(message,snapshot.updatedTo,limit) : message;
+  return snapshot.updatedTo ? withUpdateMarker(message,snapshot.updatedTo,limit,markerOptions) : message;
 }
 
 /** Remove only known legacy headings; all body text and link targets survive. */
@@ -93,20 +96,20 @@ export async function renderPublication(publication: Publication): Promise<Rende
 
 /** Save successful explicit first-part repairs without baking an UPD prefix into the base text. */
 export async function freezeEditedCanonical(client: Pick<PoolClient,'query'>, publication: Publication, message: RenderedMessage): Promise<void> {
-  const { updatedTo } = publicationSnapshotSchema.parse(publication.content);
-  const canonical = withoutUpdateMarker(message,updatedTo);
+  const { updatedTo, presentationVersion, updatedToHeadline } = publicationSnapshotSchema.parse(publication.content);
+  const canonical = withoutUpdateMarker(message,updatedTo,{ presentationVersion,headline:updatedToHeadline });
   await client.query(`INSERT INTO publication_text_parts(publication_id,part_number,content,snapshot_id,status,message_id)
     VALUES($1,0,$2,$3,'sent',$4) ON CONFLICT(publication_id,part_number) DO UPDATE
       SET content=EXCLUDED.content,snapshot_id=EXCLUDED.snapshot_id`,
     [publication.id,JSON.stringify(canonical),publication.pending_snapshot_id ?? publication.snapshot_id,publication.message_id]);
 }
 
-export function withoutUpdateMarker(message: RenderedMessage, updatedTo?: string): RenderedMessage {
+export function withoutUpdateMarker(message: RenderedMessage, updatedTo?: string, options: UpdateMarkerOptions = {}): RenderedMessage {
   if (!updatedTo) return message;
-  const prefix=`UPD: ${updatedTo}\n\n`;
-  const htmlPrefix=`UPD: <a href="${escapeHtml(updatedTo)}">${escapeHtml(updatedTo)}</a>\n\n`;
-  if (!message.plainText.startsWith(prefix) || !message.text.startsWith(htmlPrefix)
-    || message.links[0]?.offset!==5 || message.links[0].url!==updatedTo) return message;
-  return { ...message,text:message.text.slice(htmlPrefix.length),plainText:message.plainText.slice(prefix.length),
-    links:message.links.slice(1).map(link => ({ ...link,offset:link.offset-prefix.length })) };
+  const prefix=updateMarkerPrefix(updatedTo,options);
+  const link=prefix.links[0]; const actual=message.links[0];
+  if (!message.plainText.startsWith(prefix.plainText) || !message.text.startsWith(prefix.text)
+    || !link || !actual || actual.offset!==link.offset || actual.length!==link.length || actual.url!==updatedTo) return message;
+  return { ...message,text:message.text.slice(prefix.text.length),plainText:message.plainText.slice(prefix.plainText.length),
+    links:message.links.slice(1).map(link => ({ ...link,offset:link.offset-prefix.plainText.length })) };
 }

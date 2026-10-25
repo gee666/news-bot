@@ -64,13 +64,14 @@ describe('durable attachment delivery', () => {
   it('never sends an interrupted, ambiguous or permanently rejected batch again', async () => {
     const send = vi.spyOn(api, 'sendMedia');
     for (const status of ['running', 'unknown', 'failed']) {
-      mocks.query.mockResolvedValueOnce({ rows: [{ id: 'batch', status }] });
+      mocks.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: 'batch', status }] });
       expect(await deliverPublicationMedia(publication, api, enabled)).toBe(false);
     }
     expect(send).not.toHaveBeenCalled();
   });
   it('does not resend earlier successful batches and honors the saved rate limit', async () => {
-    mocks.query.mockResolvedValueOnce({ rows: [
+    mocks.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [
       { id: 'batch1', status: 'sent' },
       { id: 'batch2', status: 'retryable', next_retry_at: new Date(Date.now() + 120_000) },
     ] });

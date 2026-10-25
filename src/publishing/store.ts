@@ -13,7 +13,7 @@ export interface Publication {
   snapshot_id: string; pending_snapshot_id: string | null; format_version: number; bot_id: string | null;
   status: 'prepared' | 'sending' | 'published' | 'uncertain' | 'failed';
   attempt_count: number; created_at: Date; next_retry_at: Date | null; content: unknown;
-  delivery_kind?: 'text' | 'album';
+  delivery_kind?: 'text' | 'album' | 'media_first';
   media_status?: 'none' | 'pending' | 'complete' | 'failed' | 'unknown'; media_snapshot_id?: string | null;
 }
 export const publicationSelect = `SELECT p.*, s.content FROM publications p
@@ -88,6 +88,8 @@ export async function adoptPreparedPublications(settings: AppSettings, destinati
       JOIN stories s ON s.id=coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id)
       WHERE p.destination_id=$1 AND p.status='prepared' AND p.message_id IS NULL
         AND p.story_id IS DISTINCT FROM s.id AND ${eligible}
+        AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation LIKE 'send_media:%')
+        AND NOT EXISTS(SELECT 1 FROM publication_destination_reservations r WHERE r.publication_id=p.id)
         AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='send'
           AND ${unsafeSendAttempt})
       ORDER BY s.id,p.created_at,p.id FOR UPDATE OF p,s`,
@@ -173,6 +175,9 @@ export async function refreshPrepared(publication: Publication, settings: AppSet
       FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id WHERE p.id=$1 FOR UPDATE OF p`,[publication.id])).rows[0];
     if (!current || current.status !== 'prepared' || current.message_id || current.pending_snapshot_id
       || current.snapshot_id !== publication.snapshot_id || current.story_id !== story.id || current.destination_id !== publication.destination_id) return null;
+    const frozen = await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND (operation='send' OR operation LIKE 'send_media:%')
+      UNION ALL SELECT 1 FROM publication_destination_reservations WHERE publication_id=$1`, [publication.id]);
+    if (frozen.rows.length) return publicationSnapshotSchema.parse(current.content);
     const content = await snapshotFor(client,story);
     const previous = publicationSnapshotSchema.safeParse(current.content);
     if (previous.success && JSON.stringify(previous.data) === JSON.stringify(content) && current.snapshot_story_id === story.id) return content;

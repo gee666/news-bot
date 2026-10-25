@@ -5,6 +5,7 @@ import { renderedMessageSchema } from './full-text.js';
 import { contentFingerprint, readMessageFingerprint, sendMetadata } from './reconciliation.js';
 import { publicationAdmission } from './freshness.js';
 import { telegramTimeouts } from './telegram-transport.js';
+import { destinationBlocked } from './destination-order.js';
 import { destination, locked, publicationSelect, rateLimited, type Publication } from './store.js';
 
 interface NavigationPart {
@@ -36,6 +37,7 @@ async function complete(publication: Publication, part: NavigationPart, messageI
 
 /** Only limit overflow uses replies. Ambiguous sends are never resent; edits reconcile exact fingerprints. */
 export async function retryNavigationParts(api: BotApi, settings: AppSettings, destinationId: string, publicationIds?:string[]): Promise<void> {
+  if (await destinationBlocked(destinationId)) return;
   const botId = String((await api.identity()).id);
   const rows = await db.query<{ id: string }>(`SELECT p.id FROM publications p WHERE p.destination_id=$1 AND p.bot_id=$2
     AND p.status='published' AND p.pending_snapshot_id IS NULL AND ($3::uuid[] IS NULL OR p.id=ANY($3))

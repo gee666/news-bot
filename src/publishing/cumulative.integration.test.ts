@@ -175,7 +175,10 @@ describe.skipIf(!url)('cumulative publication delivery in PostgreSQL', () => {
     const items: PublicationMedia[] = Array.from({ length: 24 }, (_, index) => ({ type: index > 20 ? 'video' : 'image',
       mimeType: index > 20 ? 'video/webm' : 'image/png', data: Buffer.from(`Original bytes ${index}`) }));
     media.publicationMedia.mockResolvedValue([...items,items[0]]);
-    const publication = await prepared('Полные факты 😀 '.repeat(800));
+    const preparedPublication = await prepared('Полные факты 😀 '.repeat(800));
+    // Historical snapshots keep text-first delivery and their uncapped attachment plan.
+    await database.db.query("UPDATE publication_snapshots SET content=content-'presentationVersion' WHERE id=$1",[preparedPublication.snapshot_id]);
+    const publication = await load(preparedPublication.id);
     let next = 100;
     const send = vi.spyOn(api,'send').mockImplementation(async () => String(next++));
     const attachment = vi.spyOn(api,'sendMedia').mockImplementation(async (_destination,replyTo,batch) => {

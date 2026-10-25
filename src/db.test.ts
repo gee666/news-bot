@@ -54,6 +54,8 @@ describe('migrate', () => {
     expect(names).toEqual(['001_core.sql', '002_more.sql']);
     expect(mocks.query).toHaveBeenCalledWith('SELECT pg_advisory_lock(736428109)');
     expect(mocks.query).toHaveBeenCalledWith('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public');
+    expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining('%I.schema_migrations'));
+    expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining('current_schema()'));
     expect(mocks.query).toHaveBeenLastCalledWith('SELECT pg_advisory_unlock(736428109)');
     expect(mocks.query.mock.calls.filter(call => call[0] === 'COMMIT')).toHaveLength(2);
     expect(mocks.release).toHaveBeenCalledOnce();

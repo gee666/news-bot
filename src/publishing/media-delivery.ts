@@ -3,6 +3,7 @@ import { getSettings, type AppSettings } from '../settings.js';
 import { releaseStoryMedia } from '../media/story-media.js';
 import { BotApi, BotError, type PublicationMedia } from './bot-api.js';
 import { expirePublicationMedia } from './media-plan.js';
+import { destinationBlocked } from './destination-order.js';
 import { destination, publicationSelect, rateLimited, type Publication } from './store.js';
 
 interface Batch { id: string; status: string; attempt_count: number; next_retry_at: Date | null }
@@ -23,7 +24,8 @@ async function finishMedia(publication: Publication): Promise<boolean> {
 
 /** Only explicit Telegram rejections may be retried. Unknown batches require manual review. */
 export async function deliverPublicationMedia(publication: Publication, api: BotApi, settings: AppSettings): Promise<boolean> {
-  if (publication.delivery_kind === 'album' || !publication.message_id || publication.status !== 'published') return false;
+  if (await destinationBlocked(publication.destination_id)) return false;
+  if (publication.delivery_kind === 'media_first' || publication.delivery_kind === 'album' || !publication.message_id || publication.status !== 'published') return false;
   if ((await db.query(`SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND status<>'sent' LIMIT 1`, [publication.id])).rows.length) return false;
   const botId = String((await api.identity()).id);
   if (publication.bot_id !== botId) return false;
@@ -48,7 +50,7 @@ export async function deliverPublicationMedia(publication: Publication, api: Bot
         AND NOT EXISTS(SELECT 1 FROM operational_state WHERE key='publication_removal:'||p.id::text)
         AND NOT EXISTS(SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=p.id AND status<>'failed')
         FOR UPDATE`, [publication.id, publication.message_id, publication.destination_id, botId])).rows[0];
-      if (!owner || await rateLimited(client)) return false;
+      if (!owner || await destinationBlocked(publication.destination_id,undefined,client) || await rateLimited(client)) return false;
       return (await client.query(`UPDATE publication_media_batches SET status='running',attempt_count=attempt_count+1,
         dispatched_at=now(),error_code=NULL,next_retry_at=NULL WHERE id=$1 AND status IN ('prepared','retryable')
         AND (next_retry_at IS NULL OR next_retry_at<=now())
@@ -118,6 +120,7 @@ export async function deletePublicationMedia(publication: Publication, api: BotA
 
 /** Delete siblings before the caption, retaining per-item progress for authorized retries. */
 export async function deletePublicationMessages(publication: Publication, api: BotApi): Promise<void> {
+  if (await destinationBlocked(publication.destination_id)) throw new BotError('destination_reserved', 'failed');
   if (!publication.message_id) throw new BotError('publication_message_missing', 'failed');
   const unknownText = await db.query(`SELECT 1 FROM publication_text_parts WHERE publication_id=$1 AND status IN ('running','unknown') LIMIT 1`, [publication.id]);
   if (unknownText.rows.length) throw new BotError('publication_text_requires_review','failed');

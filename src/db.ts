@@ -46,9 +46,12 @@ export async function migrate(pool: pg.Pool = db): Promise<void> {
     await client.query('SELECT pg_advisory_lock(736428109)');
     // Extensions are database-wide. Keep vector types outside disposable application/test schemas.
     await client.query('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public');
-    await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
-      name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
-    )`);
+    // A visible ledger in a fallback schema must not make a new schema look migrated.
+    await client.query(`DO $ledger$ BEGIN
+      EXECUTE format('CREATE TABLE IF NOT EXISTS %I.schema_migrations (
+        name text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()
+      )', current_schema());
+    END $ledger$`);
     const files = (await readdir(migrationDirectory)).filter(name => /^\d+_[a-z_]+\.sql$/u.test(name)).sort();
     for (const name of files) {
       const sql = await readFile(resolve(migrationDirectory, name), 'utf8');

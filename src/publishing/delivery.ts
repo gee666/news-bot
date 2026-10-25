@@ -17,6 +17,8 @@ import { reconcileUnknownEdit } from './edit-reconciliation.js';
 import { preparePublicationMedia } from './media-plan.js';
 import { claimAlbum, completeAlbum, readAlbumPlan, recordAlbumFailure, type AlbumPlan } from './album-delivery.js';
 import { deliverPublicationMedia } from './media-delivery.js';
+import { destinationBlocked, releaseDestination } from './destination-order.js';
+import { deliverMediaFirst } from './media-first-delivery.js';
 export { readSentMessage } from './reconciliation.js';
 
 export async function recordFailure(attemptId: string, publication: Publication, operation: 'send' | 'edit' | 'delete', error: unknown,
@@ -37,6 +39,10 @@ export async function recordFailure(attemptId: string, publication: Publication,
 export async function beginAttempt(publication: Publication, operation: 'send' | 'edit' | 'delete', metadata: object,
   settings?: AppSettings, authorization: DeliveryAuthorization = {}): Promise<string | null> {
   return transaction(async client => {
+    if (await destinationBlocked(publication.destination_id, operation === 'send' && publication.delivery_kind === 'media_first' ? publication.id : undefined, client)) return null;
+    const preflight = z.object({ phase: z.literal('preflight') }).safeParse(metadata).success;
+    if (operation === 'send' && !preflight && publication.delivery_kind === 'media_first' && (await client.query(`SELECT 1 FROM publication_media_batches
+      WHERE publication_id=$1 AND status<>'sent' LIMIT 1`, [publication.id])).rows.length) return null;
     if (operation !== 'delete') {
       if (!settings) throw new Error('Publication admission requires current settings');
       await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
@@ -95,6 +101,8 @@ export async function beginAttempt(publication: Publication, operation: 'send' |
 export async function sendPrepared(publication: Publication, api: BotApi, settings: AppSettings,
   authorization: DeliveryAuthorization = {}): Promise<string | null> {
   if (publication.status !== 'prepared' || publication.message_id) return null;
+  if (await destinationBlocked(publication.destination_id, publication.delivery_kind === 'media_first' ? publication.id : undefined)) return null;
+  if (publication.delivery_kind === 'media_first' && ['failed','unknown'].includes(publication.media_status ?? '')) return null;
   if (!(await checkPublicationAdmission(publication,settings,'send',authorization)).allowed) return null;
   let hasMedia: boolean;
   let album: AlbumPlan | undefined;
@@ -114,7 +122,7 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     return null;
   }
   const albumMetadata = album ? { deliveryKind: 'album', itemIds: album.items.map(item => item.id),
-    uploadTypes: album.media.map(mediaUploadType), mediaDigests: album.items.map(item => item.digest) } : { deliveryKind: 'text' };
+    uploadTypes: album.media.map(mediaUploadType), mediaDigests: album.items.map(item => item.digest) } : { deliveryKind: publication.delivery_kind ?? 'text' };
   let message: RenderedMessage;
   try { message = publication.delivery_kind === 'album' ? renderCaption(publication.content) : await preparePublicationText(publication); }
   catch (error) {
@@ -124,6 +132,12 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     if (!attemptId) return null;
     await recordFailure(attemptId, publication, 'send', new BotError(error.code, 'failed'), settings);
     return null;
+  }
+  if (publication.delivery_kind === 'media_first') {
+    if (!await deliverMediaFirst(publication,api,settings,authorization)) return null;
+    const current = (await db.query<Publication>(`SELECT * FROM publications WHERE id=$1`, [publication.id])).rows[0];
+    if (!current) return null;
+    publication = { ...publication, ...current };
   }
   const bot = await api.identity();
   if (publication.bot_id && publication.bot_id !== String(bot.id)) throw new Error('Publication bot ownership changed');
@@ -148,10 +162,11 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
       next_retry_at=NULL,error_code=CASE WHEN media_status='pending' THEN 'publication_media_pending' ELSE NULL END,
       format_version=1 WHERE id=$2`, [messageId,publication.id]);
     await client.query(`UPDATE publication_text_parts SET status='sent',message_id=$2 WHERE publication_id=$1 AND part_number=0`, [publication.id,messageId]);
+    await releaseDestination(publication.id,client);
   });
   const sent: Publication = { ...publication, status: 'published', message_id: messageId, bot_id: String(bot.id) };
   if (!await deliverPublicationText(sent,api,settings)) return null;
-  if (hasMedia && !await deliverPublicationMedia({ ...publication, status: 'published', message_id: messageId,
+  if (publication.delivery_kind !== 'media_first' && hasMedia && !await deliverPublicationMedia({ ...publication, status: 'published', message_id: messageId,
     bot_id: String(bot.id) }, api, settings)) return null;
   return messageId;
 }
@@ -214,6 +229,7 @@ export async function reconcile(publication: Publication, settings: AppSettings,
       next_retry_at=NULL,error_code=CASE WHEN media_status='pending' THEN 'publication_media_pending' ELSE NULL END,
       format_version=1,updated_at=now() WHERE id=$2`, [messageId,publication.id]);
     await client.query(`UPDATE publication_text_parts SET status='sent',message_id=$2 WHERE publication_id=$1 AND part_number=0`, [publication.id,messageId]);
+    await releaseDestination(publication.id,client);
     await client.query(`UPDATE request_attempts SET status='succeeded',finished_at=now(),next_retry_at=NULL,
       response_metadata=response_metadata || $1::jsonb WHERE publication_id=$2 AND operation='send' AND status IN ('running','unknown')`,
       [JSON.stringify({ messageId, reconciled: true }),publication.id]);

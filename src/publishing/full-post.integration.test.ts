@@ -117,6 +117,49 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     expect((await row(id)).pending_snapshot_id).toBeNull();
     expect((await database.db.query('SELECT status,error_code FROM request_attempts')).rows).toEqual([{ status: 'succeeded', error_code: null }]);
   });
+  it('rederives frozen legacy album navigation exactly while new snapshots admit only text targets', async () => {
+    const ancestor = await story(); const ancestorPost = await publication(ancestor,'10');
+    const related = await story(); const relatedPost = await publication(related,'20');
+    await database.db.query("UPDATE publications SET delivery_kind='album',published_at=now() WHERE id=ANY($1::uuid[])",[[ancestorPost,relatedPost]]);
+    const currentId = await story();
+    await database.db.query("INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version) VALUES($1,$2,'fixture-verified')",[currentId,ancestor]);
+    await (await import('../pipeline/story-relations.js')).recordStoryRelations(currentId,[{ storyId:related,relation:'related' }],'fixture',{ origin:'user' });
+    await acceptFixtureStories(settings);
+    const current = (await database.db.query<import('./store.js').StoryContent>('SELECT * FROM stories WHERE id=$1',[currentId])).rows[0];
+    if (!current) throw new Error('Missing fixture story');
+    const legacy = await store.snapshotFor(database.db,current,undefined,{ presentation:{} });
+    const versioned = await store.snapshotFor(database.db,current);
+    expect(legacy.sources.filter(source => source.previousPublication || source.relatedPublication).map(source => source.url))
+      .toEqual(['https://t.me/c/123/10','https://t.me/c/123/20']);
+    expect(versioned.sources.filter(source => source.previousPublication || source.relatedPublication)).toEqual([]);
+    expect(versioned.sources.filter(source => !source.previousPublication && !source.relatedPublication))
+      .toEqual(legacy.sources.filter(source => !source.previousPublication && !source.relatedPublication));
+    const id = await publication(currentId,'30');
+    await database.db.query('UPDATE publication_snapshots SET content=$1 WHERE id=$2',[JSON.stringify(legacy),(await row(id)).snapshot_id]);
+    const { publicationAdmission } = await import('./freshness.js');
+    const admission = async (operation: 'send' | 'edit') => {
+      const frozen = await row(id);
+      return database.transaction(client => publicationAdmission(client,frozen,settings,operation));
+    };
+    expect(await admission('edit')).toEqual({ allowed:true });
+    await database.db.query("UPDATE publications SET status='prepared',message_id=NULL WHERE id=$1",[id]);
+    expect(await admission('send')).toEqual({ allowed:true });
+    expect((await row(id)).content).toEqual(legacy);
+    const altered = { ...legacy,sources:legacy.sources.map(source => ({ ...source,label:'Недопустимая подмена' })) };
+    await database.db.query('UPDATE publication_snapshots SET content=$1 WHERE id=$2',[JSON.stringify(altered),(await row(id)).snapshot_id]);
+    expect(await admission('send')).toEqual({ allowed:false,reason:'snapshot_changed' });
+    expect(BotApi.prototype.send).not.toHaveBeenCalled();
+  });
+  it('does not treat presentation inheritance as permission to edit changed generated facts or delete duplicates', async () => {
+    const { canonical } = await mergedPair();
+    await database.db.query('UPDATE stories SET summary=$1 WHERE id=$2', ['Новый текст с изменёнными фактами', (await row(canonical)).story_id]);
+    await acceptFixtureStories(settings);
+    const edit = vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
+    const remove = vi.spyOn(BotApi.prototype,'delete').mockResolvedValue(undefined);
+    expect(await repair.repairExistingPublications(settings)).toEqual({ edited:0,deleted:0 });
+    expect(edit).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+    expect((await database.db.query('SELECT * FROM publication_replacements')).rows).toHaveLength(0);
+  });
   it('does not delete duplicates when the canonical edit fails', async () => {
     await mergedPair(); vi.spyOn(BotApi.prototype,'edit').mockRejectedValue(new BotError('telegram_transport_unknown','unknown'));
     const remove = vi.spyOn(BotApi.prototype,'delete').mockResolvedValue(undefined);
@@ -272,7 +315,8 @@ describe.skipIf(!url)('full-post durable PostgreSQL publishing', () => {
     }
     async function desired(storyId: string | null): Promise<PublicationSnapshot> {
       const current = (await database.db.query<import('./store.js').StoryContent>('SELECT * FROM stories WHERE id=$1',[storyId])).rows[0];
-      if (!current) throw new Error('Canonical fixture missing'); return store.snapshotFor(database.db,current);
+      if (!current) throw new Error('Canonical fixture missing');
+      return store.snapshotFor(database.db,current,undefined,{ presentation:oldContent });
     }
     const document = await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
       VALUES($1,'Actual document title','Read actual event facts','public',now()+interval '1 day') RETURNING id`,[sharedUrl]);

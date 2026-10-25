@@ -1,5 +1,6 @@
 import { publicationSnapshotSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
 import { orderSources, SOURCE_GROUPS, sourceGroup } from './sources.js';
+import { LIST_MARKER, normalizeMarkedLists, presentationSourceLabel } from './presentation.js';
 
 export interface SourceLink { offset: number; length: number; url: string }
 export interface RenderedMessage {
@@ -43,7 +44,9 @@ function sourceSections(snapshot: PublicationSnapshot, compact: boolean): { text
       number++;
       if (index) { text += '\n'; plainText += '\n'; }
       const host = new URL(source.url).hostname.replace(/^www\./u, '');
-      const label = (compact ? `${number}. ${host}` : source.label) + (status(source) ? ` · ${status(source)}` : '');
+      const label = (snapshot.presentationVersion === 1 ? presentationSourceLabel(source)
+        : compact ? `${number}. ${host}` : source.label) + (status(source) ? ` · ${status(source)}` : '');
+      if (snapshot.presentationVersion === 1) { text += LIST_MARKER; plainText += LIST_MARKER; }
       links.push({ offset: plainText.length, length: label.length, url: source.url });
       text += `<a href="${escapeHtml(source.url)}">${escapeHtml(label)}</a>`;
       plainText += label;
@@ -80,8 +83,9 @@ export function renderValidatedSnapshot(snapshot: PublicationSnapshot, options: 
   if (sourceEntityCount(snapshot) > 100) throw new PublicationRenderError('publication_entity_limit');
   const headline = stripTrailingCitationMarkers(snapshot.headline).slice(0, 180);
   const notes = reviewNotes(snapshot);
-  let details = stripTrailingCitationMarkers(snapshot.details ?? '');
-  let earlier = stripTrailingCitationMarkers(snapshot.earlier ?? '');
+  const bodyPresentation = snapshot.presentationVersion === 1 ? normalizeMarkedLists : (text: string) => text;
+  let details = bodyPresentation(stripTrailingCitationMarkers(snapshot.details ?? ''));
+  let earlier = bodyPresentation(stripTrailingCitationMarkers(snapshot.earlier ?? ''));
   const bodyText = () => header(snapshot, headline) + (details ? `\n\n${details}` : '')
     + (earlier ? `\n\n${earlier}` : '') + notes;
   // Reconstruct the old trimming budget when freezing a pre-parts publication.

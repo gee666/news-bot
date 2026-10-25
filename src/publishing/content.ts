@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { publishedThread } from '../pipeline/publication-thread.js';
-import { relatedPublicationSources } from './navigation.js';
+import { relatedPublicationSources, textNavigationSources } from './navigation.js';
 import { orderSources } from './sources.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
 import { evidenceMetadataSchema } from '../pipeline/generation-store.js';
@@ -121,7 +121,8 @@ export async function sourceInventory(client: Pick<PoolClient, 'query'>, storyId
 }
 
 export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: StoryContent,
-  receiptId?: string, destinationId?: string): Promise<Pick<PublicationSnapshot, 'sources' | 'earlier' | 'review'>> {
+  receiptId?: string, destinationId?: string, options: SnapshotOptions = {}): Promise<Pick<PublicationSnapshot, 'sources' | 'earlier' | 'review'>> {
+  const legacyNavigation = options.presentation !== undefined && options.presentation.presentationVersion === undefined;
   const inventory = await sourceInventory(client, story.id);
   const receipt = await client.query<{ result: unknown }>(`SELECT result FROM judgments WHERE story_id=$1
     AND stage='generation_research' AND result->>'headline'=$2 AND result->>'summary' IS NOT DISTINCT FROM $3
@@ -150,15 +151,23 @@ export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: 
     label:post.headline,url:`https://t.me/c/${post.destinationId.slice(4)}/${post.messageId}`,
     primary:false,previousPublication:true,access:'public' as const,classification:'relevant' as const,
   }] : []);
-  const related = currentDestination ? await relatedPublicationSources(client,story.id,currentDestination) : [];
+  const related = currentDestination ? await relatedPublicationSources(client,story.id,currentDestination,undefined,{ includeLegacyAlbums:legacyNavigation }) : [];
   const combined = mergeSources([...sources, ...inherited, ...previous, ...related]);
-  return { sources: combined, ...(thread.length && metadata?.earlierSummary ? { earlier: metadata.earlierSummary } : {}),
+  return { sources: currentDestination && !legacyNavigation ? await textNavigationSources(client, combined, currentDestination) : combined,
+    ...(thread.length && metadata?.earlierSummary ? { earlier: metadata.earlierSummary } : {}),
     ...(metadata?.review ? { review: metadata.review } : {}) };
 }
 
+export interface SnapshotOptions {
+  /** Historical comparisons inherit even an absent version; new snapshots default to version 1. */
+  presentation?: Pick<PublicationSnapshot, 'presentationVersion'>;
+}
+
 export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: StoryContent,
-  receiptId?: string): Promise<PublicationSnapshot> {
-  return publicationSnapshotSchema.parse({ headline: story.headline, score: story.interest_score,
+  receiptId?: string, options: SnapshotOptions = {}): Promise<PublicationSnapshot> {
+  const presentationVersion = options.presentation ? options.presentation.presentationVersion : 1;
+  return publicationSnapshotSchema.parse({ ...(presentationVersion === undefined ? {} : { presentationVersion }),
+    headline: story.headline, score: story.interest_score,
     details: story.researched ? story.summary : story.translated_excerpt, detailsKind: story.researched ? 'summary' : 'excerpt',
-    ...await snapshotSources(client, story, receiptId) });
+    ...await snapshotSources(client, story, receiptId, undefined, options) });
 }

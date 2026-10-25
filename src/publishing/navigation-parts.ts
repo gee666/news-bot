@@ -1,10 +1,11 @@
 import type { PoolClient } from 'pg';
 import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js';
 import { cleanLegacyHeadings, renderStoredPublication, withoutUpdateMarker } from './message-render.js';
-import { renderFullText, renderedMessageSchema } from './full-text.js';
+import { renderFullText, renderedMessageSchema, updateMarkerPrefix } from './full-text.js';
 import { isNavigationSource } from './navigation.js';
 import { stripNavigationTail } from './navigation-tail.js';
 import type { RenderedMessage } from './render.js';
+import type { Publication } from './store.js';
 
 const emptyNavigation:RenderedMessage={ text:'Дополнительные ссылки находятся в публикации.',
   plainText:'Дополнительные ссылки находятся в публикации.',links:[],parse_mode:'HTML',
@@ -21,10 +22,11 @@ function fits(message:RenderedMessage):boolean {
 export async function prepareNavigationParts(client: Pick<PoolClient,'query'>, publicationId: string,
   snapshotId: string, snapshot: PublicationSnapshot): Promise<void> {
   const desired = new Map<string,{ content: unknown; messageId: string | null; textPart: number | null }>();
-  const owner = (await client.query<{ delivery_kind:'text'|'album' }>('SELECT delivery_kind FROM publications WHERE id=$1',[publicationId])).rows[0];
+  const owner = (await client.query<{ delivery_kind:Publication['delivery_kind'] }>('SELECT delivery_kind FROM publications WHERE id=$1',[publicationId])).rows[0];
   const canonical = await renderStoredPublication(client,publicationId,snapshot,owner?.delivery_kind);
   let footers = snapshot.navigationOverflow ? renderFullText({ ...snapshot,headline:'Links',details:'',earlier:undefined,review:undefined,
-    updatedTo:canonical.plainText.startsWith('UPD: ') ? undefined : snapshot.updatedTo,
+    updatedTo:snapshot.updatedTo && canonical.plainText.startsWith(updateMarkerPrefix(snapshot.updatedTo,
+      { presentationVersion:snapshot.presentationVersion,headline:snapshot.updatedToHeadline }).plainText) ? undefined : snapshot.updatedTo,
     sources:snapshot.sources.filter(isNavigationSource) },true) : [];
   const continuations = await client.query<{ part_number: number; content: unknown; snapshot_content:unknown; message_id: string }>(
     `SELECT t.part_number,t.content,s.content AS snapshot_content,t.message_id FROM publication_text_parts t
@@ -55,7 +57,9 @@ export async function prepareNavigationParts(client: Pick<PoolClient,'query'>, p
     .sort((left,right)=>Number(left.slot.slice(7))-Number(right.slot.slice(7)));
   const frozenFooters=oldFooters.filter(part=>part.message_id && JSON.stringify(part.content)!==JSON.stringify(emptyNavigation));
   const strippedFooters=stripNavigationTail(frozenFooters.map(part=>withoutUpdateMarker(renderedMessageSchema.parse(part.content),
-    publicationSnapshotSchema.parse(part.snapshot_content).updatedTo)),
+    publicationSnapshotSchema.parse(part.snapshot_content).updatedTo,{
+      presentationVersion:publicationSnapshotSchema.parse(part.snapshot_content).presentationVersion,
+      headline:publicationSnapshotSchema.parse(part.snapshot_content).updatedToHeadline })),
     frozenFooters.flatMap(part=>publicationSnapshotSchema.parse(part.snapshot_content).sources).filter(isNavigationSource));
   const cleanedFooters=new Map(frozenFooters.map((part,index)=>[part.slot,strippedFooters[index]]));
   for (const part of oldFooters) {

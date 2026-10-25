@@ -116,6 +116,36 @@ describe.skipIf(!url)('reviewed repair preview and registered verification test'
     expect(await pointers()).toEqual(before);
     for (const method of ['identity','send','edit','delete'] as const) expect(BotApi.prototype[method]).not.toHaveBeenCalled();
   }, 60_000);
+  it.each([undefined, 1] as const)('compares and measures an unchanged published snapshot using its presentation version %s', async presentationVersion => {
+    const id = await story(); const post = await publication(id,'5'); await provenance(id);
+    await acceptFixtureStories(settings);
+    const current = (await database.db.query<import('./store.js').StoryContent>('SELECT * FROM stories WHERE id=$1',[id])).rows[0];
+    if (!current) throw new Error('Missing fixture story');
+    const desired = await store.snapshotFor(database.db,current,undefined,{ presentation:{ presentationVersion } });
+    await database.db.query('UPDATE publication_snapshots SET content=$1 WHERE id=(SELECT snapshot_id FROM publications WHERE id=$2)',[JSON.stringify(desired),post]);
+    await database.db.query('UPDATE publications SET format_version=1 WHERE id=$1',[post]);
+    const before = await pointers();
+    const plan = await preview.previewPublicationRepair();
+    const { snapshotHash } = await import('./approval.js');
+    expect(plan.posts[0]).toMatchObject({ ready:true,publishedSnapshotMatchesDesired:true,wouldStageSnapshot:false,
+      metrics:{ snapshotSha256:snapshotHash(desired),characters:(await import('./render.js')).render(desired).plainText.length } });
+    expect(await pointers()).toEqual(before);
+    for (const method of ['identity','send','edit','delete'] as const) expect(BotApi.prototype[method]).not.toHaveBeenCalled();
+  });
+  it('preserves the pending presentation when previewing a reviewed presentation change', async () => {
+    const id = await story(); const post = await publication(id,'5'); await provenance(id);
+    await acceptFixtureStories(settings);
+    const current = (await database.db.query<import('./store.js').StoryContent>('SELECT * FROM stories WHERE id=$1',[id])).rows[0];
+    if (!current) throw new Error('Missing fixture story');
+    const desired = await store.snapshotFor(database.db,current);
+    const pending = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id',[id,JSON.stringify(desired)]);
+    await database.db.query('UPDATE publications SET pending_snapshot_id=$1 WHERE id=$2',[pending,post]);
+    const before = await pointers();
+    const plan = await preview.previewPublicationRepair();
+    expect(plan.posts[0]).toMatchObject({ ready:true,publishedSnapshotMatchesDesired:false,wouldStageSnapshot:false,
+      metrics:{ snapshotSha256:(await import('./approval.js')).snapshotHash(desired) } });
+    expect(await pointers()).toEqual(before);
+  });
   it('previews album captions within 1024 while retaining the full source inventory', async () => {
     const id = await story(); const post = await publication(id, '5'); await provenance(id, 0, 6);
     await database.db.query("UPDATE publications SET delivery_kind='album' WHERE id=$1", [post]);

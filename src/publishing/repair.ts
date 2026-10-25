@@ -73,8 +73,9 @@ export async function repairExistingPublications(settings: AppSettings, options:
         const story = (await client.query<StoryContent>(`SELECT s.* FROM stories s WHERE ${eligible} AND $1::text IS NOT NULL AND s.id=$5`,
           [destinationId,current.minimumPublicationScore,current.profileVersion,current.modelVersion,candidate.canonical_story_id])).rows[0];
         if (!publication || !story || publication.bot_id !== botId || !await generationIsCurrent(story.id,current,client.query.bind(client))) return;
-        const desired = await snapshotFor(client,story);
-        if (JSON.stringify(desired) !== JSON.stringify(publicationSnapshotSchema.parse(publication.content))) return;
+        const existing = publicationSnapshotSchema.parse(publication.content);
+        const desired = await snapshotFor(client,story,undefined,{ presentation:existing });
+        if (JSON.stringify(desired) !== JSON.stringify(existing)) return;
         if (publication.format_version !== 1 || publication.pending_snapshot_id !== null) {
           if (await repairEditBlocked(client,publication.id,publication.pending_snapshot_id ?? publication.snapshot_id)
             || !await editPublication(publication,api,current)) return;
@@ -84,7 +85,7 @@ export async function repairExistingPublications(settings: AppSettings, options:
           await tx.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
           const latestStory = (await tx.query<StoryContent>(`SELECT s.* FROM stories s WHERE ${eligible} AND $1::text IS NOT NULL AND s.id=$5 FOR UPDATE`,
             [destinationId,current.minimumPublicationScore,current.profileVersion,current.modelVersion,story.id])).rows[0];
-          if (!latestStory || !await generationIsCurrent(story.id,current,tx.query.bind(tx)) || JSON.stringify(await snapshotFor(tx,latestStory)) !== JSON.stringify(desired)) return;
+          if (!latestStory || !await generationIsCurrent(story.id,current,tx.query.bind(tx)) || JSON.stringify(await snapshotFor(tx,latestStory,undefined,{ presentation:desired })) !== JSON.stringify(desired)) return;
           const canonical=(await tx.query<Publication>(`${publicationEditSelect} WHERE p.id=$1`,[publication.id])).rows[0];
           if(!canonical || !(await publicationAdmission(tx,canonical,current,'edit')).allowed) return;
           // Persist authorization after the successful edit. Recovery can retry deletion safely.

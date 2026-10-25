@@ -43,6 +43,16 @@ describe('frozen multipart navigation suffix',()=>{
     ]);
     expect(stripNavigationTail([value],[source])).toEqual([value]);
   });
+  it('removes diamond-prefixed navigation across a message boundary without removing factual list items',()=>{
+    const first=message('Факты\n🔸 Исходный пункт\n\n<b>Другие публикации</b>\n🔸',
+      'Факты\n🔸 Исходный пункт\n\nДругие публикации\n🔸');
+    const second=message(` <a href="${source.url}">#20 · Другой сюжет</a>`,' #20 · Другой сюжет',
+      [{offset:1,length:'#20 · Другой сюжет'.length,url:source.url}]);
+    const stripped=stripNavigationTail([first,second],[source]);
+    expect(stripped.map(part=>part.plainText)).toEqual(['Факты\n🔸 Исходный пункт','']);
+    const factual=message(second.text+'\n🔸 Ещё один факт',second.plainText+'\n🔸 Ещё один факт',second.links);
+    expect(stripNavigationTail([first,factual],[source])).toEqual([first,factual]);
+  });
   it('does not treat a literal unformatted body paragraph as navigation',()=>{
     const value=message('Факты\n\nСвязанные новости\nЦитата','Факты\n\nСвязанные новости\nЦитата');
     expect(stripNavigationTail([value],[source])).toEqual([value]);

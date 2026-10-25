@@ -61,7 +61,7 @@ describe('temporary durable media plan', () => {
     mocks.query.mockResolvedValueOnce({ rows: [{ publication_id: 'publication' }] });
     await recoverPublicationMedia('-100123');
     expect(mocks.query.mock.calls[0]?.[0]).toContain("status='unknown'");
-    expect(mocks.query.mock.calls[1]?.[0]).toContain('publication_media_requires_review');
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('publication_media_requires_review'))).toBe(true);
     expect(mocks.query.mock.calls.every(([sql]) => !String(sql).includes("status='prepared'"))).toBe(true);
   });
   it('expires temporary bytes for every publication state while preserving unknown outcomes', async () => {

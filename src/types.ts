@@ -39,9 +39,11 @@ export const publicationSnapshotSchema = z.object({
   detailsKind: z.enum(['summary', 'excerpt']),
   sources: z.array(publicationSourceSchema),
   review: generationReviewSchema.optional(),
+  presentationVersion: z.literal(1).optional(),
   navigationVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   navigationOverflow: z.literal(true).optional(),
   updatedTo: z.string().regex(/^https:\/\/t\.me\/c\/\d+\/[1-9]\d*$/u).optional(),
+  updatedToHeadline: z.string().min(1).optional(),
 }).strict();
 
 export type PublicationSource = z.infer<typeof publicationSourceSchema>;

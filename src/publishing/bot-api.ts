@@ -89,8 +89,8 @@ export class BotApi {
   }
 
   /** Text stays in the canonical message, so attachments never truncate it to a caption. */
-  async sendMedia(destinationId: string, replyTo: string, media: PublicationMedia[]): Promise<string[]> {
-    if (!media.length || media.length > 10 || !/^\d+$/u.test(replyTo)
+  async sendMedia(destinationId: string, replyTo: string | undefined, media: PublicationMedia[]): Promise<string[]> {
+    if (!media.length || media.length > 10 || replyTo !== undefined && !/^\d+$/u.test(replyTo)
       || media.some(item => !item.data.length || !(item.type === 'image' || item.type === 'video'))) {
       throw new BotError('telegram_media_invalid', 'failed');
     }
@@ -99,7 +99,7 @@ export class BotApi {
     if (!documents && uploads.includes('document')) throw new BotError('telegram_media_batch_invalid', 'failed');
     const form = new FormData();
     form.set('chat_id', destinationId);
-    form.set('reply_parameters', JSON.stringify({ message_id: Number(replyTo), allow_sending_without_reply: false }));
+    if (replyTo !== undefined) form.set('reply_parameters', JSON.stringify({ message_id: Number(replyTo), allow_sending_without_reply: false }));
     const single = media.length === 1 ? media[0] : undefined;
     media.forEach((item, index) => {
       const field = single ? mediaUploadType(item) : `file${index}`;

@@ -67,7 +67,7 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
     await invalidateStaleEdits(client,settings,destinationId,undefined,storyIds);
     if (options.cancelOnly || !options.sourceRepair) return;
     const rows = await client.query<StoryContent & { publication_id: string; old_content: unknown; pending_content: unknown;
-      delivery_kind: 'text' | 'album'; format_version: number; pending_snapshot_id: string | null; desired_story_id: string | null }>(`SELECT s.*,p.id AS publication_id,
+      delivery_kind: Publication['delivery_kind']; format_version: number; pending_snapshot_id: string | null; desired_story_id: string | null }>(`SELECT s.*,p.id AS publication_id,
       snap.content AS old_content,desired.content AS pending_content,p.delivery_kind,p.format_version,p.pending_snapshot_id,
       coalesce(desired.story_id,snap.story_id) AS desired_story_id
       FROM (${canonicalPublications}) chosen JOIN stories s ON s.id=chosen.canonical_story_id
@@ -83,7 +83,7 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
       try {
         const sent = publicationSnapshotSchema.parse(story.old_content);
         const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
-          summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, destinationId);
+          summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, destinationId, { presentation:sent });
         content = publicationSnapshotSchema.parse({ ...sent, sources });
         await renderStoredPublication(client,story.publication_id,content,story.delivery_kind);
       }

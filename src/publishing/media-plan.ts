@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
@@ -53,8 +54,10 @@ export async function preparePublicationMedia(publication: Publication, settings
   if (!publication.story_id) return false;
   // Once a send was authorized, its byte selection never changes, including after a 429.
   const attempted = (await db.query(`SELECT 1 FROM request_attempts
-    WHERE publication_id=$1 AND operation='send' LIMIT 1`, [publication.id])).rows.length > 0;
-  if (publication.media_snapshot_id === publication.snapshot_id || attempted) {
+    WHERE publication_id=$1 AND (operation='send' OR operation LIKE 'send_media:%') LIMIT 1`, [publication.id])).rows.length > 0;
+  const mediaFirst = publication.delivery_kind === 'media_first' || !attempted
+    && z.object({ presentationVersion: z.literal(1) }).safeParse(publication.content).success;
+  if (publication.media_snapshot_id === publication.snapshot_id && (!mediaFirst || publication.delivery_kind === 'media_first') || attempted) {
     if (publication.media_status === 'failed' || publication.media_status === 'unknown') {
       throw new BotError('publication_media_plan_unavailable', publication.media_status === 'unknown' ? 'unknown' : 'failed');
     }
@@ -62,14 +65,14 @@ export async function preparePublicationMedia(publication: Publication, settings
   }
   const downloaded = deduplicateMedia(await publicationMedia(publication.story_id, settings));
   const album = captionFirst && downloaded.length > 0 && selectAlbumMedia(downloaded).length === downloaded.length;
-  const media = downloaded;
+  const media = mediaFirst ? downloaded.slice(0, MAX_ALBUM_MEDIA) : downloaded;
   if (!media.length && !publication.media_snapshot_id) return false;
   await transaction(async client => {
     const current = (await client.query<Publication>('SELECT * FROM publications WHERE id=$1 FOR UPDATE', [publication.id])).rows[0];
     if (!current || current.status !== 'prepared' || current.message_id || current.snapshot_id !== publication.snapshot_id) {
       throw new BotError('publication_media_plan_changed', 'retryable');
     }
-    if ((await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND operation='send' LIMIT 1`,
+    if ((await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND (operation='send' OR operation LIKE 'send_media:%') LIMIT 1`,
       [publication.id])).rows.length) throw new BotError('publication_media_plan_changed', 'retryable');
     const previous = (await client.query<{ digest: string; expires_at: Date }>(`SELECT i.digest,i.expires_at
       FROM publication_media_items i JOIN publication_media_batches b ON b.id=i.batch_id WHERE b.publication_id=$1`, [publication.id])).rows;
@@ -88,7 +91,7 @@ export async function preparePublicationMedia(publication: Publication, settings
       }
     }
     await client.query(`UPDATE publications SET media_snapshot_id=$2,media_status=$3,delivery_kind=$4,updated_at=now() WHERE id=$1`,
-      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none', album ? 'album' : 'text']);
+      [publication.id, publication.snapshot_id, media.length ? 'pending' : 'none', mediaFirst ? 'media_first' : album ? 'album' : 'text']);
   });
   return media.length > 0;
 }
@@ -100,6 +103,9 @@ export async function recoverPublicationMedia(destinationId: string): Promise<vo
       SET status='unknown',error_code='publication_media_restart_unknown',next_retry_at=NULL
       FROM publications p WHERE p.id=b.publication_id AND p.destination_id=$1 AND b.status='running'
       RETURNING b.publication_id`, [destinationId]);
+    await client.query(`UPDATE request_attempts a SET status='unknown',error_code='publication_media_restart_unknown',finished_at=now(),next_retry_at=NULL
+      FROM publications p WHERE p.id=a.publication_id AND p.destination_id=$1
+        AND a.operation LIKE 'send_media:%' AND a.status='running'`, [destinationId]);
     if (recovered.rows.length) await client.query(`UPDATE publications SET media_status='unknown',
       error_code='publication_media_requires_review',updated_at=now() WHERE id=ANY($1::uuid[])`,
     [recovered.rows.map(row => row.publication_id)]);

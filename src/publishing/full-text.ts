@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { publicationSnapshotSchema, type PublicationSource } from '../types.js';
 import { escapeHtml, MESSAGE_LIMIT, PublicationRenderError, type RenderedMessage } from './render.js';
 import { orderSources, SOURCE_GROUPS, sourceGroup } from './sources.js';
+import { LIST_MARKER, normalizeMarkedLists, presentationSourceLabel } from './presentation.js';
 
-// Leave room to prepend an UPD link later without changing any original text.
-const FIRST_MESSAGE_LIMIT = MESSAGE_LIMIT - 128;
+// Frozen unversioned plans retain the original reserved budget and fingerprints.
+const LEGACY_FIRST_MESSAGE_LIMIT = MESSAGE_LIMIT - 128;
 const ENTITY_LIMIT = 90;
 export const renderedMessageSchema = z.object({
   text: z.string(), plainText: z.string(),
@@ -16,10 +17,10 @@ function emptyMessage(): RenderedMessage {
   return { text: '', plainText: '', links: [], parse_mode: 'HTML',
     link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: [] } };
 }
-function sourceLabel(source: PublicationSource): string {
+function sourceLabel(source: PublicationSource, version?: 1): string {
   const status = [source.classification === 'uncertain' ? 'связь с новостью неясна' : '',
     source.access === 'restricted' ? 'доступ ограничен' : source.access === 'unavailable' ? 'недоступно' : ''].filter(Boolean);
-  return source.label + (status.length ? ` · ${status.join(', ')}` : '');
+  return (version === 1 ? presentationSourceLabel(source) : source.label) + (status.length ? ` · ${status.join(', ')}` : '');
 }
 
 /** Split decoded text, never raw HTML. Every source and every UTF-16 character survives. */
@@ -29,9 +30,11 @@ export function renderFullText(content: unknown, sourcesOnly = false, firstLimit
   const parsed = publicationSnapshotSchema.safeParse(content);
   if (!parsed.success) throw new PublicationRenderError('publication_snapshot_invalid');
   const snapshot = parsed.data;
-  // Preserve legacy default fingerprints; explicit caption budgets must include any UPD prefix.
-  const firstBodyLimit = firstLimit === undefined ? FIRST_MESSAGE_LIMIT
-    : firstLimit - (snapshot.updatedTo ? `UPD: ${snapshot.updatedTo}\n\n`.length : 0);
+  // Legacy default plans must remain byte-for-byte reproducible. Version 1 reserves only an actual prefix.
+  const markerOptions = { presentationVersion: snapshot.presentationVersion, headline: snapshot.updatedToHeadline };
+  const markerLength = snapshot.updatedTo ? updateMarkerPrefix(snapshot.updatedTo, markerOptions).plainText.length : 0;
+  const firstBodyLimit = firstLimit !== undefined ? firstLimit - markerLength
+    : snapshot.presentationVersion === 1 ? MESSAGE_LIMIT - markerLength : LEGACY_FIRST_MESSAGE_LIMIT;
   if (firstBodyLimit < 2) throw new PublicationRenderError('publication_message_too_long');
   const messages: RenderedMessage[] = [];
   let message = emptyMessage();
@@ -57,11 +60,27 @@ export function renderFullText(content: unknown, sourcesOnly = false, firstLimit
       remaining = remaining.slice(length);
     }
   };
+  const appendSource = (source: PublicationSource) => {
+    let remaining = sourceLabel(source, snapshot.presentationVersion);
+    if (snapshot.presentationVersion !== 1) { append('\n'); append(remaining, 'link', source.url); return; }
+    while (remaining) {
+      const prefix = '\n' + LIST_MARKER;
+      const room = (messages.length ? MESSAGE_LIMIT : firstBodyLimit) - message.plainText.length - prefix.length;
+      let length = Math.min(remaining.length, Math.max(0, room));
+      if (length < remaining.length && /[\uD800-\uDBFF]/u.test(remaining[length - 1] ?? '')) length--;
+      // Keep the marker and at least one complete label character in the same part.
+      if (!length || entities >= ENTITY_LIMIT) { flush(); continue; }
+      append(prefix);
+      append(remaining.slice(0, length), 'link', source.url);
+      remaining = remaining.slice(length);
+    }
+  };
   if (!sourcesOnly) {
   append('•'.repeat(snapshot.score) + '◦'.repeat(10 - snapshot.score) + '\n');
   append(snapshot.headline, 'bold');
-  if (snapshot.details) append('\n\n' + snapshot.details);
-  if (snapshot.earlier) append('\n\n' + snapshot.earlier);
+  const bodyPresentation = snapshot.presentationVersion === 1 ? normalizeMarkedLists : (text: string) => text;
+  if (snapshot.details) append('\n\n' + bodyPresentation(snapshot.details));
+  if (snapshot.earlier) append('\n\n' + bodyPresentation(snapshot.earlier));
   if (snapshot.review?.reason.trim()) append('\n\nЗаметки проверяющего: ' + snapshot.review.reason);
   }
   const sources = orderSources(snapshot.sources);
@@ -71,18 +90,30 @@ export function renderFullText(content: unknown, sourcesOnly = false, firstLimit
     const room=(messages.length ? MESSAGE_LIMIT : firstBodyLimit)-message.plainText.length;
     if (message.plainText && room<group.heading.length+2) flush();
     append('\n\n'); append(group.heading, 'bold');
-    for (const source of selected) { append('\n'); append(sourceLabel(source), 'link', source.url); }
+    for (const source of selected) appendSource(source);
   }
   flush();
   if (sourcesOnly && snapshot.updatedTo && !messages.length) messages.push(emptyMessage());
-  if (snapshot.updatedTo && messages[0]) messages[0] = withUpdateMarker(messages[0], snapshot.updatedTo, firstLimit ?? MESSAGE_LIMIT);
+  if (snapshot.updatedTo && messages[0]) messages[0] = withUpdateMarker(messages[0], snapshot.updatedTo, firstLimit ?? MESSAGE_LIMIT, markerOptions);
   return messages;
 }
 
-export function withUpdateMarker(message: RenderedMessage, url: string, limit = MESSAGE_LIMIT): RenderedMessage {
-  const prefix = `UPD: ${url}\n\n`;
-  if (prefix.length + message.plainText.length > limit) throw new PublicationRenderError('publication_message_too_long');
-  return { ...message, text: `UPD: <a href="${escapeHtml(url)}">${escapeHtml(url)}</a>\n\n${message.text}`,
-    plainText: prefix + message.plainText,
-    links: [{ offset: 5, length: url.length, url }, ...message.links.map(link => ({ ...link, offset: link.offset + prefix.length }))] };
+export interface UpdateMarkerOptions { presentationVersion?: 1 | undefined; headline?: string | undefined }
+
+export function updateMarkerPrefix(url: string, options: UpdateMarkerOptions = {}): Pick<RenderedMessage, 'text' | 'plainText' | 'links'> {
+  const versioned = options.presentationVersion === 1;
+  const post = versioned ? new URL(url).pathname.split('/').filter(Boolean).at(-1) : undefined;
+  const headline = options.headline?.replace(/\s+/gu, ' ').trim();
+  const label = versioned ? `#${post}` + (headline ? ` · ${headline}` : '') : url;
+  const lead = versioned ? `UPD:\n${LIST_MARKER}` : 'UPD: ';
+  return { text: `${lead}<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>\n\n`,
+    plainText: `${lead}${label}\n\n`, links: [{ offset: lead.length, length: label.length, url }] };
+}
+
+export function withUpdateMarker(message: RenderedMessage, url: string, limit = MESSAGE_LIMIT,
+  options: UpdateMarkerOptions = {}): RenderedMessage {
+  const prefix = updateMarkerPrefix(url, options);
+  if (prefix.plainText.length + message.plainText.length > limit) throw new PublicationRenderError('publication_message_too_long');
+  return { ...message, text: prefix.text + message.text, plainText: prefix.plainText + message.plainText,
+    links: [...prefix.links, ...message.links.map(link => ({ ...link, offset: link.offset + prefix.plainText.length }))] };
 }

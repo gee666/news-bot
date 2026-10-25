@@ -79,6 +79,23 @@ describe('Telegram multipart attachments', () => {
     expect(form.get('file0')).toBeInstanceOf(Blob);
     expect(form.get('file1')).toBeInstanceOf(Blob);
   });
+  it.each([
+    [image], [image, video], [{ type:'video' as const,mimeType:'video/webm',data:Buffer.from('original WEBM') }],
+  ])('uploads standalone caption-free media before a canonical text post: %j', async (...items) => {
+    const result = items.map((_,index) => ({ message_id:10+index,chat:{ id:-100123 } }));
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ ok:true,result:items.length === 1 ? result[0] : result }));
+    await new BotApi(token,fetcher).sendMedia('-100123',undefined,items);
+    const form = fetcher.mock.calls[0]?.[1]?.body;
+    if (!(form instanceof FormData)) throw new Error('Missing multipart body');
+    expect(form.get('reply_parameters')).toBeNull(); expect(form.get('caption')).toBeNull(); expect(form.get('parse_mode')).toBeNull();
+    expect(String(form.get('media'))).not.toContain('caption');
+    const files = [...form.values()].filter(value => value instanceof Blob);
+    expect(files).toHaveLength(items.length);
+    for (const [index,file] of files.entries()) {
+      if (!(file instanceof Blob)) throw new Error('Missing original media');
+      expect(Buffer.from(await file.arrayBuffer())).toEqual(items[index]?.data);
+    }
+  });
   it('rejects oversized batches before touching the network', async () => {
     const fetcher = vi.fn<typeof fetch>();
     await expect(new BotApi(token, fetcher).sendMedia('-100123', '9', Array.from({ length: 11 }, () => image)))

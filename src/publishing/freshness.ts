@@ -8,11 +8,12 @@ import { eligible, snapshotFor, snapshotSources } from './content.js';
 import { fullRepairPlan, fullRepairPlanHash, loadAction, snapshotHash, type DeliveryAuthorization } from './approval.js';
 import { rateLimited,unsafeSendAttempt,type Publication } from './store.js';
 import { desiredNavigation, navigationOnlyChange } from './navigation.js';
+import { destinationBlocked } from './destination-order.js';
 import { lockAdmissionInputs } from './admission-locks.js';
 
 type Reason = 'settings_changed' | 'publishing_paused' | 'snapshot_changed' | 'story_ineligible'
   | 'retained_provenance_unknown' | 'current_generation_missing'
-  | 'delivery_outcome_unknown' | 'approval_invalid' | 'publication_removed' | 'telegram_cooldown' | 'consolidation_unresolved';
+  | 'destination_reserved' | 'delivery_outcome_unknown' | 'approval_invalid' | 'publication_removed' | 'telegram_cooldown' | 'consolidation_unresolved';
 export type PublicationAdmission = { allowed: true } | { allowed: false; reason: Reason };
 const deny = (reason: Reason): PublicationAdmission => ({ allowed: false, reason });
 const storySchema = z.object({ id: z.uuid(), headline: z.string(), summary: z.string().nullable(),
@@ -23,6 +24,11 @@ const storySchema = z.object({ id: z.uuid(), headline: z.string(), summary: z.st
 export async function publicationAdmission(client: Pick<PoolClient,'query'>, publication: Publication, settings: AppSettings,
   operation: 'send' | 'edit', authorization: DeliveryAuthorization = {}): Promise<PublicationAdmission> {
   try {
+    if (await destinationBlocked(publication.destination_id, operation === 'send' && publication.delivery_kind === 'media_first' ? publication.id : undefined, client)) return deny('destination_reserved');
+    if (publication.delivery_kind === 'media_first' && operation === 'send') {
+      const target = (await client.query<{ value: unknown }>("SELECT value FROM operational_state WHERE key='telegram_destination' FOR SHARE")).rows[0]?.value;
+      if (!z.object({ channelId: z.literal(publication.destination_id) }).safeParse(target).success) return deny('snapshot_changed');
+    }
     const saved = settingsSchema.parse((await client.query<{ value: unknown }>('SELECT value FROM app_settings WHERE id=1 FOR SHARE')).rows[0]?.value);
     if (await rateLimited(client)) return deny('telegram_cooldown');
     if (JSON.stringify(saved) !== JSON.stringify(settingsSchema.parse(settings))) return deny('settings_changed');
@@ -133,14 +139,15 @@ export async function publicationAdmission(client: Pick<PoolClient,'query'>, pub
       if (snapshotHash({ ...sent, sources: [] }) === snapshotHash({ ...desired, sources: [] })) {
         const story = storySchema.parse(row.story);
         const { sources } = await snapshotSources(client, { ...story, headline: sent.headline,
-          summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, row.destination_id);
+          summary: sent.detailsKind === 'summary' ? sent.details : null }, undefined, row.destination_id, { presentation:sent });
         return snapshotHash({ ...sent, sources }) === snapshotHash(desired) ? { allowed: true } : deny('snapshot_changed');
       }
     }
     if (!row.eligible) return deny('story_ineligible');
     const story = storySchema.parse(row.story);
     if (!await generationIsCurrent(story.id,saved,client.query.bind(client),approvedReceiptId)) return deny('current_generation_missing');
-    const currentSnapshot = await snapshotFor(client,story,approvedReceiptId);
+    const currentSnapshot = await snapshotFor(client,story,approvedReceiptId,
+      { presentation:publicationSnapshotSchema.parse(row.content) });
     if (snapshotHash(currentSnapshot) !== snapshotHash(row.content)) return deny('snapshot_changed');
     return { allowed: true };
   } catch (error) {

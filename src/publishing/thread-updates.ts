@@ -1,7 +1,7 @@
 import { transaction } from '../db.js';
 import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js';
 import { snapshotHash } from './approval.js';
-import { supersedeAttempts } from './store.js';
+import { supersedeAttempts, type Publication } from './store.js';
 import { desiredNavigation, delivered, navigationOnlyChange } from './navigation.js';
 import { prepareNavigationParts } from './navigation-parts.js';
 import { renderStoredPublication } from './message-render.js';
@@ -15,7 +15,7 @@ export async function prepareThreadUpdates(destinationId: string, latestPublicat
   await transaction(async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
     const rows = await client.query<{ id: string; story_id: string | null; destination_id: string; bot_id: string | null;
-      content: unknown; pending_content: unknown; pending_snapshot_id: string | null; delivery_kind: 'text' | 'album' }>(`
+      content: unknown; pending_content: unknown; pending_snapshot_id: string | null; delivery_kind: Publication['delivery_kind'] }>(`
       SELECT p.id,p.story_id,p.destination_id,p.bot_id,p.delivery_kind,sent.content,
         desired.content AS pending_content,p.pending_snapshot_id FROM publications p
       JOIN publication_snapshots sent ON sent.id=p.snapshot_id

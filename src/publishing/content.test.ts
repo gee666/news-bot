@@ -13,9 +13,10 @@ const origin = { source_id: 'mention:xor', text: 'Сообщение XOR', name:
   access: 'public', classification: 'relevant' };
 const source = (url: string, primary = false): PublicationSource => ({ url, label: url,
   primary, access: 'public', classification: 'relevant' });
-function client(options: { receipt?: object; primary?: string[]; referenced?: string[];
+function client(options: { receipt?: object; primary?: string[]; referenced?: string[]; blockedNavigation?: string[];
   posts?: { story_id: string; message_id: string; content: PublicationSnapshot }[] } = {}) {
   const query = vi.fn().mockImplementation(async (sql: string) => {
+    if (sql.includes("p.delivery_kind='album'")) return { rows: (options.blockedNavigation ?? []).map(url => ({ url })) };
     if (sql.includes('WITH source_assignments')) return { rows: [origin, { ...origin, source_id: 'mention:other',
       name: 'Другой канал', original_url: otherUrl, external_id: '1' }] };
     if (sql.includes('SELECT e.title')) return { rows: [{ id: 'evidence', title: 'Отчёт OpenAI', content: 'Actual research findings.',
@@ -34,10 +35,29 @@ const post = (id: string, sources: PublicationSource[]) => ({ story_id: id, mess
   content: { headline: `Новость ${id}`, details: `Сведения ${id}`, score: 6, detailsKind: 'summary' as const, sources } });
 
 describe('generation source selection', () => {
+  it.each([{}, { presentationVersion: 1 as const }])('inherits the exact presentation for historical comparisons: %j', async presentation => {
+    const snapshot = await snapshotFor(client(), story, undefined, { presentation });
+    expect(snapshot.presentationVersion).toBe(presentation.presentationVersion);
+    expect(render(snapshot).plainText).toContain(presentation.presentationVersion === 1 ? 'XOR · #10254' : 'XOR · №10254');
+    if (!presentation.presentationVersion) expect(snapshot).not.toHaveProperty('presentationVersion');
+    expect((await snapshotFor(client(), story)).presentationVersion).toBe(1);
+  });
+  it('filters media navigation only for new presentation, retaining exact historical links and factual sources', async () => {
+    const album = 'https://t.me/c/123/1';
+    const inherited = { ...source('https://t.me/c/123/99'), previousPublication:true as const };
+    const options = { posts:[post('1',[inherited])],blockedNavigation:[album,inherited.url,xorUrl] };
+    const legacy = await snapshotFor(client(options),story,undefined,{ presentation:{} });
+    const current = await snapshotFor(client(options),story);
+    expect(legacy.sources.filter(source => source.previousPublication).map(source => source.url)).toEqual([inherited.url,album]);
+    expect(current.sources.filter(source => source.previousPublication)).toEqual([]);
+    expect(current.sources.find(source => source.url === xorUrl)).toEqual(legacy.sources.find(source => source.url === xorUrl));
+    expect(current.sources.filter(source => !source.previousPublication)).toEqual(legacy.sources.filter(source => !source.previousPublication));
+  });
   it('unions receipt and absorbed mention origins without downgrading inventory primary sources', async () => {
     const tweet = 'https://x.com/artist/status/123'; const article = 'https://author.org/story';
     const snapshot = await snapshotFor(client({ receipt: { primarySourceUrls: [tweet] },
       primary: [article], referenced: [tweet, article] }), story);
+    expect(snapshot.presentationVersion).toBe(1);
     expect(snapshot.sources.find(source => source.url === tweet)).toMatchObject({ primary: true, access: 'unknown' });
     expect(snapshot.sources.find(source => source.url === article)?.primary).toBe(true);
     expect(snapshot.sources.find(source => source.url === reportUrl)?.primary).toBe(true);

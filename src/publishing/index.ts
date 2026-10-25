@@ -6,6 +6,7 @@ import { BotApi } from './bot-api.js';
 import { editPublication, reconcile, sendPrepared } from './delivery.js';
 import { recoverSends } from './digest.js';
 import { destination, locked, publicationSelect, rateLimited, saveState, state, testPublication, type Publication } from './store.js';
+import { destinationBlocked } from './destination-order.js';
 
 export { publishDigest, resumePublications } from './digest.js';
 
@@ -17,6 +18,7 @@ export { previewPublicationRepair } from './preview.js';
 export async function verifyBot(): Promise<{ verified: boolean; destinationId: string; messageId: string | null }> {
   return locked('news-bot-digest', async () => {
     const destinationId = await destination();
+    if (await destinationBlocked(destinationId)) return { verified: false, destinationId, messageId: null };
     const api = new BotApi();
     const bot = await api.identity();
     const settings = await getSettings();
@@ -44,6 +46,7 @@ export async function verifyBot(): Promise<{ verified: boolean; destinationId: s
       publication.message_id = await sendPrepared(publication,api,settings,{ verificationTest: true });
       if (!publication.message_id) return { verified: false, destinationId, messageId: null };
       publication.status = 'published';
+      publication.bot_id = String(bot.id);
     }
     const verified = await locked(`news-bot-publication:${publication.id}`, () => editPublication(publication,api,settings,{ verificationTest: true }));
     await saveState('bot_verified',{ verified, destinationId, botId: bot.id, checkedAt: new Date().toISOString() });

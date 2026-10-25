@@ -27,6 +27,12 @@ describe.skipIf(!databaseUrl)('PostgreSQL schema integration', () => {
     }
   });
 
+  it('owns its migration ledger instead of inheriting a fallback schema ledger', async () => {
+    const rows=await pool.query<{schema:string}>(`SELECT n.nspname AS schema FROM pg_class c
+      JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid='schema_migrations'::regclass`);
+    expect(rows.rows).toEqual([{schema}]);
+  });
+
   it('shortens only default automatic Pi deadlines, preserving custom and historical budgets', async () => {
     await pool.query(`INSERT INTO app_settings(id,value) VALUES(1,'{"piTimeoutMs":1200000}')
       ON CONFLICT(id) DO UPDATE SET value=EXCLUDED.value`);

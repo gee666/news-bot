@@ -12,6 +12,7 @@ import { recoverPublicationText, retryPublicationText } from './text-delivery.js
 import { retryNavigationParts } from './navigation-delivery.js';
 import { prepareThreadUpdates } from './thread-updates.js';
 import { recoverPublicationMedia } from './media-plan.js';
+import { reservedPublication } from './destination-order.js';
 import { destination, prepareDigest, publicationSelect, rateLimited, refreshPrepared, state, type Publication } from './store.js';
 
 export interface ManualPublicationResult {
@@ -50,6 +51,10 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   let destinationId: string;
   try { destinationId = await destination(); }
   catch { report.reasons.destination_not_configured = 1; return report; }
+  const reservedId = await reservedPublication(destinationId);
+  if (reservedId && (!saved.success || !saved.data.ids.includes(reservedId))) {
+    report.reasons.destination_reserved = 1; report.waiting = true; return report;
+  }
   const verification = z.object({ verified: z.literal(true), destinationId: z.literal(destinationId), botId: z.number() })
     .safeParse(await state('bot_verified'));
   if (!verification.success) { report.reasons.bot_not_verified = 1; return report; }
@@ -77,6 +82,8 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
     WHERE p.id=ANY($1::uuid[]) AND p.destination_id=$2 ORDER BY p.created_at,p.id`, [ids, destinationId]);
   const withheld = new Set<string>();
   for (const publication of selected.rows) {
+    const owner = await reservedPublication(destinationId);
+    if (owner && owner !== publication.id) continue;
     if (await rateLimited()) break;
     if (publication.next_retry_at && publication.next_retry_at > new Date()) continue;
     if (publication.status === 'uncertain' && publication.error_code !== 'send_not_found_requires_review') {

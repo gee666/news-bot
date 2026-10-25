@@ -39,6 +39,7 @@ async function fixture(legacyAlbum = true): Promise<Publication> {
   await acceptFixtureStories(settings, [storyId]);
   const [id] = await store.prepareDigest(settings, '-100123', { storyIds: [storyId] });
   if (!id) throw new Error('Prepared fixture missing');
+  await database.db.query("UPDATE publication_snapshots SET content=content-'presentationVersion' WHERE id=(SELECT snapshot_id FROM publications WHERE id=$1)", [id]);
   if (legacyAlbum) await plans.preparePublicationMedia(await load(id), settings, true);
   return load(id);
 }

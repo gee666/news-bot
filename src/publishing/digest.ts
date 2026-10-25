@@ -1,18 +1,19 @@
 import { newsOrderTime } from './ordering.js';
 import { z } from 'zod';
-import { db } from '../db.js';
+import { db, transaction } from '../db.js';
 import { getSettings, type AppSettings } from '../settings.js';
 import { BotApi } from './bot-api.js';
 import { reconcile, sendPrepared } from './delivery.js';
 import { checkPublicationAdmission } from './admission.js';
 import { recoverNavigationParts, retryNavigationParts } from './navigation-delivery.js';
 import { prepareThreadUpdates } from './thread-updates.js';
-import { recoverPublicationText, retryPublicationText } from './text-delivery.js';
+import { deliverPublicationText, recoverPublicationText, retryPublicationText } from './text-delivery.js';
 import { retryEdits } from './updates.js';
 import { prepareReadyStories } from './ready.js';
 import { retryReplacements } from './repair.js';
 import { recoverPublicationMedia } from './media-plan.js';
 import { retryPublicationMedia } from './media-delivery.js';
+import { reservedPublication, releaseDestination } from './destination-order.js';
 import { adoptPreparedPublications, destination, locked, publicationSelect, rateLimited, refreshPrepared, state, tryLocked, unsafeSendAttempt, type Publication } from './store.js';
 
 const verificationSchema = z.object({ verified: z.literal(true), destinationId: z.string(), botId: z.number().int().positive() });
@@ -56,7 +57,8 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   await prepareThreadUpdates(destinationId);
   if (await rateLimited()) return;
   if (!selectNewStories) {
-    const row = (await db.query<{ pending: boolean }>(`SELECT EXISTS(SELECT 1 FROM publications p WHERE p.destination_id=$1
+    const row = (await db.query<{ pending: boolean }>(`SELECT EXISTS(SELECT 1 FROM publication_destination_reservations WHERE destination_id=$1)
+      OR EXISTS(SELECT 1 FROM publications p WHERE p.destination_id=$1
       AND ${due} AND ((p.status='prepared' AND (p.story_id IS NOT NULL
         OR EXISTS(SELECT 1 FROM story_publication_aliases pa WHERE pa.publication_id=p.id))) OR (p.status='uncertain' AND ${reviewExcluded})
         OR (p.status='published' AND (p.pending_snapshot_id IS NOT NULL OR (p.media_status='pending' AND (
@@ -76,6 +78,19 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   }
   const api = new BotApi();
   if ((await api.identity()).id !== verification.data.botId) return;
+  const reservedId = await reservedPublication(destinationId);
+  if (reservedId) {
+    const owner = (await db.query<Publication & { error_code: string | null }>(`${publicationSelect} WHERE p.id=$1`, [reservedId])).rows[0];
+    if (owner && (!owner.next_retry_at || owner.next_retry_at <= new Date())) {
+      if (owner.status === 'uncertain' && owner.error_code !== 'send_not_found_requires_review') await reconcile(owner,current);
+      else if (owner.status === 'prepared') await sendPrepared(owner,api,current);
+      else if (owner.status === 'published') {
+        await deliverPublicationText(owner,api,current);
+        await transaction(client => releaseDestination(owner.id,client));
+      }
+    }
+    if (await reservedPublication(destinationId)) return;
+  }
   const uncertain = await db.query<Publication>(`${publicationSelect} WHERE p.destination_id=$1 AND p.status='uncertain'
     AND ${reviewExcluded} AND ${due} ORDER BY p.created_at`, [destinationId]);
   for (const publication of uncertain.rows) await reconcile(publication,current);
@@ -103,6 +118,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
     }
     const desired = (await db.query<Publication>(`${publicationSelect} WHERE p.id=$1 AND p.status='prepared'`,[publication.id])).rows[0];
     if (desired) await sendPrepared(desired,api,latest);
+    if (await reservedPublication(destinationId)) return;
   }
   await prepareThreadUpdates(destinationId);
   await retryEdits(api,current,destinationId);

@@ -4,6 +4,7 @@ import { getSettings } from '../settings.js';
 import { BotApi, BotError } from './bot-api.js';
 import { editPublication, recordFailure } from './delivery.js';
 import { deletePublicationMessages } from './media-delivery.js';
+import { destinationBlocked } from './destination-order.js';
 import { actionKey, loadAction, snapshotHash } from './approval.js';
 import { locked, publicationEditSelect, rateLimited, type Publication } from './store.js';
 
@@ -17,6 +18,7 @@ export async function executeReviewedAction(id: string, api = new BotApi()): Pro
   return locked('news-bot-digest', async () => {
     const action = await loadAction(db,id);
     if (!action) throw new Error('Publication action approval missing');
+    if (await destinationBlocked(action.destinationId)) return false;
     // Full-content media repairs require their own explicit, lossless executor.
     if (action.operation === 'edit' && action.fullContentRepair) return false;
     if (action.state === 'completed') return true;

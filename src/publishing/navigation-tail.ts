@@ -67,7 +67,11 @@ export function stripNavigationTail(messages:RenderedMessage[],sources:Publicati
     const suffixSections=sections.filter(item=>item.start>=section.start);
     if (suffixSections.some((item,index)=>!following.some(link=>link.offset>item.end
       && link.offset<(suffixSections[index+1]?.start??plain.length)))) continue;
-    const ranges=[...suffixSections,...following.map(link=>({ start:link.offset,end:link.offset+link.length }))]
+    const ranges=[...suffixSections,...following.map(link=>{
+      // Current link rows use an unlinked list marker. Cover it only immediately before a known URL.
+      const marker=/\n[ \t]*🔸[ \t]+$/u.exec(plain.slice(section.start,link.offset));
+      return { start:link.offset-(marker ? marker[0].length-1 : 0),end:link.offset+link.length };
+    })]
       .sort((left,right)=>left.start-right.start);
     let end=section.start; let safe=true;
     for (const range of ranges) {

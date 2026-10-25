@@ -4,7 +4,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { BotApi, BotError } from './bot-api.js';
 import { renderFullText,withUpdateMarker } from './full-text.js';
 import { renderCaption } from './caption.js';
-import { cleanLegacyHeadings } from './message-render.js';
 import { escapeHtml,type RenderedMessage } from './render.js';
 import { publicationSnapshotSchema,type PublicationSnapshot } from '../types.js';
 import type { Publication } from './store.js';
@@ -13,6 +12,7 @@ const url=process.env.TEST_DATABASE_URL;
 const schema=`navigation_${randomUUID().replaceAll('-','')}`;
 let admin:pg.Pool;
 let database:typeof import('../db.js');
+let cleanLegacyHeadings:typeof import('./message-render.js')['cleanLegacyHeadings'];
 let store:typeof import('./store.js');
 let threads:typeof import('./thread-updates.js');
 let updates:typeof import('./updates.js');
@@ -59,7 +59,9 @@ describe.skipIf(!url)('publication navigation in PostgreSQL',()=>{
     admin=new pg.Pool({ connectionString:url }); await admin.query(`CREATE SCHEMA ${schema}`);
     const scoped=new URL(url??''); scoped.searchParams.set('options',`-c search_path=${schema},public`);
     vi.stubEnv('DATABASE_URL',scoped.toString()); vi.stubEnv('TELEGRAM_BOT_TOKEN','123:synthetic');
-    database=await import('../db.js'); await database.migrate(); store=await import('./store.js');
+    database=await import('../db.js');
+    expect((await database.db.query('SELECT current_schema() AS name')).rows[0]?.name).toBe(schema);
+    await database.migrate(); cleanLegacyHeadings=(await import('./message-render.js')).cleanLegacyHeadings; store=await import('./store.js');
     threads=await import('./thread-updates.js'); updates=await import('./updates.js');
     navigation=await import('./navigation-delivery.js'); relations=await import('../pipeline/story-relations.js');
   });
@@ -327,6 +329,56 @@ describe.skipIf(!url)('publication navigation in PostgreSQL',()=>{
       WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`,[c.story,d.story]);
     await database.db.query("UPDATE story_publication_threads SET classification_version='old-verified' WHERE story_id=$1",[d.story]);
     expect(await targets()).toEqual([postUrl('20'),postUrl('30')]);
+  });
+
+  it('uses only text canonical IDs as internal targets, never historical captions or attached pictures',async()=>{
+    const a=await post('10'); const legacy=await post('20',body,true); const text=await post('30');
+    await classify(a.story,legacy.story,'related'); await classify(a.story,text.story,'related');
+    const batch=await one("INSERT INTO publication_media_batches(publication_id,batch_number,status) VALUES($1,0,'sent') RETURNING id",[text.id]);
+    await database.db.query(`INSERT INTO publication_media_items(batch_id,ordinal,type,mime_type,digest,message_id)
+      VALUES($1,0,'image','image/jpeg','picture-digest','29')`,[batch]);
+    const {relatedPublicationSources,textNavigationSources,latestUpdateTarget}=await import('./navigation.js');
+    expect((await relatedPublicationSources(database.db,a.story,'-100123','123')).map(source=>source.url)).toEqual([postUrl('30')]);
+    const links=['20','29','30'].map(id=>({...auditSource,url:postUrl(id),unverifiedPublication:undefined,previousPublication:true as const}));
+    const factual={...auditSource,url:postUrl('20'),unverifiedPublication:undefined};
+    expect((await textNavigationSources(database.db,[...links,factual],'-100123')).map(source=>source.url))
+      .toEqual([postUrl('30'),postUrl('20')]);
+    await classify(a.story,legacy.story,'same');
+    expect(await latestUpdateTarget(database.db,a.id)).toBeNull();
+  });
+
+  it('formats new navigation and update markers with diamond rows and text-post headlines',async()=>{
+    const a=await post('10',{...body,presentationVersion:1});
+    const newest=await post('20',{...body,presentationVersion:1,headline:'Новейшие факты'});
+    await classify(a.story,newest.story,'same'); await tick();
+    const snapshot=publicationSnapshotSchema.parse((await load(a.id)).content);
+    expect(snapshot.updatedToHeadline).toBe('Новейшие факты');
+    const edited=vi.mocked(api.edit).mock.calls.find(call=>call[1]==='10')?.[2];
+    expect(edited?.plainText).toContain('UPD:\n🔸 #20 · Новейшие факты');
+    expect(edited?.links[0]?.url).toBe(postUrl('20'));
+    await classify(a.story,newest.story,'related'); await tick();
+    const related=vi.mocked(api.edit).mock.calls.filter(call=>call[1]==='10').at(-1)?.[2];
+    expect(related?.plainText).not.toContain('UPD:');
+    expect(related?.plainText).toContain('Другие публикации\n🔸 #20 · Новейшие факты');
+    expect(related?.plainText.match(/#20 · Новейшие факты/gu)).toHaveLength(1);
+  });
+
+  it('overflows a versioned update marker without truncating a full canonical text or duplicating it on later edits',async()=>{
+    const content={...body,presentationVersion:1 as const,details:'Ф'.repeat(4030)};
+    const a=await post('10',content); const target=await post('20',{...body,presentationVersion:1,headline:'Новый полный заголовок события'});
+    await classify(a.story,target.story,'same'); await tick();
+    await navigation.retryNavigationParts(api,settings,'-100123');
+    const edited=vi.mocked(api.edit).mock.calls.find(call=>call[1]==='10')?.[2];
+    expect(edited?.plainText).toBe(renderFullText(content)[0]?.plainText);
+    const footer=vi.mocked(api.send).mock.calls.find(call=>call[2]==='10')?.[1];
+    expect(footer?.plainText).toContain('UPD:\n🔸 #20 · Новый полный заголовок события');
+    expect(footer?.links.map(link=>link.url)).toEqual([postUrl('20')]);
+    await classify(a.story,target.story,'related'); await tick();
+    await navigation.retryNavigationParts(api,settings,'-100123');
+    const changed=vi.mocked(api.edit).mock.calls.filter(call=>call[1]==='999').at(-1)?.[2];
+    expect(changed?.plainText).not.toContain('UPD:');
+    expect(changed?.plainText).toContain('Другие публикации\n🔸 #20 · Новый полный заголовок события');
+    expect(changed?.links.map(link=>link.url)).toEqual([postUrl('20')]);
   });
 
   it('does not stamp or edit unrelated history just to set a navigation version',async()=>{

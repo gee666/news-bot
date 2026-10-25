@@ -7,6 +7,7 @@ import { telegramTimeouts } from './telegram-transport.js';
 import { destination, publicationSelect, rateLimited, type Publication } from './store.js';
 import { render, type RenderedMessage } from './render.js';
 import { contentFingerprint } from './reconciliation.js';
+import { destinationBlocked, releaseDestination } from './destination-order.js';
 import { fullRepairContinuation } from './approval.js';
 
 interface TextPart {
@@ -18,7 +19,7 @@ export async function preparePublicationText(publication: Publication): Promise<
   return transaction(async client => {
     const current = (await client.query<Publication>('SELECT * FROM publications WHERE id=$1 FOR UPDATE', [publication.id])).rows[0];
     if (!current || current.status !== 'prepared' || current.snapshot_id !== publication.snapshot_id) throw new BotError('publication_text_plan_changed', 'retryable');
-    const attempted = (await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND operation='send' LIMIT 1`, [publication.id])).rows.length > 0;
+    const attempted = (await client.query(`SELECT 1 FROM request_attempts WHERE publication_id=$1 AND (operation='send' OR operation LIKE 'send_media:%') LIMIT 1`, [publication.id])).rows.length > 0;
     const frozen = (await client.query<{ content: unknown; snapshot_id: string }>(`SELECT content,snapshot_id FROM publication_text_parts
       WHERE publication_id=$1 AND part_number=0`, [publication.id])).rows[0];
     if (frozen && frozen.snapshot_id === publication.snapshot_id) return renderedMessageSchema.parse(frozen.content);
@@ -45,6 +46,7 @@ export async function preparePublicationText(publication: Publication): Promise<
 /** Match media delivery policy: finish already-started frozen work, never send ambiguous parts twice. */
 export async function deliverPublicationText(publication: Publication, api: BotApi, settings: AppSettings): Promise<boolean> {
   if (!publication.message_id || publication.status !== 'published') return false;
+  if (await destinationBlocked(publication.destination_id, publication.delivery_kind === 'media_first' ? publication.id : undefined)) return false;
   const fullRepairId = publication.delivery_kind === 'album' ? await fullRepairContinuation(db,publication) : null;
   if (publication.delivery_kind === 'album' && !fullRepairId) return false;
   const botId = String((await api.identity()).id);
@@ -67,6 +69,7 @@ export async function deliverPublicationText(publication: Publication, api: BotA
         AND NOT EXISTS(SELECT 1 FROM publication_replacements WHERE duplicate_publication_id=p.id AND status<>'failed') FOR UPDATE OF p`,
       [publication.id,publication.message_id,publication.destination_id,botId]);
       const owned = owner.rows[0];
+      if (await destinationBlocked(publication.destination_id, publication.delivery_kind === 'media_first' ? publication.id : undefined, client)) return null;
       if (!owned || owned.snapshot_id !== publication.snapshot_id || await rateLimited(client)) return null;
       if (owned.delivery_kind === 'album' && (!fullRepairId || await fullRepairContinuation(client,owned) !== fullRepairId)) return null;
       const claimed = await client.query(`UPDATE publication_text_parts SET status='running',attempt_count=attempt_count+1,
@@ -102,7 +105,10 @@ export async function deliverPublicationText(publication: Publication, api: BotA
         [attemptId,JSON.stringify({ messageId })]);
     });
   }
-  await db.query(`UPDATE publications SET error_code=NULL WHERE id=$1 AND error_code LIKE 'publication_text_%'`, [publication.id]);
+  await transaction(async client => {
+    await client.query(`UPDATE publications SET error_code=NULL WHERE id=$1 AND error_code LIKE 'publication_text_%'`, [publication.id]);
+    await releaseDestination(publication.id,client);
+  });
   return true;
 }
 
