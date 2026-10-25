@@ -1,28 +1,48 @@
 import { randomUUID } from 'node:crypto';
-import { expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
+import type { PiRequest } from '../models/pi.js';
+import { groupingChunks, groupingPrompt } from './grouping-budget.js';
+import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 import { groupReport } from './grouping-model.js';
 import { defaultSettings } from '../settings.js';
 import { modelResult } from './generation.test-helpers.js';
 import type { EventInput } from './consolidation-input.js';
+const cache = vi.hoisted(() => new Map<string, unknown>());
+vi.mock('../db.js', () => ({ db: { query: vi.fn(async (sql: string, args: unknown[]) => {
+  const key = JSON.stringify(args.slice(0, 3));
+  if (sql.includes('SELECT value')) return { rows: cache.has(key) ? [{ value: cache.get(key) }] : [] };
+  cache.set(key, JSON.parse(String(args[3])));
+  return { rows: [] };
+}) } }));
+beforeEach(() => { cache.clear(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 vi.mock('./privacy.js', () => ({ approveRemoteInput: vi.fn() }));
-vi.mock('./generation-model.js', () => ({ recordGenerationFailure: vi.fn() }));
+vi.mock('./generation-model.js', () => ({ recordGenerationFailure: vi.fn(), generationError: vi.fn() }));
 const context = { id: randomUUID(), attempt: 3, batchId: null, revisionId: null, storyId: null };
 function report(text: string, url = 'https://example.org/news'): EventInput {
   return { id: randomUUID(), text, fingerprint: randomUUID(), reports: [{ text, sourceUrl: url, links: [url] }] };
 }
-it('compares all groups once with complete report provenance, even beyond the old shortlist and JEV context', async () => {
+it('compares every retained group in bounded requests with complete report provenance', async () => {
   const incoming = report('Compiler 2 is now available for $40.');
-  const candidates = Array.from({ length: 30 }, (_, index) => report(`Report ${index}. ` + 'Detail. '.repeat(5000)));
+  const candidates = Array.from({ length: 30 }, (_, index) => report(`Report ${index}. ` + 'Detail. '.repeat(1500)));
   const last = candidates.at(-1);
   if (!last) throw new Error('Missing fixture');
-  const generator = { generate: vi.fn().mockResolvedValue(modelResult({ matches: candidates.map(candidate => ({ storyId: candidate.id, relation: candidate.id === last.id ? 'same' : 'unrelated' })) })) };
+  const seen: Array<Pick<EventInput, 'id' | 'reports'>> = [];
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    expect(Buffer.byteLength(request.prompt)).toBeLessThanOrEqual(98_304);
+    const chunk = JSON.parse(request.prompt) as { incoming: EventInput; candidates: EventInput[] };
+    expect(chunk.incoming).toEqual({ id: incoming.id, reports: incoming.reports });
+    seen.push(...chunk.candidates);
+    return modelResult({ matches: chunk.candidates.map(candidate => ({ storyId: candidate.id,
+      relation: candidate.id === last.id ? 'same' : 'unrelated' })) });
+  }) };
   expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toContainEqual({ storyId: last.id, relation: 'same' });
-  expect(generator.generate).toHaveBeenCalledOnce();
+  expect(seen).toEqual(candidates.map(({ id, reports }) => ({ id, reports })));
+  expect(generator.generate.mock.calls.length).toBeGreaterThan(1);
   const request = generator.generate.mock.calls[0]?.[0];
-  expect(JSON.parse(request.prompt)).toEqual({ incoming,candidates });
-  expect(request.systemPrompt).toContain('no bridging');
-  expect(request.systemPrompt).toContain('downloadable quantized checkpoint');
-  expect(request.systemPrompt).toContain('same SPECIFIC headline');
+  expect(request?.systemPrompt).toContain('no bridging');
+  expect(request?.systemPrompt).toContain('downloadable quantized checkpoint');
+  expect(request?.systemPrompt).toContain('same SPECIFIC headline');
 });
 it('rejects invented or repeated IDs rather than attaching reports to an unrelated story', async () => {
   const candidate = report('Release.');
@@ -50,4 +70,94 @@ it('does not call a model when no earlier story exists', async () => {
   const generator = { generate: vi.fn() };
   expect(await groupReport(report('New release.'),[],defaultSettings,context,generator)).toEqual([]);
   expect(generator.generate).not.toHaveBeenCalled();
+});
+
+it('budgets UTF-8 bytes and candidate count without truncation or omissions', () => {
+  const incoming = report('Новость');
+  const candidates = Array.from({ length: 5 }, () => report('Я'.repeat(1000)));
+  const bytes = Buffer.byteLength(groupingPrompt(incoming, candidates.slice(0, 2)));
+  const chunks = groupingChunks(incoming, candidates, { maxBytes: bytes, maxCandidates: 2 });
+  expect(chunks.map(chunk => chunk.length)).toEqual([2, 2, 1]);
+  expect(chunks.flat()).toEqual(candidates);
+  for (const chunk of chunks) expect(Buffer.byteLength(groupingPrompt(incoming, chunk))).toBeLessThanOrEqual(bytes);
+  expect(() => groupingChunks(incoming, candidates, { maxBytes: 100, maxCandidates: 2 })).toThrow('complete story pair');
+});
+it('reuses completed chunks after a checkpoint without spending another model call', async () => {
+  vi.stubEnv('GROUPING_MAX_CANDIDATES', '1');
+  vi.stubEnv('PROCESSING_SLICE_MS', '1000');
+  let clock = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  const incoming = report('Release');
+  const candidates = [report('One'), report('Two')];
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    clock += 1001;
+    const chunk = JSON.parse(request.prompt) as { candidates: EventInput[] };
+    return modelResult({ matches: chunk.candidates.map(candidate => ({ storyId: candidate.id, relation: 'unrelated' })) });
+  }) };
+  await expect(withProcessingSlice(() => groupReport(incoming,candidates,defaultSettings,context,generator))).rejects.toBeInstanceOf(ProcessingYield);
+  expect(generator.generate).toHaveBeenCalledTimes(1);
+  expect(await withProcessingSlice(() => groupReport(incoming,candidates,defaultSettings,context,generator))).toHaveLength(2);
+  expect(generator.generate).toHaveBeenCalledTimes(2);
+  await groupReport(incoming,candidates,defaultSettings,context,generator);
+  expect(generator.generate).toHaveBeenCalledTimes(2);
+  await groupReport(incoming,candidates,{ ...defaultSettings, modelVersion: defaultSettings.modelVersion + 1 },context,generator);
+  expect(generator.generate).toHaveBeenCalledTimes(4);
+});
+it('does not cache incomplete classifications or reuse changed evidence', async () => {
+  const incoming = report('Release');
+  const candidates = [report('One')];
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    const chunk = JSON.parse(request.prompt) as { candidates: EventInput[] };
+    return modelResult({ matches: chunk.candidates.map(candidate => ({ storyId: candidate.id, relation: 'unrelated' })) });
+  }) };
+  await groupReport(incoming,candidates,defaultSettings,context,generator);
+  const first = candidates[0];
+  if (!first) throw new Error('Missing fixture');
+  await groupReport(incoming,[{ ...first, reports: [{ text: 'Changed evidence', sourceUrl: 'https://example.org/news', links: [] }] }],defaultSettings,context,generator);
+  expect(generator.generate).toHaveBeenCalledTimes(2);
+  for (const key of cache.keys()) cache.set(key, { matches: [] });
+  await groupReport(incoming,candidates,defaultSettings,context,generator);
+  expect(generator.generate).toHaveBeenCalledTimes(3);
+});
+it('rechecks same matches across chunks before allowing a merge', async () => {
+  vi.stubEnv('GROUPING_MAX_CANDIDATES', '1');
+  const incoming = report('Broad recap');
+  const candidates = [report('A discovered a bug'), report('B shut down a game')];
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    const chunk = JSON.parse(request.prompt) as { incoming: EventInput; candidates: EventInput[] };
+    return modelResult({ matches: chunk.candidates.map(candidate => ({ storyId: candidate.id,
+      relation: chunk.incoming.id === incoming.id ? 'same' : 'related' })) });
+  }) };
+  // A conflict must fail closed; neither group may be attached or merged.
+  const { generationError } = await import('./generation-model.js');
+  vi.mocked(generationError).mockRejectedValueOnce(new Error('bridge conflict'));
+  await expect(groupReport(incoming,candidates,defaultSettings,context,generator)).rejects.toThrow('bridge conflict');
+  expect(generator.generate).toHaveBeenCalledTimes(3);
+});
+it('bounds repair evidence without appending an oversized invalid response', async () => {
+  const incoming = report('Release');
+  const candidates = [report('One')];
+  let calls = 0;
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    expect(request.prompt).toBe(groupingPrompt(incoming, candidates));
+    calls++;
+    return modelResult(calls === 1 ? 'x'.repeat(200_000)
+      : { matches: candidates.map(candidate => ({ storyId: candidate.id, relation: 'unrelated' })) });
+  }) };
+  expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toHaveLength(1);
+  expect(generator.generate).toHaveBeenCalledTimes(2);
+});
+it('preserves all 703 candidates in a multi-megabyte retained catalogue', async () => {
+  const incoming = report('Current release');
+  const candidates = Array.from({ length: 703 }, (_, index) => report(`Story ${index}. ` + 'Я'.repeat(1500)));
+  const seen: string[] = [];
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    expect(Buffer.byteLength(request.prompt)).toBeLessThanOrEqual(98_304);
+    const chunk = JSON.parse(request.prompt) as { candidates: EventInput[] };
+    expect(chunk.candidates.length).toBeLessThanOrEqual(32);
+    seen.push(...chunk.candidates.map(candidate => candidate.id));
+    return modelResult({ matches: chunk.candidates.map(candidate => ({ storyId: candidate.id, relation: 'unrelated' })) });
+  }) };
+  expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toHaveLength(703);
+  expect(seen).toEqual(candidates.map(candidate => candidate.id));
 });

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppSettings } from '../settings.js';
 import { BotApi } from '../publishing/bot-api.js';
+import { expectFollowupMarker } from './grouping.test-helpers.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 
 const model = vi.hoisted(() => ({ groupingCalls: 0, extractionCalls: 0, linksCalls: 0, relation: '' }));
@@ -24,8 +25,9 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
         .flatMap(target=>links.data.links.map(link=>({linkId:link.id,targetId:target.id,classification:'relevant'}))) });
     }
     model.groupingCalls++;
-    const input = z.object({ incoming: z.object({ text: z.string() }),
-      candidates: z.array(z.object({ id: z.uuid(), text: z.string() })) }).parse(raw);
+    const event = z.object({ id: z.uuid(), reports: z.array(z.object({ text: z.string() })) })
+      .transform(value => ({ ...value, text: value.reports.map(report => report.text).join('\n\n') }));
+    const input = z.object({ incoming: event, candidates: z.array(event) }).parse(raw);
     if (input.incoming.text.includes('Сбой')) throw new ModelRequestError(
       failureMetadata(new RequestFault('transient'), 'grouping', 'pi', 1, 0));
     return modelResult({ matches: input.candidates.map(candidate => ({ storyId: candidate.id, relation: model.relation ||
@@ -129,7 +131,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.']));
     await publish(); await publish();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(3);
-    expect(vi.mocked(BotApi.prototype.edit).mock.calls.every(call => call[2].plainText.startsWith('UPD: https://t.me/c/123/'))).toBe(true);
+    expect(BotApi.prototype.edit).toHaveBeenCalled(); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2], '103'));
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
     expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE text LIKE '%40 долларов%' ")).rows)
       .toEqual([{previous:canonical}]);
@@ -151,7 +153,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE story_id=$1',[canonical])).rows)
       .toEqual([{pending_snapshot_id:null}]);
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(BotApi.prototype.edit).mock.calls.every(call => call[2].plainText.startsWith('UPD: https://t.me/c/123/'))).toBe(true);
+    expect(BotApi.prototype.edit).toHaveBeenCalled(); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2], '102'));
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
   });
   it('creates cumulative posts through the whole thread even when the incoming report is a duplicate', async () => {
@@ -173,12 +175,11 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
       .toEqual([{previous:latest}]);
     expect((await database.db.query('SELECT story_id FROM publications WHERE pending_snapshot_id IS NOT NULL')).rows).toEqual([]);
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(4);
-    const latestUrl = 'https://t.me/c/123/104';
     for (const message of ['101','102','103']) {
       const edits = vi.mocked(BotApi.prototype.edit).mock.calls.filter(call => call[1] === message);
-      expect(edits.at(-1)?.[2].plainText).toMatch(new RegExp('^UPD: ' + latestUrl));
+      expectFollowupMarker(edits.at(-1)?.[2], '104');
     }
-    expect(vi.mocked(BotApi.prototype.edit).mock.calls.every(call => call[2].plainText.startsWith('UPD: https://t.me/c/123/'))).toBe(true);
+    vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2]));
     const final=vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text ?? '';
     expect(final).toContain('выпустила Compiler 2'); expect(final).toContain('40 долларов'); expect(final).toContain('поддержку Linux');
   });
@@ -334,7 +335,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query("SELECT id FROM judgments WHERE stage='published_update'")).rows).toEqual([]);
     expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
     expect((await database.db.query('SELECT headline FROM stories WHERE id=$1',[canonical])).rows[0]?.headline).not.toBeNull();
-    expect(BotApi.prototype.send).toHaveBeenCalledTimes(2); expect(vi.mocked(BotApi.prototype.edit).mock.calls.every(call => call[2].plainText.startsWith('UPD: https://t.me/c/123/'))).toBe(true);
+    expect(BotApi.prototype.send).toHaveBeenCalledTimes(2); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2]));
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[update])).rows).toEqual([{status:'completed'}]);
   });
   it('parks one grouping failure while a healthy sibling is generated and published', async () => {
