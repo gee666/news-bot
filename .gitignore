@@ -11,3 +11,4 @@ credentials/
 *.session-journal
 *.log
 tmp/
+backups/
