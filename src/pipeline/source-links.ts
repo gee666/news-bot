@@ -111,7 +111,7 @@ export async function classifyItemLinks(revisionId: string, settings: AppSetting
       const nextPairs = new Map(result.value.associations.map(pair => [`${pair.linkId}:${pair.targetId}`, pair]));
       const changed = new Set<string>();
       for (const [key, pair] of oldPairs) {
-        if (nextPairs.get(key)?.classification !== pair.classification) changed.add(pair.story_id);
+        if ((nextPairs.get(key)?.classification === 'relevant') !== (pair.classification === 'relevant')) changed.add(pair.story_id);
       }
       await client.query(`DELETE FROM story_link_sources sl USING item_links l
         WHERE sl.link_id=l.id AND l.revision_id=$1`, [revisionId]);
@@ -119,7 +119,7 @@ export async function classifyItemLinks(revisionId: string, settings: AppSetting
         await client.query(`INSERT INTO story_link_sources(link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
           VALUES($1,$2,$3,$4,$5,$6,$7)`, [pair.linkId,pair.targetId,pair.classification,
         `${settings.piProvider}/${settings.piModel}`, settings.modelVersion,LINK_VERSION,hash({ revisionId,pair })]);
-        if (oldPairs.get(`${pair.linkId}:${pair.targetId}`)?.classification !== pair.classification) changed.add(pair.targetId);
+        if ((oldPairs.get(`${pair.linkId}:${pair.targetId}`)?.classification === 'relevant') !== (pair.classification === 'relevant')) changed.add(pair.targetId);
       }
       if (changed.size) {
         await client.query(`UPDATE stories s SET interest_stale=true,updated_at=now() WHERE id=ANY($1::uuid[]) AND ${unpublished('s')}`, [[...changed]]);
