@@ -215,3 +215,14 @@ describe('digest safety and completeness', () => {
     expect(mocks.send).not.toHaveBeenCalled();
   });
 });
+
+it('dispatches new canonical text before old edits and replacement maintenance', async () => {
+  const prepared = publication(99);
+  const order: string[] = [];
+  mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT p.*') && sql.includes("p.status='prepared'") ? [prepared] : [] }));
+  mocks.send.mockImplementation(async () => { order.push('send'); return '99'; });
+  mocks.retryEdits.mockImplementation(async () => { order.push('edits'); });
+  mocks.retryReplacements.mockImplementation(async () => { order.push('replacements'); });
+  await publishDigest(enabled);
+  expect(order).toEqual(['send', 'edits', 'replacements']);
+});

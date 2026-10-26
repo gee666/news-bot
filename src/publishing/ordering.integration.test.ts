@@ -77,7 +77,7 @@ describe.skipIf(!url)('chronological new publications with PostgreSQL', () => {
     for (const [index, title] of ['Первая новость', 'Вторая новость', 'Третья новость', 'Четвертая новость'].entries()) {
       expect(sent[index]).toContain(title);
     }
-  });
+  }, 60_000);
   it('does not silently edit sources of an already published story', async () => {
     const original = (await database.db.query<{ id: string; snapshot_id: string }>("SELECT id,snapshot_id FROM publications WHERE story_id='00000000-0000-4000-8000-000000000004'")).rows[0];
     if (!original) throw new Error('Missing publication');

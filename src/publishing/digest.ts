@@ -81,8 +81,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   // Only digest runs consume ready events; maintenance resumes authorized work.
   if (selectNewStories) await prepareReadyStories(current,destinationId);
   await adoptPreparedPublications(current,destinationId);
-  await retryEdits(api,current,destinationId);
-  await retryReplacements(api,current,destinationId);
+  // New canonical posts take priority over repairs to already delivered posts.
   const prepared = await db.query<Publication>(`${publicationSelect} JOIN stories news ON news.id=p.story_id WHERE p.destination_id=$1 AND p.story_id IS NOT NULL
     AND p.status='prepared' AND ${due}
     AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=p.story_id)
@@ -96,6 +95,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   }
   await prepareThreadUpdates(destinationId);
   await retryEdits(api,current,destinationId);
+  await retryReplacements(api,current,destinationId);
 }
 
 export async function publishDigest(settings: AppSettings): Promise<void> {

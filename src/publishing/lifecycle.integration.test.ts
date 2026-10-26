@@ -84,6 +84,18 @@ describe.skipIf(!url)('publication lifecycle blockers in PostgreSQL', () => {
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
+  it('backs off an unresolved edit read instead of monopolizing every maintenance pass', async () => {
+    const { id,edit } = await pendingEdit();
+    const reader = vi.spyOn(reconciliation,'readMessageFingerprint').mockResolvedValue(null);
+    expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
+    expect(reader).toHaveBeenCalledOnce();
+    expect(edit).toHaveBeenCalledOnce();
+    const attempt = (await database.db.query<{ status:string; waiting:boolean }>(`SELECT status,next_retry_at>now() AS waiting
+      FROM request_attempts WHERE publication_id=$1 AND operation='edit'`,[id])).rows[0];
+    expect(attempt).toEqual({ status:'unknown',waiting:true });
+    expect(await updates.retryEdits(new BotApi(),settings,'-100123')).toBe(0);
+    expect(reader).toHaveBeenCalledOnce();
+  });
   it.each([false,true])('adopts the only unsent loser atomically and sends canonical content once, with raw loser removed=%s', async removed => {
     const canonical = await story(); const loser = await story(); const id = await publication(loser);
     const previous = await row(id); await alias(canonical,loser,id);

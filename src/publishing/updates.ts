@@ -125,13 +125,19 @@ export async function retryEdits(api: BotApi, settings: AppSettings, destination
     AND NOT EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id)
     AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key='publication_removal:'||p.id::text)
     AND ($2::uuid[] IS NULL OR p.id IN(SELECT chosen.id FROM (${canonicalPublications}) chosen WHERE chosen.canonical_story_id=ANY($2)))
-    AND ${editDue} ORDER BY p.created_at`, [destinationId,storyIds ?? null,publicationIds ?? null]);
+    AND ${editDue} ORDER BY p.created_at ${storyIds === undefined && publicationIds === undefined ? 'LIMIT 1' : ''}`,
+  [destinationId,storyIds ?? null,publicationIds ?? null]);
   for (const row of rows.rows) {
     if (await rateLimited()) break;
     await locked(`news-bot-publication:${row.id}`, async client => {
       await transaction(tx => invalidateStaleEdits(tx,settings,destinationId,row.id,storyIds));
       const publication = (await client.query<Publication>(`${publicationEditSelect} WHERE p.id=$1 AND ${editDue}`, [row.id])).rows[0];
-      if (publication?.bot_id === botId && await editPublication(publication,api,settings)) edited++;
+      if (publication?.bot_id === botId) {
+        if (await editPublication(publication,api,settings)) edited++;
+        else await client.query(`UPDATE request_attempts SET next_retry_at=now()+$2*interval '1 millisecond'
+          WHERE publication_id=$1 AND operation='edit' AND status='unknown'
+            AND (next_retry_at IS NULL OR next_retry_at<=now())`, [row.id,settings.retryBaseMs]);
+      }
     });
   }
   return edited;
