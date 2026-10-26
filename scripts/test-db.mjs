@@ -57,12 +57,9 @@ function redactOutput(stream, output, secrets) {
   stream.on('end', () => { if (pending) flush(pending); });
 }
 
-async function runTests(configuration, dbOnly) {
+async function runTests(configuration, files) {
   const url = configuration.testUrl;
-  const child = spawn(process.execPath, ['node_modules/vitest/vitest.mjs', 'run', ...(dbOnly ? [
-    'src/db.test.ts', 'src/settings.test.ts', 'src/schema.test.ts',
-    'src/pipeline/pipeline.integration.test.ts', 'src/publishing/history.test.ts',
-  ] : [])], { cwd: root, env: testEnvironment(url, process.env), stdio: ['ignore', 'pipe', 'pipe'], timeout: 300000 });
+  const child = spawn(process.execPath, ['node_modules/vitest/vitest.mjs', 'run', '--hookTimeout=60000', ...files], { cwd: root, env: testEnvironment(url, process.env), stdio: ['ignore', 'pipe', 'pipe'], timeout: 300000 });
   const secrets = [url.toString(), url.password, decodeURIComponent(url.password)];
   redactOutput(child.stdout, process.stdout, secrets);
   redactOutput(child.stderr, process.stderr, secrets);
@@ -73,9 +70,14 @@ async function runTests(configuration, dbOnly) {
 }
 
 export async function main(args = process.argv.slice(2)) {
-  if (args.length > 1 || (args.length === 1 && args[0] !== '--db-only')) {
-    throw new Error('Usage: node scripts/test-db.mjs [--db-only]');
+  if (args.some(arg => !/^src\/[a-zA-Z0-9_./-]+\.test\.ts$/u.test(arg) || arg.includes('..'))
+    && !(args.length === 1 && args[0] === '--db-only')) {
+    throw new Error('Usage: node scripts/test-db.mjs [--db-only | src/<files>.test.ts ...]');
   }
+  const files = args[0] === '--db-only' ? [
+    'src/db.test.ts', 'src/settings.test.ts', 'src/schema.test.ts',
+    'src/pipeline/pipeline.integration.test.ts', 'src/publishing/history.test.ts',
+  ] : args;
   let file = {};
   try {
     const path = resolve(root, '.env');
@@ -94,7 +96,7 @@ export async function main(args = process.argv.slice(2)) {
     } finally { await admin.end(); }
   }
   // Each integration suite migrates its own random schema. Never migrate application history here.
-  return runTests(configuration, args[0] === '--db-only');
+  return runTests(configuration, files);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

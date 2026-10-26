@@ -53,11 +53,15 @@ it('rejects invented or repeated IDs rather than attaching reports to an unrelat
 it('uses only the original comparison for related decisions and caches it without a second model call', async () => {
   const incoming=report('OpenAI found a critical PHP flaw.');
   const candidates=[report('Alderon shut down because of that PHP flaw.'),report('A company released unrelated servers.')];
-  const matches=candidates.map((candidate,index)=>({storyId:candidate.id,relation:index===0?'related':'unrelated'}));
+  const matches=candidates.map((candidate,index)=>({storyId:candidate.id,relation:index===0?'related':'unrelated',
+    ...(index===0 ? { relatedEvidence: { incomingQuote:incoming.text,candidateQuote:candidate.text,
+      connection:'The game shutdown was caused by the discovered PHP vulnerability.' } } : {}) }));
   const generator={generate:vi.fn(async(request:PiRequest)=>{
     expect(request.systemPrompt).toContain('documented cause, consequence, direct response');
     expect(request.systemPrompt).toContain('Shared companies, products, skills, security risks');
     expect(request.systemPrompt).toContain('missing or ambiguous, choose unrelated');
+    expect(request.systemPrompt).toContain('General forecasts about an industry');
+    expect(request.systemPrompt).toContain('Juxtaposition in one source post');
     return modelResult({matches});
   })};
   const decisions=await groupReport(incoming,candidates,defaultSettings,context,generator);
@@ -138,9 +142,8 @@ it.each([1, 2])('attaches only to the highest-ranked same candidate with chunk s
   }) };
   const decisions = await groupReport(incoming,candidates,defaultSettings,context,generator);
   expect(decisions.filter(decision => decision.relation === 'same')).toEqual([{ storyId: candidates[0]?.id, relation: 'same' }]);
-  expect(decisions.filter(decision => decision.relation === 'related')).toEqual(candidates.slice(1).map(candidate => ({
-    storyId: candidate.id, relation: 'related', relatedPromptVersion: 'duplicate-v6',
-  })));
+  expect(decisions).toEqual([{ storyId:candidates[0]?.id,relation:'same' }]);
+  expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toEqual(decisions);
   expect(generator.generate).toHaveBeenCalledTimes(Math.ceil(candidates.length / size));
 });
 it('bounds repair evidence without appending an oversized invalid response', async () => {
@@ -169,4 +172,21 @@ it('preserves all 703 candidates in a multi-megabyte retained catalogue', async 
   }) };
   expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toHaveLength(703);
   expect(seen).toEqual(candidates.map(candidate => candidate.id));
+});
+
+it.each(['missing', 'invented incoming', 'invented candidate'])('omits related decisions with %s evidence without verification calls', async kind => {
+  const incoming = report('A forecast of rising GPU prices.');
+  const candidates = [report('An independent model release.'), report('A different event.')];
+  const generator = { generate: vi.fn(async () => modelResult({ matches: [
+    { storyId:candidates[0]?.id,relation:'related', ...(kind === 'missing' ? {} : { relatedEvidence: {
+      incomingQuote:kind === 'invented incoming' ? 'Not in the report' : incoming.text,
+      candidateQuote:kind === 'invented candidate' ? 'Not in the report' : candidates[0]?.text,
+      connection:'A claimed causal connection',
+    } }) }, { storyId:candidates[1]?.id,relation:'unrelated' },
+  ] })) };
+  const expected = [{ storyId:candidates[1]?.id,relation:'unrelated' }];
+  expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toEqual(expected);
+  expect(await groupReport(incoming,candidates,defaultSettings,context,generator)).toEqual(expected);
+  expect(generator.generate).toHaveBeenCalledOnce();
+  expect(generator.generate.mock.calls[0]).toBeDefined();
 });

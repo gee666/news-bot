@@ -76,6 +76,28 @@ describe.skipIf(!url)('verified bounded navigation selection',()=>{
     await prepareThreadUpdates('-100123');
     expect((await current())?.pending_snapshot_id).toBeTruthy();
   });
+  it('removes a repaired related edge from display once, then leaves maintenance idle',async()=>{
+    const own=await fixture('100',10); const target=await fixture('200',0);
+    await classify(own.story_id,target.story_id,'related');
+    const {prepareThreadUpdates}=await import('./thread-updates.js');
+    const apply=async()=>database.db.query('UPDATE publications SET snapshot_id=pending_snapshot_id,pending_snapshot_id=NULL WHERE pending_snapshot_id IS NOT NULL');
+    await prepareThreadUpdates('-100123'); await apply();
+    await database.db.query('DELETE FROM story_relations');
+    await prepareThreadUpdates('-100123');
+    const desired=(await database.db.query<{content:PublicationSnapshot}>(`SELECT snap.content FROM publications p
+      JOIN publication_snapshots snap ON snap.id=p.pending_snapshot_id WHERE p.id=$1`,[own.id])).rows[0]?.content;
+    expect(desired?.sources).toHaveLength(1);
+    expect(desired?.sources[0]).toMatchObject({unverifiedPublication:true});
+    expect(desired?.sources[0]?.relatedPublication).toBeUndefined();
+    const {render}=await import('./render.js');
+    if(!desired) throw new Error('Missing navigation repair');
+    expect(render(desired).plainText).not.toContain('Другие публикации');
+    await apply();
+    const count=(await database.db.query('SELECT count(*)::int n FROM publication_snapshots')).rows[0]?.n;
+    for(let tick=0;tick<3;tick++) await prepareThreadUpdates('-100123');
+    expect((await database.db.query('SELECT id FROM publications WHERE pending_snapshot_id IS NOT NULL')).rows).toEqual([]);
+    expect((await database.db.query('SELECT count(*)::int n FROM publication_snapshots')).rows[0]?.n).toBe(count);
+  });
   it('withholds old topical links and preserves every frozen link as hidden audit, leaving event text and previous links alone',async()=>{
     const target=await fixture('200',0); const previous=await fixture('90',-10);
     const related={url:'https://t.me/c/123/200',label:'Старая широкая связь',primary:false,access:'public' as const,

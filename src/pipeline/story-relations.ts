@@ -4,7 +4,10 @@ import { jevTemplates } from '../models/templates.js';
 import { publicationThreadEdges } from './generation-context.js';
 
 export type StoryRelation = 'same' | 'related' | 'unrelated';
-export interface StoryRelationDecision { storyId: string; relation: StoryRelation; relatedPromptVersion?: string }
+export interface StoryRelationDecision {
+  storyId: string; relation: StoryRelation; relatedPromptVersion?: string;
+  relatedEvidence?: { incomingQuote: string; candidateQuote: string; connection: string };
+}
 
 const sameEdges = `same_edges(a,b) AS (
   SELECT lower_story_id,upper_story_id FROM story_relations
@@ -68,7 +71,8 @@ export async function recordStoryRelations(storyId: string, decisions: readonly 
       ON CONFLICT(lower_story_id,upper_story_id) DO UPDATE SET relation=EXCLUDED.relation,
         classifier_version=EXCLUDED.classifier_version,provenance=EXCLUDED.provenance,classified_at=now()`,
     [storyId, decision.storyId, decision.relation, classifierVersion, JSON.stringify({ ...provenance,...(decision.relation === 'related' && decision.relatedPromptVersion
-      ? { relatedPromptVersion:decision.relatedPromptVersion } : {}) })]);
+      ? { relatedPromptVersion:decision.relatedPromptVersion } : {}),
+      ...(decision.relation === 'related' && decision.relatedEvidence ? { relatedEvidence:decision.relatedEvidence } : {}) })]);
     accepted.push(decision);
   }
   return accepted;

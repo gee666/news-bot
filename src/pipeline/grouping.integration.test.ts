@@ -31,7 +31,9 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
     model.groupingCalls++;
     if (input.incoming.text.includes('Сбой')) throw new ModelRequestError(
       failureMetadata(new RequestFault('transient'), 'grouping', 'pi', 1, 0));
-    return modelResult({ matches: input.candidates.map(candidate => ({ storyId: candidate.id, relation: model.relation ||
+    return modelResult({ matches: input.candidates.map(candidate => ({ storyId: candidate.id,
+      relatedEvidence: { incomingQuote:input.incoming.reports[0]?.text,candidateQuote:candidate.reports[0]?.text,
+        connection:'The shutdown is a consequence of the PHP vulnerability.' }, relation: model.relation ||
       (candidate.text.includes('PHP') && input.incoming.text.includes('PHP')
         ? (candidate.text.includes('Alderon') === input.incoming.text.includes('Alderon') ? 'same' : 'related')
         : candidate.text.includes('Compiler 2') && input.incoming.text.includes('Compiler 2') ? 'same' : 'unrelated') })) });
@@ -157,7 +159,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect(BotApi.prototype.edit).toHaveBeenCalled(); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2], '102'));
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
   });
-  it('records later same candidates as related rather than bridging published groups', async () => {
+  it('leaves later same candidates unrecorded rather than manufacturing related links', async () => {
     await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
     const first=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%выпустила Compiler 2%'");
     await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.'])); await publish();
@@ -167,7 +169,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect(model.groupingCalls-calls).toBe(1);
     expect((await database.db.query(`SELECT relation FROM story_relations
       WHERE lower_story_id=$1 OR upper_story_id=$1 ORDER BY relation`,[next])).rows)
-      .toEqual([{relation:'related'},{relation:'same'}]);
+      .toEqual([{relation:'same'}]);
     expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
     expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(3);
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(3);
@@ -184,6 +186,10 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]); expect((await database.db.query('SELECT * FROM story_publication_threads')).rows).toEqual([]);
     const { relatedStoryIds }=await import('./story-relations.js');
     expect(await relatedStoryIds(discovery)).toEqual([shutdown]); expect(await relatedStoryIds(shutdown)).toEqual([discovery]);
+    expect((await database.db.query("SELECT provenance->'relatedEvidence' AS evidence FROM story_relations WHERE relation='related'")).rows)
+      .toEqual([{ evidence:{ incomingQuote:'Alderon shut down its game because of the PHP vulnerability.',
+        candidateQuote:'OpenAI model discovered a PHP vulnerability.',
+        connection:'The shutdown is a consequence of the PHP vulnerability.' } }]);
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[discovery])).rows[0]).toEqual(original);
     expect((await database.db.query('SELECT text FROM story_mentions WHERE story_id=$1',[shutdown])).rows)
       .toEqual([{text:'Alderon shut down its game because of the PHP vulnerability.'}]);
@@ -301,7 +307,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows).toEqual([{story_id:canonical}]);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
   });
-  it('keeps a historical published owner unchanged and relates a lower-ranked live draft', async () => {
+  it('keeps a historical published owner unchanged and leaves a lower-ranked same draft unrecorded', async () => {
     const first=await intake(['Acme выпустила Compiler 2.']); await processIntake(first); await publish();
     const original=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[first]);
     const item=await one('SELECT item_id AS id FROM item_revisions WHERE id=$1',[original]);
@@ -325,7 +331,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:canonical}]);
     expect((await database.db.query(`SELECT relation FROM story_relations
       WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`,[attached,duplicate])).rows)
-      .toEqual([{relation:'related'}]);
+      .toEqual([]);
     expect((await database.db.query("SELECT id FROM judgments WHERE stage='published_update'")).rows).toEqual([]);
     expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(3);
     expect((await database.db.query('SELECT headline FROM stories WHERE id=$1',[canonical])).rows[0]?.headline).not.toBeNull();
