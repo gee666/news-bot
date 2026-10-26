@@ -44,6 +44,38 @@ it('compares every retained group in bounded requests with complete report prove
   expect(request?.systemPrompt).toContain('downloadable quantized checkpoint');
   expect(request?.systemPrompt).toContain('same SPECIFIC headline');
 });
+it.each(['same', 'unrelated', 'related'] as const)('requires nullable evidence in the provider schema for %s decisions', async relation => {
+  const incoming = report('A discovered a PHP flaw.');
+  const candidate = report('B shut down because of the PHP flaw.');
+  const evidence = { incomingQuote: incoming.text, candidateQuote: candidate.text, connection: 'The flaw caused the shutdown.' };
+  const generator = { supportsNativeSchema: true, generate: vi.fn(async (request: PiRequest) => {
+    expect(request.responseSchema).toMatchObject({ name: 'story_grouping', schema: {
+      type: 'object', required: ['matches'], additionalProperties: false,
+      properties: { matches: { type: 'array', items: {
+        type: 'object', required: ['storyId', 'relation', 'relatedEvidence'], additionalProperties: false,
+        properties: { relatedEvidence: { anyOf: [
+          { type: 'object', required: ['incomingQuote', 'candidateQuote', 'connection'], additionalProperties: false },
+          { type: 'null' },
+        ] } },
+      } } },
+    } });
+    expect(request.systemPrompt).toContain('Set relatedEvidence to null for same or unrelated');
+    return modelResult({ matches: [{ storyId: candidate.id, relation, relatedEvidence: relation === 'related' ? evidence : null }] });
+  }) };
+  expect(await groupReport(incoming, [candidate], defaultSettings, context, generator)).toEqual([
+    { storyId: candidate.id, relation, ...(relation === 'related' ? { relatedEvidence: evidence, relatedPromptVersion: 'duplicate-v6' } : {}) },
+  ]);
+  expect(generator.generate).toHaveBeenCalledOnce();
+});
+it.each(['incomingQuote', 'candidateQuote', 'connection'])('still rejects blank related %s locally', async field => {
+  const incoming = report('A discovered a PHP flaw.');
+  const candidate = report('B shut down because of the PHP flaw.');
+  const generator = { generate: vi.fn(async () => modelResult({ matches: [{ storyId: candidate.id, relation: 'related',
+    relatedEvidence: { incomingQuote: incoming.text, candidateQuote: candidate.text, connection: 'The flaw caused the shutdown.', [field]: '   ' },
+  }] })) };
+  await expect(groupReport(incoming, [candidate], defaultSettings, context, generator)).rejects.toThrow();
+  expect(generator.generate).toHaveBeenCalledTimes(2);
+});
 it('rejects invented or repeated IDs rather than attaching reports to an unrelated story', async () => {
   const candidate = report('Release.');
   const generator = { generate: vi.fn().mockResolvedValue(modelResult({ matches: [{ storyId: randomUUID(), relation: 'same' }] })) };
