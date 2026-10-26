@@ -50,3 +50,15 @@ it('preserves attachments on the initial request and isolated repair', async () 
     expect(sent.prompt).not.toContain(images[0]?.data);
   }
 });
+
+it('uses local record-validation details in the existing repair without persisting source feedback', async () => {
+  const generate = vi.fn().mockResolvedValueOnce(result('{"id":"wrong"}'))
+    .mockResolvedValueOnce(result('{"id":"expected"}'));
+  const record = vi.fn();
+  const response = await generateStructured({ generate }, { ...request,
+    validationFeedback: () => 'Conflicting assignments: parts u0 overlaps omitted u0. Remove the omission.',
+  }, { operationId: 'feedback' }, record);
+  expect(response.repaired).toBe(true);
+  expect(generate.mock.calls[1]?.[0].prompt).toContain('parts u0 overlaps omitted u0');
+  expect(record).not.toHaveBeenCalled();
+});

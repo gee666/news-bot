@@ -59,17 +59,28 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
   const candidates: MediaCandidate[] = [];
   const seen = new Set<string>();
   let bytes = 0;
+  let resolved = true;
   for (const { descriptor, source } of descriptors) {
     const key = JSON.stringify([descriptor.type, descriptor.url ?? [source.source_metadata, descriptor.telegramMessageId]]);
     if (seen.has(key)) continue;
     seen.add(key);
-    const media = await downloadMedia(descriptor, { metadata: source.source_metadata });
-    bytes += media.data.length;
-    if (bytes > 256_000_000) throw new Error('Story media exceeds 256 MB processing budget');
-    if (media.type === 'image' && !await isPublishableImage(media.data)) continue;
-    candidates.push({ ...media, expiresAt: Date.now() + MEDIA_TTL_MS });
+    // Attachments are optional. A dead CDN URL or deleted Telegram file must not
+    // discard the source text or spend the story's generation retry budget.
+    try {
+      const media = await downloadMedia(descriptor, { metadata: source.source_metadata });
+      bytes += media.data.length;
+      if (bytes > 256_000_000) {
+        resolved = false;
+        console.error('Story media download budget reached; omitting remaining attachments.');
+        break;
+      }
+      if (media.type === 'image' && !await isPublishableImage(media.data)) continue;
+      candidates.push({ ...media, expiresAt: Date.now() + MEDIA_TTL_MS });
+    } catch {
+      resolved = false;
+      console.error('Source attachment unavailable; continuing without it.');
+    }
   }
-  let resolved = true;
   const unique = await deduplicateMedia(candidates, async (left, right) => {
     const decision = await judgeMedia(left, right, storyId, settings);
     if (decision === 'unresolved') resolved = false;
@@ -99,9 +110,15 @@ export function publicationMedia(storyId: string, settings: AppSettings): Promis
 export async function summaryImages(storyId: string, settings: AppSettings): Promise<Array<{ data: string; mimeType: string }>> {
   const limit = envInteger('MEDIA_SUMMARY_MAX_IMAGES', 10, 10);
   const media = await publicationMedia(storyId, settings);
-  return Promise.all(media.filter(candidate => candidate.type === 'image').slice(0, limit).map(async candidate => ({
-    data: (await compressModelImage(candidate.data)).toString('base64'), mimeType: 'image/webp',
-  })));
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const candidate of media.filter(candidate => candidate.type === 'image').slice(0, limit)) {
+    try {
+      images.push({ data: (await compressModelImage(candidate.data)).toString('base64'), mimeType: 'image/webp' });
+    } catch {
+      console.error('Summary image encoding failed; continuing without it.');
+    }
+  }
+  return images;
 }
 
 export async function releaseStoryMedia(storyId: string): Promise<void> {

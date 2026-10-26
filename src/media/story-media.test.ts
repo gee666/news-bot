@@ -201,3 +201,34 @@ it('drops decoded spacer images before deduplication, vision and cache, regardle
   expect(mocks.relevance).toHaveBeenCalledWith([expect.objectContaining(video)], expect.any(Object), id, defaultSettings);
   expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [expect.objectContaining(video)]);
 });
+
+it('keeps healthy attachments and source processing when one download fails', async () => {
+  const id = randomUUID();
+  mocks.download.mockReset().mockRejectedValueOnce(new Error('CDN unavailable')).mockResolvedValueOnce(video);
+  expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(video)]);
+  expect(mocks.save).toHaveBeenCalledWith(id, `unresolved:${mocks.load.mock.calls[0]?.[1]}`, [expect.objectContaining(video)]);
+  mocks.download.mockResolvedValue(image);
+  await publicationMedia(id, defaultSettings);
+  expect(mocks.download).toHaveBeenCalledTimes(4);
+});
+
+it('allows text-only generation when every attachment is unavailable', async () => {
+  mocks.download.mockReset().mockRejectedValue(new Error('Source media removed'));
+  expect(await summaryImages(randomUUID(), defaultSettings)).toEqual([]);
+  expect(mocks.save).toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/^unresolved:/u), []);
+  expect(mocks.normalize).not.toHaveBeenCalled();
+});
+
+it('omits undecodable attachments without dropping healthy siblings', async () => {
+  mocks.publishable.mockRejectedValueOnce(new Error('Invalid image'));
+  expect(await publicationMedia(randomUUID(), defaultSettings)).toEqual([expect.objectContaining(video)]);
+  expect(mocks.save.mock.calls[0]?.[1]).toMatch(/^unresolved:/u);
+});
+
+it('omits an image that cannot be encoded for summarization', async () => {
+  mocks.dedup.mockResolvedValue([image, { ...image, data: Buffer.from('second') }]);
+  mocks.normalize.mockRejectedValueOnce(new Error('Encoding failed')).mockResolvedValueOnce(Buffer.from('good'));
+  expect(await summaryImages(randomUUID(), defaultSettings)).toEqual([
+    { data: Buffer.from('good').toString('base64'), mimeType: 'image/webp' },
+  ]);
+});

@@ -10,9 +10,11 @@ generation recorded when the snapshot was prepared. Dispatch does not regenerate
 or rebuild the snapshot. Changed inputs require a newly prepared edition.
 
 The digest lease serializes delivery. Media-first work also reserves its destination
-until the canonical text receipt commits. Maintenance resumes prepared work and
-reconciles unknown text sends and edits without selecting more stories. Unknown
-media batches are not resent. Telegram cooldowns apply across publications.
+until the canonical text receipt commits or that send reaches a terminal failure
+or unknown outcome. Failed or unknown attachments do not block canonical text.
+Maintenance resumes prepared work and reconciles unknown text sends and edits
+without selecting more stories. Unknown media batches and unknown text sends
+are never blindly resent. Telegram cooldowns apply across publications.
 
 Run-now freezes its own publication selection and reports delivery outcomes for
 that selection. It does not republish an existing post.

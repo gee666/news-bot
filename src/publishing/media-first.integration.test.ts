@@ -54,12 +54,12 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     database = await import('../db.js'); await database.migrate();
     store = await import('./store.js'); delivery = await import('./delivery.js'); plans = await import('./media-plan.js');
     order = await import('./destination-order.js'); digest = await import('./digest.js');
-  },30_000);
+  },60_000);
   beforeEach(async () => {
     vi.restoreAllMocks(); vi.stubGlobal('fetch',vi.fn().mockRejectedValue(new Error('Network forbidden')));
     await database.db.query('TRUNCATE publications,publication_snapshots,stories,request_attempts CASCADE');
     await database.db.query('DELETE FROM operational_state');
-    settings = await (await import('../settings.js')).saveSettings({ publishingEnabled:true });
+    settings = await (await import('../settings.js')).saveSettings({ publishingEnabled:true,requestMaxAttempts:5 });
     await store.saveState('telegram_destination',{ channelId:'-100123' });
     await store.saveState('bot_verified',{ verified:true,destinationId:'-100123',botId:123 });
     api = new BotApi('123:synthetic');
@@ -151,19 +151,20 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(api.sendMedia).not.toHaveBeenCalled(); expect(await order.reservedPublication('-100123')).toBeNull();
   });
 
-  it.each(['unknown','failed'] as const)('retains the reservation after a %s media outcome and blocks every ancillary send path', async outcome => {
+  it.each(['unknown','failed'] as const)('continues text after %s media, retains diagnostics and unblocks the next post', async outcome => {
     const owner = await fixture(); const other = await fixture();
-    vi.mocked(api.sendMedia).mockRejectedValue(new BotError('media_outcome',outcome));
-    expect(await delivery.sendPrepared(owner,api,settings)).toBeNull();
-    expect(await order.reservedPublication('-100123')).toBe(owner.id);
+    vi.mocked(api.sendMedia).mockRejectedValueOnce(new BotError('media_outcome',outcome)).mockImplementation(uploadIds);
+    expect(await delivery.sendPrepared(owner,api,settings)).toBe('900');
+    expect(await order.reservedPublication('-100123')).toBeNull();
+    expect(await load(owner.id)).toMatchObject({ status:'published',message_id:'900',media_status:outcome,
+      error_code:outcome === 'unknown' ? 'publication_media_requires_review' : 'publication_media_failed' });
+    expect((await database.db.query('SELECT status,error_code FROM publication_media_batches WHERE publication_id=$1',[owner.id])).rows)
+      .toEqual([{ status:outcome,error_code:'media_outcome' }]);
     await digest.recoverSends('-100123'); await plans.recoverPublicationMedia('-100123');
     expect(await delivery.sendPrepared(await load(owner.id),api,settings)).toBeNull();
-    expect(await delivery.sendPrepared(other,api,settings)).toBeNull();
-    await database.db.query("UPDATE publications SET status='published',message_id='800' WHERE id=$1",[other.id]);
-    expect(await (await import('./index.js')).verifyBot()).toMatchObject({ verified:false,messageId:null });
-    await digest.publishDigest(settings);
-    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
-    expect(await load(owner.id)).toMatchObject({ status:'prepared',message_id:null,media_status:outcome });
+    vi.mocked(api.send).mockResolvedValue('901');
+    expect(await delivery.sendPrepared(other,api,settings)).toBe('901');
+    expect(api.sendMedia).toHaveBeenCalledTimes(2); expect(api.send).toHaveBeenCalledTimes(2);
   });
 
   it('retries rejected media with the exact frozen bytes and snapshot, never adopts or refreshes it', async () => {
@@ -179,6 +180,34 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(vi.mocked(api.sendMedia).mock.calls[1]?.[2]).toEqual([image(0),image(1)]);
   });
 
+  it.each(['failed','expired','exhausted'] as const)('resumes a %s batch with text only and releases the channel', async terminal => {
+    const publication = await fixture();
+    vi.mocked(api.sendMedia).mockRejectedValue(new BotError('telegram_rate_limit','retryable',120_000));
+    expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
+    if (terminal === 'failed') await database.db.query("UPDATE publication_media_batches SET status='failed',error_code='telegram_rejected'");
+    if (terminal === 'expired') await database.db.query("UPDATE publication_media_items SET expires_at=now()-interval '1 second'");
+    if (terminal === 'exhausted') await database.db.query('UPDATE publication_media_batches SET attempt_count=$1',[settings.requestMaxAttempts]);
+    await due(); await digest.resumePublications(settings);
+    expect(await load(publication.id)).toMatchObject({ status:'published',message_id:'900',media_status:'failed',error_code:'publication_media_failed' });
+    expect(await order.reservedPublication('-100123')).toBeNull();
+    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledOnce();
+    expect((await database.db.query('SELECT status FROM publication_media_batches')).rows).toEqual([{ status:'failed' }]);
+  });
+
+  it('stops uploads at the retry limit without erasing the bot-wide cooldown before canonical text', async () => {
+    settings = await (await import('../settings.js')).saveSettings({ requestMaxAttempts:1 });
+    const publication = await fixture();
+    vi.mocked(api.sendMedia).mockRejectedValue(new BotError('telegram_rate_limit','retryable',120_000));
+    expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
+    expect(await load(publication.id)).toMatchObject({ status:'prepared',media_status:'failed',message_id:null });
+    expect(api.send).not.toHaveBeenCalled();
+    expect(await store.rateLimited()).toBe(true);
+    await due(); await digest.resumePublications(settings);
+    expect(await load(publication.id)).toMatchObject({ status:'published',media_status:'failed',message_id:'900' });
+    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledOnce();
+    expect(await order.reservedPublication('-100123')).toBeNull();
+  });
+
   it('resumes the destination owner before newly prepared stories after canonical rate limits, without uploading again', async () => {
     const owner = await fixture(); const other = await fixture();
     vi.mocked(api.send).mockRejectedValueOnce(new BotError('telegram_rate_limit','retryable',120_000)).mockResolvedValue('900');
@@ -192,17 +221,20 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(await order.reservedPublication('-100123')).toBeNull();
   });
 
-  it('never resends unknown canonical text, reconciles its text receipt only, and releases the destination atomically', async () => {
-    const publication = await fixture(); const other = await fixture();
+  it.each(['complete','unknown'] as const)('releases unknown canonical text with %s media for read-only reconciliation, never a resend', async mediaStatus => {
+    const publication = await fixture();
+    if (mediaStatus === 'unknown') vi.mocked(api.sendMedia).mockRejectedValue(new BotError('telegram_media_unknown','unknown'));
     vi.mocked(api.send).mockRejectedValue(new BotError('telegram_transport_unknown','unknown'));
     expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
     const uncertain = await load(publication.id);
-    expect(uncertain).toMatchObject({ status:'uncertain',message_id:null,media_status:'complete' });
-    expect(await delivery.sendPrepared(other,api,settings)).toBeNull();
-    expect(await delivery.reconcile(uncertain,settings,async () => null)).toBe(false);
-    expect(await order.reservedPublication('-100123')).toBe(publication.id);
+    expect(uncertain).toMatchObject({ status:'uncertain',message_id:null,media_status:mediaStatus });
+    expect(await order.reservedPublication('-100123')).toBeNull();
+    expect(await delivery.sendPrepared({ ...uncertain,status:'prepared' },api,settings)).toBeNull();
+    expect(api.send).toHaveBeenCalledOnce();
+    expect(await order.reservedPublication('-100123')).toBeNull();
     expect(await delivery.reconcile(uncertain,settings,async () => '950')).toBe(true);
-    expect((await load(publication.id)).message_id).toBe('950');
+    expect(await load(publication.id)).toMatchObject({ message_id:'950',media_status:mediaStatus,
+      error_code:mediaStatus === 'unknown' ? 'publication_media_requires_review' : null });
     expect(await order.reservedPublication('-100123')).toBeNull(); expect(api.send).toHaveBeenCalledOnce();
     const attempts = (await database.db.query<{ operation:string; response_metadata:Record<string,unknown> }>(
       'SELECT operation,response_metadata FROM request_attempts ORDER BY dispatched_at')).rows;
@@ -210,7 +242,7 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect(attempts.find(attempt => attempt.operation.startsWith('send_media:'))?.response_metadata).not.toHaveProperty('fingerprint');
   });
 
-  it('quarantines an interrupted media request on restart and keeps its destination blocked even after spool expiry', async () => {
+  it('preserves interrupted media as unknown after restart and expiry, then publishes text without reuploading', async () => {
     const publication = await fixture();
     vi.mocked(api.sendMedia).mockRejectedValue(new BotError('telegram_connect_failed','retryable'));
     await delivery.sendPrepared(publication,api,settings);
@@ -222,22 +254,30 @@ describe.skipIf(!url)('durable media-first publication ordering', () => {
     expect((await load(publication.id)).media_status).toBe('unknown');
     expect((await database.db.query('SELECT status FROM request_attempts')).rows).toEqual([{ status:'unknown' }]);
     expect(await order.reservedPublication('-100123')).toBe(publication.id);
-    await digest.resumePublications(settings); expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
+    await digest.resumePublications(settings);
+    expect(await load(publication.id)).toMatchObject({ status:'published',message_id:'900',media_status:'unknown',
+      error_code:'publication_media_requires_review' });
+    expect(await order.reservedPublication('-100123')).toBeNull();
+    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).toHaveBeenCalledOnce();
+    await digest.resumePublications(settings); expect(api.send).toHaveBeenCalledOnce();
   });
 
-  it.each(['pause','destination','freshness'] as const)('checks %s again between media and canonical text without releasing ownership', async change => {
-    const publication = await fixture();
-    vi.mocked(api.sendMedia).mockImplementation(async (...args) => {
-      if (change === 'pause') await (await import('../settings.js')).saveSettings({ publishingEnabled:false });
-      else if (change === 'destination') await store.saveState('telegram_destination',{ channelId:'-100456' });
-      else await database.db.query("UPDATE stories SET content_version=content_version+1");
-      return uploadIds(...args);
+  it.each((['sent','unknown','failed'] as const).flatMap(outcome =>
+    (['pause','destination','freshness'] as const).map(change => ({ outcome,change }))))(
+    'checks $change again after $outcome media without bypassing admission', async ({ outcome,change }) => {
+      const publication = await fixture();
+      vi.mocked(api.sendMedia).mockImplementation(async (...args) => {
+        if (change === 'pause') await (await import('../settings.js')).saveSettings({ publishingEnabled:false });
+        else if (change === 'destination') await store.saveState('telegram_destination',{ channelId:'-100456' });
+        else await database.db.query("UPDATE stories SET content_version=content_version+1");
+        if (outcome !== 'sent') throw new BotError('media_outcome',outcome);
+        return uploadIds(...args);
+      });
+      expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
+      expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
+      expect(await order.reservedPublication('-100123')).toBe(change === 'freshness' ? null : publication.id);
+      expect(await load(publication.id)).toMatchObject({ message_id:null,status:change === 'freshness' ? 'failed' : 'prepared' });
     });
-    expect(await delivery.sendPrepared(publication,api,settings)).toBeNull();
-    expect(api.sendMedia).toHaveBeenCalledOnce(); expect(api.send).not.toHaveBeenCalled();
-    expect(await order.reservedPublication('-100123')).toBe(publication.id);
-    expect((await load(publication.id)).message_id).toBeNull();
-  });
 
   it('resumes after the last media commit but before canonical dispatch without uploading any media again', async () => {
     const publication = await fixture();

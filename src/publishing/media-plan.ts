@@ -51,9 +51,6 @@ export async function preparePublicationMedia(publication: Publication, settings
   const attempted = (await db.query(`SELECT 1 FROM request_attempts
     WHERE publication_id=$1 AND (operation='send' OR operation LIKE 'send_media:%') LIMIT 1`, [publication.id])).rows.length > 0;
   if (publication.media_snapshot_id === publication.snapshot_id || attempted) {
-    if (publication.media_status === 'failed' || publication.media_status === 'unknown') {
-      throw new BotError('publication_media_plan_unavailable', publication.media_status === 'unknown' ? 'unknown' : 'failed');
-    }
     return Boolean(publication.media_snapshot_id) && publication.media_status !== 'none';
   }
   const downloaded = deduplicateMedia(await publicationMedia(publication.story_id, settings));

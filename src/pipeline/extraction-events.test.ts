@@ -95,3 +95,16 @@ describe('multi-span news mentions', () => {
     expect(generator.generate).toHaveBeenCalledOnce();
   });
 });
+
+it('repairs an overlapping omission using exact local validation feedback', async () => {
+  const text = 'At Acme Day.\nA product launched.';
+  const invalid = { events: [{ parts: [range('u1')], context: [range('u0')] }],
+    omitted: [{ id: 'u0', last: null, excerpt: null, reason: 'non_news' }] };
+  const valid = { ...invalid, omitted: [] };
+  const generate = vi.fn().mockResolvedValueOnce(modelResult(invalid)).mockResolvedValueOnce(modelResult(valid));
+  const events = await extractEvents(text, { generate }, { operationId: 'extract-feedback' }, vi.fn(), 'Technology');
+  expect(events).toHaveLength(1);
+  expect(generate).toHaveBeenCalledTimes(2);
+  expect(generate.mock.calls[1]?.[0].prompt).toContain('events[0].context[0]');
+  expect(generate.mock.calls[1]?.[0].prompt).toContain('omitted[0]');
+});

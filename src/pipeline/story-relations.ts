@@ -66,11 +66,19 @@ export async function recordStoryRelations(storyId: string, decisions: readonly 
       await client.query(`UPDATE story_publication_threads SET classification_version=NULL
         WHERE story_id=ANY($1::uuid[]) AND previous_story_id=ANY($1::uuid[])`, [left]);
     }
+    // Each row describes one pair, not a copy of the entire grouping catalogue.
+    // Complete grouping inputs/results already belong to the model cache.
+    const pairProvenance = { ...provenance };
+    if (Array.isArray(pairProvenance.candidates)) {
+      pairProvenance.candidates = pairProvenance.candidates.filter((candidate: unknown) =>
+        typeof candidate === 'object' && candidate !== null && 'storyId' in candidate
+        && (candidate.storyId === storyId || candidate.storyId === decision.storyId));
+    }
     await client.query(`INSERT INTO story_relations(lower_story_id,upper_story_id,relation,classifier_version,provenance)
       VALUES(least($1::uuid,$2::uuid),greatest($1::uuid,$2::uuid),$3,$4,$5)
       ON CONFLICT(lower_story_id,upper_story_id) DO UPDATE SET relation=EXCLUDED.relation,
         classifier_version=EXCLUDED.classifier_version,provenance=EXCLUDED.provenance,classified_at=now()`,
-    [storyId, decision.storyId, decision.relation, classifierVersion, JSON.stringify({ ...provenance,...(decision.relation === 'related' && decision.relatedPromptVersion
+    [storyId, decision.storyId, decision.relation, classifierVersion, JSON.stringify({ ...pairProvenance,...(decision.relation === 'related' && decision.relatedPromptVersion
       ? { relatedPromptVersion:decision.relatedPromptVersion } : {}),
       ...(decision.relation === 'related' && decision.relatedEvidence ? { relatedEvidence:decision.relatedEvidence } : {}) })]);
     accepted.push(decision);

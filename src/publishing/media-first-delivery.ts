@@ -9,7 +9,7 @@ import { rateLimited, type Publication } from './store.js';
 interface Batch { id: string; batch_number: number; status: string; attempt_count: number; next_retry_at: Date | null }
 interface Item { id: string; type: PublicationMedia['type']; mime_type: string; digest: string; data: Buffer | null; expires_at: Date }
 
-/** Caller holds the global digest lease. The reservation outlives that lease and every unknown outcome. */
+/** Caller holds the global digest lease. Reservations last until a text receipt or terminal stop. */
 export async function deliverMediaFirst(publication: Publication, api: BotApi, settings: AppSettings,
   authorization: DeliveryAuthorization): Promise<boolean> {
   if (publication.delivery_kind !== 'media_first' || publication.status !== 'prepared' || publication.message_id) return false;
@@ -18,13 +18,21 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
   const batches = (await db.query<Batch>(`SELECT * FROM publication_media_batches WHERE publication_id=$1 ORDER BY batch_number`, [publication.id])).rows;
   const count = (await db.query<{ count: number }>(`SELECT count(*)::int AS count FROM publication_media_items i
     JOIN publication_media_batches b ON b.id=i.batch_id WHERE b.publication_id=$1`, [publication.id])).rows[0]?.count ?? 0;
-  if (count > 10 || batches.length && !count) return false;
+  if (count > 10) return false;
   for (const batch of batches) {
-    if (batch.status === 'sent') continue;
-    if (!['prepared','retryable'].includes(batch.status) || batch.next_retry_at && batch.next_retry_at > new Date()) return false;
-    if (await rateLimited()) return false;
+    // An unknown upload may already exist. Never retry it or invent a receipt.
+    if (['sent','unknown','failed'].includes(batch.status)) continue;
+    if (!['prepared','retryable'].includes(batch.status)) return false;
+    if (batch.attempt_count >= settings.requestMaxAttempts) {
+      await failBatch(batch, 'publication_media_retry_exhausted');
+      continue;
+    }
     const items = (await db.query<Item>('SELECT * FROM publication_media_items WHERE batch_id=$1 ORDER BY ordinal', [batch.id])).rows;
-    if (!items.length || items.some(item => !item.data?.length || item.expires_at.getTime() <= Date.now())) return false;
+    if (!items.length || items.some(item => !item.data?.length || item.expires_at.getTime() <= Date.now())) {
+      await failBatch(batch, 'publication_media_expired');
+      continue;
+    }
+    if (batch.next_retry_at && batch.next_retry_at > new Date() || await rateLimited()) return false;
     const media: PublicationMedia[] = [];
     for (const item of items) {
       if (!item.data) return false;
@@ -68,19 +76,27 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
       }
     } catch (error) {
       const failure = error instanceof BotError ? error : new BotError('telegram_media_outcome_unknown', 'unknown');
+      const exhausted = failure.outcome === 'retryable' && batch.attempt_count + 1 >= settings.requestMaxAttempts;
+      const outcome = exhausted ? 'failed' : failure.outcome;
+      const code = exhausted ? 'publication_media_retry_exhausted' : failure.code;
+      // Preserve the bot-wide cooldown even when this batch has exhausted its retries.
       const retryAt = failure.outcome === 'retryable' ? new Date(Date.now() + Math.max(failure.retryAfterMs,
         Math.min(settings.retryMaxMs, settings.retryBaseMs * 2 ** Math.min(batch.attempt_count,10)))) : null;
       await transaction(async client => {
         await client.query(`UPDATE request_attempts SET status=$2,error_code=$3,next_retry_at=$4,finished_at=now() WHERE id=$1`,
           [attemptId,failure.outcome,failure.code,retryAt]);
         await client.query(`UPDATE publication_media_batches SET status=$2,error_code=$3,next_retry_at=$4 WHERE id=$1`,
-          [batch.id,failure.outcome,failure.code,retryAt]);
-        await client.query(`UPDATE publications SET media_status=$2,error_code=$3,updated_at=now() WHERE id=$1`,
-          [publication.id,failure.outcome === 'retryable' ? 'pending' : failure.outcome,
-            failure.outcome === 'unknown' ? 'publication_media_requires_review' : `publication_media_${failure.outcome}`]);
+          [batch.id,outcome,code,outcome === 'retryable' ? retryAt : null]);
+        await client.query(`UPDATE publications SET media_status=CASE WHEN media_status='unknown' THEN 'unknown' ELSE $2 END,
+          error_code=CASE WHEN media_status='unknown' THEN 'publication_media_requires_review' ELSE $3 END,updated_at=now() WHERE id=$1`,
+          [publication.id,outcome === 'retryable' ? 'pending' : outcome,
+            outcome === 'unknown' ? 'publication_media_requires_review' : exhausted ? code : `publication_media_${outcome}`]);
       });
-      return false;
+      if (outcome === 'retryable') return false;
+      batch.status = outcome;
+      continue;
     }
+    batch.status = 'sent';
     await transaction(async client => {
       for (const [index,item] of items.entries()) await client.query('UPDATE publication_media_items SET message_id=$2,data=NULL WHERE id=$1', [item.id,ids[index]]);
       await client.query(`UPDATE publication_media_batches SET status='sent',error_code=NULL,next_retry_at=NULL WHERE id=$1`, [batch.id]);
@@ -88,9 +104,19 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
         [attemptId, JSON.stringify({ messageIds: ids })]);
     });
   }
-  await db.query(`UPDATE publications SET media_status=$2,error_code=NULL,updated_at=now() WHERE id=$1`, [publication.id, batches.length ? 'complete' : 'none']);
+  const status = batches.some(batch => batch.status === 'unknown') ? 'unknown'
+    : batches.some(batch => batch.status === 'failed') ? 'failed' : batches.length ? 'complete'
+      : publication.media_status === 'failed' || publication.media_status === 'unknown' ? publication.media_status : 'none';
+  await db.query(`UPDATE publications SET media_status=$2,error_code=$3,updated_at=now() WHERE id=$1`,
+    [publication.id,status,status === 'unknown' ? 'publication_media_requires_review' : status === 'failed' ? 'publication_media_failed' : null]);
   if (publication.story_id && batches.length) await releaseStoryMedia(publication.story_id).catch(() => {
     console.error('Publication media cache release failed.');
   });
   return true;
+}
+
+async function failBatch(batch: Batch, code: string): Promise<void> {
+  await db.query(`UPDATE publication_media_batches SET status='failed',error_code=$2,next_retry_at=NULL
+    WHERE id=$1 AND status IN ('prepared','retryable')`, [batch.id,code]);
+  batch.status = 'failed';
 }

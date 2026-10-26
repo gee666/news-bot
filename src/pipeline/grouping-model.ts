@@ -52,13 +52,21 @@ async function compare(incoming: EventInput, candidates: readonly EventInput[], 
     generate(request, requestContext) {
       checkProcessingSlice();
       // Repair the full chunk in a fresh session without appending unbounded prior output.
+      const details = request.prompt.split('\nValidation details:\n')[1];
       return client.generate({ ...request, prompt, systemPrompt: request.systemPrompt + (request.prompt === prompt ? ''
-        : '\nThe previous response failed validation. Return one corrected complete JSON object.') }, requestContext);
+        : '\nThe previous response failed validation. Return one corrected complete JSON object.'
+          + (details ? '\nValidation details:\n' + details : '')) }, requestContext);
     },
   };
   const result = await generateStructured(boundedGenerator, {
     systemPrompt, prompt, validator: groupingSchema,
     validate: value => complete(value.matches, candidates),
+    validationFeedback: value => {
+      const expected = new Set(candidates.map(candidate => candidate.id));
+      const returned = new Set(value.matches.map(match => match.storyId));
+      const missing = [...expected].filter(id => !returned.has(id));
+      return `Return exactly ${expected.size} decisions, one per supplied candidate. Missing candidate IDs: ${missing.join(', ') || 'none'}. Remove duplicate and unknown IDs. Include unrelated candidates too.`;
+    },
     responseSchema: { name: 'story_grouping', schema: groupingResponseSchema },
   }, { operationId: `${context.id}:group:${inputHash}`, attempt: context.attempt }, recordGenerationFailure);
   await db.query(`INSERT INTO model_cache(kind,input_hash,model_key,prompt_version,value,expires_at)

@@ -75,8 +75,21 @@ describe('durable publication delivery', () => {
     const send = vi.spyOn(api, 'send');
     expect(await sendPrepared(publication, api, defaultSettings)).toBeNull();
     expect(send).not.toHaveBeenCalled();
-    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('UPDATE publications SET status=$2'))).toBe(true);
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('UPDATE publications SET error_code=$2'))).toBe(true);
     expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO request_attempts'))).toBe(false);
+  });
+
+
+  it('continues canonical text after a permanent preparation failure without failing the publication', async () => {
+    vi.mocked(publicationMedia).mockRejectedValue(new BotError('publication_media_expired','failed'));
+    const api = new BotApi('123:synthetic');
+    const send = vi.spyOn(api,'send').mockResolvedValue('9');
+    expect(await sendPrepared(publication,api,defaultSettings)).toBe('9');
+    expect(send).toHaveBeenCalledOnce();
+    expect(mocks.query.mock.calls.find(([sql]) => String(sql).includes('SET media_status=$2'))?.[1])
+      .toEqual(['id','failed','publication_media_expired']);
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes("SET status='failed'"))).toBe(true);
+    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('UPDATE publications SET status=$2'))).toBe(false);
   });
 
 

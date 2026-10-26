@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import type { AppSettings } from '../settings.js';
 import type { Publication } from './store.js';
+import { releaseDestination } from './destination-order.js';
 
 export interface DeliveryAuthorization { verificationTest?: boolean }
 type Operation = 'send' | 'edit';
@@ -47,7 +48,7 @@ export async function publicationAdmission(client: Pick<PoolClient, 'query'>, pu
   return row && !row.reason ? { allowed:true } : { allowed:false,reason:row?.reason ?? 'snapshot_changed' };
 }
 
-/** Policy denials are not Telegram attempts and must not change delivery/reconciliation state. */
+/** Policy denials are not Telegram attempts. Permanently invalid reserved sends cannot resume. */
 export async function recordAdmissionDenial(client: Pick<PoolClient, 'query'>, publication: Publication,
   operation: Operation, reason: Extract<PublicationAdmission, { allowed: false }>['reason']): Promise<void> {
   const snapshotId = publication.pending_snapshot_id ?? publication.snapshot_id;
@@ -64,4 +65,13 @@ export async function recordAdmissionDenial(client: Pick<PoolClient, 'query'>, p
   if (recorded.rows[0]?.first_seen) console.warn('Publication admission denied', {
     publicationId: publication.id, snapshotId, operation, reason,
   });
+  if (operation === 'send' && (reason === 'snapshot_changed' || reason === 'story_ineligible')) {
+    await client.query(`UPDATE publications p SET status='failed',error_code=$2,next_retry_at=NULL,updated_at=now()
+      WHERE p.id=$1 AND p.status='prepared' AND p.message_id IS NULL
+        AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='send'
+          AND a.status IN ('running','unknown','succeeded'))
+        AND EXISTS(SELECT 1 FROM publication_destination_reservations r WHERE r.publication_id=p.id)`,
+    [publication.id,`publication_admission_${reason}`]);
+    await releaseDestination(publication.id,client);
+  }
 }

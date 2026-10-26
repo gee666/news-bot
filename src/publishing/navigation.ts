@@ -5,8 +5,8 @@ import { publicationSnapshotSchema, type PublicationSnapshot, type PublicationSo
 import { RELATED_PUBLICATION_LIMIT } from './sources.js';
 
 export const delivered = `p.status='published' AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
-  AND p.media_status IN ('none','complete')
-  AND NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status<>'sent')
+  AND p.media_status IN ('none','complete','failed','unknown')
+  AND NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status IN ('prepared','retryable','running'))
   AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key='publication_removal:'||p.id::text)
   AND NOT EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id)`;
 const postAddress = "'https://t.me/c/'||substring(p.destination_id from 5)||'/'||p.message_id";

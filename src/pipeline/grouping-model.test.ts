@@ -222,3 +222,15 @@ it.each(['missing', 'invented incoming', 'invented candidate'])('omits related d
   expect(generator.generate).toHaveBeenCalledOnce();
   expect(generator.generate.mock.calls[0]).toBeDefined();
 });
+
+it('tells the bounded repair which candidate IDs were missing without expanding its source prompt', async () => {
+  const incoming = report('Release.');
+  const candidates = [report('First report.'), report('Second report.')];
+  const matches = candidates.map(candidate => ({ storyId: candidate.id, relation: 'unrelated' }));
+  const generate = vi.fn().mockResolvedValueOnce(modelResult({ matches: matches.slice(0, 1) }))
+    .mockResolvedValueOnce(modelResult({ matches }));
+  expect(await groupReport(incoming, candidates, defaultSettings, context, { generate })).toEqual(matches);
+  expect(generate.mock.calls[1]?.[0].prompt).toBe(generate.mock.calls[0]?.[0].prompt);
+  expect(generate.mock.calls[1]?.[0].systemPrompt).toContain(`Missing candidate IDs: ${candidates[1]?.id}`);
+  expect(generate).toHaveBeenCalledTimes(2);
+});

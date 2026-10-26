@@ -52,6 +52,26 @@ describe.skipIf(!url)('verified bounded navigation selection',()=>{
     expect(await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123')).toEqual(links);
     expect((await database.db.query("SELECT count(*)::int n FROM story_relations WHERE relation='related'")).rows[0]?.n).toBe(9);
   });
+  it.each(['unknown','failed'] as const)('uses canonical text with %s attachments for navigation, never the attachment itself', async status => {
+    const own=await fixture('100',0); const target=await fixture('200',10);
+    await database.db.query('UPDATE publications SET delivery_kind=$2,media_status=$3 WHERE id=$1',[target.id,'media_first',status]);
+    const batch=(await database.db.query<{id:string}>(`INSERT INTO publication_media_batches(publication_id,batch_number,status)
+      VALUES($1,0,$2) RETURNING id`,[target.id,status])).rows[0]?.id;
+    await database.db.query(`INSERT INTO publication_media_items(batch_id,ordinal,type,mime_type,digest,message_id,expires_at)
+      VALUES($1,0,'image','image/png','digest','201',now()+interval '1 day')`,[batch]);
+    await classify(own.story_id,target.story_id,'related');
+    const links=await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123');
+    expect(links.map(source=>source.url)).toEqual(['https://t.me/c/123/200']);
+    const source=links[0]; if(!source) throw new Error('Missing canonical text link');
+    expect(await navigation.textNavigationSources(database.db,[source,{...source,url:'https://t.me/c/123/201'}],'-100123')).toEqual([source]);
+    await (await import('./thread-updates.js')).prepareThreadUpdates('-100123');
+    expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE id=$1',[target.id])).rows[0]?.pending_snapshot_id).toBeTruthy();
+    await classify(own.story_id,target.story_id,'same');
+    expect(await navigation.latestUpdateTarget(database.db,own.id)).toBe('https://t.me/c/123/200');
+    // A still-running batch is not terminal and cannot be treated as delivered.
+    await database.db.query("UPDATE publication_media_batches SET status='running' WHERE publication_id=$1",[target.id]);
+    expect(await navigation.latestUpdateTarget(database.db,own.id)).toBeNull();
+  });
   it('does not restage unchanged related links after a JSONB round trip or replace an identical pending edit',async()=>{
     const target=await fixture('200',0); const own=await fixture('100',10);
     await classify(own.story_id,target.story_id,'related');

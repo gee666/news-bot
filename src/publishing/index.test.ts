@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../settings.js';
+import type { PoolClient } from 'pg';
 import { BotApi } from './bot-api.js';
 import { publishDigest, resumePublications, verifyBot } from './index.js';
 import type { Publication } from './store.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), getSettings: vi.fn(), destination: vi.fn(), state: vi.fn(),
   prepare: vi.fn(), ready: vi.fn(), send: vi.fn(), reconcile: vi.fn(), edit: vi.fn(), saveState: vi.fn(), testPublication: vi.fn(), tryLock: vi.fn(), adopt: vi.fn(), retryEdits: vi.fn(), retryReplacements: vi.fn() }));
-vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
+vi.mock('../db.js', () => ({ db: { query: mocks.query },
+  transaction:async (run: (client:Pick<PoolClient,'query'>) => Promise<unknown>) => run({query:mocks.query}) }));
 vi.mock('./media-plan.js', () => ({ recoverPublicationMedia: vi.fn(), expirePublicationMedia: vi.fn() }));
 vi.mock('./thread-updates.js', () => ({ prepareThreadUpdates: vi.fn() }));
 vi.mock('../settings.js', async importOriginal => {

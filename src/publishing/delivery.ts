@@ -4,7 +4,7 @@ import type { AppSettings } from '../settings.js';
 import { BotApi, BotError, telegramTimeouts } from './bot-api.js';
 import { render, renderPublication, PublicationRenderError, type RenderedMessage } from './render.js';
 import { readSentMessage, ReconciliationReviewError, sendMetadata } from './reconciliation.js';
-import { publicationEditSelect, type Publication } from './store.js';
+import { publicationEditSelect, rateLimited, type Publication } from './store.js';
 import { publicationAdmission, recordAdmissionDenial, type DeliveryAuthorization } from './freshness.js';
 import { reconcileUnknownEdit } from './edit-reconciliation.js';
 import { preparePublicationMedia } from './media-plan.js';
@@ -20,8 +20,11 @@ export async function recordFailure(attemptId: string, publication: Publication,
   await transaction(async client => {
     await client.query(`UPDATE request_attempts SET status=$1,error_code=$2,next_retry_at=$3,finished_at=now() WHERE id=$4`,
       [failure.outcome,failure.code,retryAt,attemptId]);
-    if (operation === 'send') await client.query(`UPDATE publications SET status=$1,error_code=$2,next_retry_at=$3,updated_at=now() WHERE id=$4`,
-      [failure.outcome === 'unknown' ? 'uncertain' : failure.outcome === 'retryable' ? 'prepared' : 'failed',failure.code,retryAt,publication.id]);
+    if (operation === 'send') {
+      await client.query(`UPDATE publications SET status=$1,error_code=$2,next_retry_at=$3,updated_at=now() WHERE id=$4`,
+        [failure.outcome === 'unknown' ? 'uncertain' : failure.outcome === 'retryable' ? 'prepared' : 'failed',failure.code,retryAt,publication.id]);
+      if (failure.outcome !== 'retryable') await releaseDestination(publication.id,client);
+    }
   });
 }
 
@@ -30,7 +33,7 @@ export async function beginAttempt(publication: Publication, operation: 'send' |
   return transaction(async client => {
     if (await destinationBlocked(publication.destination_id, operation === 'send' && publication.delivery_kind === 'media_first' ? publication.id : undefined, client)) return null;
     if (operation === 'send' && publication.delivery_kind === 'media_first' && (await client.query(`SELECT 1 FROM publication_media_batches
-      WHERE publication_id=$1 AND status<>'sent' LIMIT 1`, [publication.id])).rows.length) return null;
+      WHERE publication_id=$1 AND status IN ('prepared','retryable','running') LIMIT 1`, [publication.id])).rows.length) return null;
     if (operation !== 'delete') {
       if (!settings) throw new Error('Publication admission requires current settings');
       await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
@@ -82,7 +85,6 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
   authorization: DeliveryAuthorization = {}): Promise<string | null> {
   if (publication.status !== 'prepared' || publication.message_id || publication.delivery_kind === 'album') return null;
   if (await destinationBlocked(publication.destination_id, publication.delivery_kind === 'media_first' ? publication.id : undefined)) return null;
-  if (publication.delivery_kind === 'media_first' && ['failed','unknown'].includes(publication.media_status ?? '')) return null;
   try {
     await preparePublicationMedia(publication, settings);
     const planned = (await db.query<Pick<Publication, 'delivery_kind' | 'media_status' | 'media_snapshot_id'>>(
@@ -91,11 +93,19 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     publication = { ...publication, ...planned };
   } catch (error) {
     const failure = error instanceof BotError ? error : new BotError('publication_media_prepare_failed', 'retryable');
-    await db.query(`UPDATE publications SET status=$2,error_code=$3,next_retry_at=$4,updated_at=now()
-      WHERE id=$1 AND status='prepared'`, [publication.id,
-      failure.outcome === 'failed' ? 'failed' : failure.outcome === 'unknown' ? 'uncertain' : 'prepared', failure.code,
-      failure.outcome === 'retryable' ? new Date(Date.now() + Math.max(failure.retryAfterMs, settings.retryBaseMs)) : null]);
-    return null;
+    if (failure.outcome === 'retryable') {
+      await db.query(`UPDATE publications SET error_code=$2,next_retry_at=$3,updated_at=now()
+        WHERE id=$1 AND status='prepared'`, [publication.id,failure.code,
+        new Date(Date.now() + Math.max(failure.retryAfterMs, settings.retryBaseMs))]);
+      return null;
+    }
+    await transaction(async client => {
+      await client.query(`UPDATE publication_media_batches SET status='failed',error_code=$2,next_retry_at=NULL
+        WHERE publication_id=$1 AND status IN ('prepared','retryable')`, [publication.id,failure.code]);
+      await client.query(`UPDATE publications SET media_status=$2,media_snapshot_id=snapshot_id,error_code=$3,
+        next_retry_at=NULL,updated_at=now() WHERE id=$1 AND status='prepared'`, [publication.id,failure.outcome,failure.code]);
+    });
+    publication = { ...publication,media_status:failure.outcome,media_snapshot_id:publication.snapshot_id };
   }
   let message: RenderedMessage;
   try { message = render(publication.content); }
@@ -112,6 +122,7 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     if (!current) return null;
     publication = { ...publication, ...current };
   }
+  if (await rateLimited()) return null;
   const bot = await api.identity();
   if (publication.bot_id && publication.bot_id !== String(bot.id)) throw new Error('Publication bot ownership changed');
   const timeouts = telegramTimeouts();
@@ -127,7 +138,8 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
     await client.query(`UPDATE request_attempts SET status='succeeded',finished_at=now(),response_metadata=response_metadata||$1::jsonb WHERE id=$2`,
       [JSON.stringify({ ...sendMetadata(message), messageId }),attemptId]);
     await client.query(`UPDATE publications SET status='published',message_id=$1,published_at=now(),updated_at=now(),
-      next_retry_at=NULL,error_code=CASE WHEN media_status='pending' THEN 'publication_media_pending' ELSE NULL END,
+      next_retry_at=NULL,error_code=CASE media_status WHEN 'pending' THEN 'publication_media_pending'
+        WHEN 'unknown' THEN 'publication_media_requires_review' WHEN 'failed' THEN 'publication_media_failed' ELSE NULL END,
       format_version=1 WHERE id=$2`, [messageId,publication.id]);
     await releaseDestination(publication.id,client);
   });
@@ -169,19 +181,26 @@ export async function reconcile(publication: Publication, settings: AppSettings,
   try { receipt = await (reader ?? readSentMessage)(publication); }
   catch (error) {
     const code = error instanceof ReconciliationReviewError ? 'send_not_found_requires_review' : 'reconciliation_unavailable';
-    await db.query(`UPDATE publications SET status='uncertain',error_code=$1,next_retry_at=$2,updated_at=now() WHERE id=$3`,
-      [code,new Date(Date.now()+settings.retryMaxMs),publication.id]);
+    await transaction(async client => {
+      await client.query(`UPDATE publications SET status='uncertain',error_code=$1,next_retry_at=$2,updated_at=now() WHERE id=$3`,
+        [code,code === 'send_not_found_requires_review' ? null : new Date(Date.now()+settings.retryMaxMs),publication.id]);
+      await releaseDestination(publication.id,client);
+    });
     return false;
   }
   if (!receipt) {
-    await db.query(`UPDATE publications SET status='uncertain',error_code='send_not_found_requires_review',next_retry_at=$1,updated_at=now() WHERE id=$2`,
-      [new Date(Date.now()+settings.retryMaxMs),publication.id]);
+    await transaction(async client => {
+      await client.query(`UPDATE publications SET status='uncertain',error_code='send_not_found_requires_review',next_retry_at=NULL,updated_at=now() WHERE id=$1`,
+        [publication.id]);
+      await releaseDestination(publication.id,client);
+    });
     return false;
   }
   const messageId = receipt;
   await transaction(async client => {
     await client.query(`UPDATE publications SET status='published',message_id=$1,published_at=coalesce(published_at,now()),
-      next_retry_at=NULL,error_code=CASE WHEN media_status='pending' THEN 'publication_media_pending' ELSE NULL END,
+      next_retry_at=NULL,error_code=CASE media_status WHEN 'pending' THEN 'publication_media_pending'
+        WHEN 'unknown' THEN 'publication_media_requires_review' WHEN 'failed' THEN 'publication_media_failed' ELSE NULL END,
       format_version=1,updated_at=now() WHERE id=$2`, [messageId,publication.id]);
     await releaseDestination(publication.id,client);
     await client.query(`UPDATE request_attempts SET status='succeeded',finished_at=now(),next_retry_at=NULL,

@@ -9,7 +9,7 @@ import { retryEdits } from './updates.js';
 import { prepareReadyStories } from './ready.js';
 import { retryReplacements } from './repair.js';
 import { recoverPublicationMedia } from './media-plan.js';
-import { reservedPublication } from './destination-order.js';
+import { recoverDestination, reservedPublication } from './destination-order.js';
 import { adoptPreparedPublications, destination, locked, publicationSelect, rateLimited, state, tryLocked, unsafeSendAttempt, type Publication } from './store.js';
 
 const verificationSchema = z.object({ verified: z.literal(true), destinationId: z.string(), botId: z.number().int().positive() });
@@ -65,7 +65,7 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   }
   const api = new BotApi();
   if ((await api.identity()).id !== verification.data.botId) return;
-  const reservedId = await reservedPublication(destinationId);
+  const reservedId = await recoverDestination(destinationId);
   if (reservedId) {
     const owner = (await db.query<Publication & { error_code: string | null }>(`${publicationSelect} WHERE p.id=$1`, [reservedId])).rows[0];
     if (owner && (!owner.next_retry_at || owner.next_retry_at <= new Date())) {

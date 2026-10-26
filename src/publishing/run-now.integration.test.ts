@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { BotApi, BotError } from './bot-api.js';
 import { acceptFixtureStories } from './publishing.test-helpers.js';
 import { jevTemplates } from '../models/templates.js';
+let media:typeof import('../media/story-media.js');
 const url = process.env.TEST_DATABASE_URL;
 const schema = `manual_publish_${randomUUID().replaceAll('-', '')}`;
 let admin: pg.Pool;
@@ -44,6 +45,7 @@ describe.skipIf(!url)('scoped manual publication with PostgreSQL', () => {
     database = await import('../db.js'); await database.migrate();
     settings = await (await import('../settings.js')).saveSettings({ publishingEnabled: true });
     store = await import('./store.js'); manual = await import('./run-now.js');
+    media = await import('../media/story-media.js');
   });
   beforeEach(async () => {
     vi.restoreAllMocks(); messageSequence = 100;
@@ -74,6 +76,17 @@ describe.skipIf(!url)('scoped manual publication with PostgreSQL', () => {
     expect((await database.db.query('SELECT id FROM publications WHERE story_id=$1', [eligibleBacklog])).rows).toHaveLength(0);
     expect(await invoke(runId, ids)).toMatchObject({ published: 1, waiting: false });
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
+  });
+  it.each(['unknown','failed'] as const)('counts confirmed text with %s attachments as published, with a diagnostic and no retry', async outcome => {
+    const id=await story('Text despite attachment failure'); const runId=randomUUID();
+    vi.spyOn(media,'publicationMedia').mockResolvedValue([{ type:'image',mimeType:'image/png',data:Buffer.from('png') }]);
+    const upload=vi.spyOn(BotApi.prototype,'sendMedia').mockRejectedValue(new BotError('media_outcome',outcome));
+    const reason=outcome === 'unknown' ? 'publication_media_requires_review' : 'publication_media_failed';
+    expect(await invoke(runId,[id])).toMatchObject({ published:1,waiting:false,reasons:{ [reason]:1 } });
+    expect(await invoke(runId,[id])).toMatchObject({ published:1,waiting:false,reasons:{ [reason]:1 } });
+    expect(upload).toHaveBeenCalledOnce(); expect(BotApi.prototype.send).toHaveBeenCalledOnce();
+    expect((await database.db.query('SELECT status,media_status,message_id FROM publications WHERE story_id=$1',[id])).rows[0])
+      .toEqual({ status:'published',media_status:outcome,message_id:'42' });
   });
   it('leaves existing posts unchanged instead of automatically staging source repairs', async () => {
     const unrelated = await story('Unrelated current'); const unrelatedPublication = await published(unrelated);

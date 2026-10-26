@@ -8,7 +8,7 @@ import { guardDigestEligibility } from '../pipeline/eligibility.js';
 import { prepareUpdates, retryEdits } from './updates.js';
 import { prepareThreadUpdates } from './thread-updates.js';
 import { recoverPublicationMedia } from './media-plan.js';
-import { reservedPublication } from './destination-order.js';
+import { recoverDestination, reservedPublication } from './destination-order.js';
 import { destination, prepareDigest, publicationSelect, rateLimited, state, type Publication } from './store.js';
 
 export interface ManualPublicationResult {
@@ -22,7 +22,7 @@ const selectionSchema = z.object({ ids: z.array(z.uuid()), destinationId: z.stri
 async function deliveryCounts(selection: z.infer<typeof selectionSchema> | undefined, createdAt: string) {
   if (!selection) return { published: 0, updated: 0 };
   const published = await db.query<{ count: number }>(`SELECT count(*)::int AS count FROM publications
-    WHERE id=ANY($1::uuid[]) AND status='published' AND media_status IN ('none','complete')`, [selection.ids]);
+    WHERE id=ANY($1::uuid[]) AND status='published' AND message_id IS NOT NULL AND media_status IN ('none','complete','failed','unknown')`, [selection.ids]);
   const edited = await db.query<{ count: number }>(`SELECT count(DISTINCT a.publication_id)::int AS count FROM request_attempts a
     WHERE a.operation='edit' AND a.status='succeeded' AND a.finished_at>=$2 AND EXISTS(
       SELECT 1 FROM jsonb_to_recordset($1::jsonb) target("publicationId" uuid,"snapshotId" uuid)
@@ -45,7 +45,8 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   let destinationId: string;
   try { destinationId = await destination(); }
   catch { report.reasons.destination_not_configured = 1; return report; }
-  const reservedId = await reservedPublication(destinationId);
+  await recoverPublicationMedia(destinationId);
+  const reservedId = await recoverDestination(destinationId);
   if (reservedId && (!saved.success || !saved.data.ids.includes(reservedId))) {
     report.reasons.destination_reserved = 1; report.waiting = true; return report;
   }
@@ -70,7 +71,6 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   for (const row of prior.rows) report.reasons[`existing_publication_${row.status}`] = row.count;
   // Selection commits before any network send. Retry/restart always uses these same IDs.
   await recoverSends(destinationId, ids);
-  await recoverPublicationMedia(destinationId);
   const selected = await db.query<Publication & { error_code: string | null }>(`${publicationSelect}
     WHERE p.id=ANY($1::uuid[]) AND p.destination_id=$2 ORDER BY p.created_at,p.id`, [ids, destinationId]);
   const withheld = new Set<string>();

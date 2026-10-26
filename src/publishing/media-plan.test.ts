@@ -81,6 +81,11 @@ describe('temporary durable media plan', () => {
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(normalizeImage).not.toHaveBeenCalled();
   });
+  it.each(['unknown','failed'] as const)('keeps a frozen %s plan without rebuilding or blocking canonical text', async media_status => {
+    expect(await preparePublicationMedia({ ...publication,media_snapshot_id:'snapshot',media_status },defaultSettings)).toBe(true);
+    expect(publicationMedia).not.toHaveBeenCalled();
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
   it('does not dispatch or write a partial plan after a failed download', async () => {
     vi.mocked(publicationMedia).mockRejectedValue(new Error('download failed'));
     await expect(preparePublicationMedia(publication, defaultSettings)).rejects.toThrow('download failed');

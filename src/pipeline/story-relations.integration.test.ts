@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { jevTemplates } from '../models/templates.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -54,6 +55,33 @@ describe.skipIf(!url)('verified same and related relationship storage', () => {
     expect(await relations.relatedStoryIds(b)).toEqual([a]);
     await database.db.query('DELETE FROM stories WHERE id=$1', [b]);
     expect(await relations.relatedStoryIds(a)).toEqual([]);
+  });
+  it('stores only pair fingerprints instead of duplicating the full candidate catalogue', async () => {
+    const [a, b, c] = await Promise.all([story(), story(), story()]);
+    await relations.recordStoryRelations(a, [{ storyId: b, relation: 'unrelated' }, { storyId: c, relation: 'unrelated' }],
+      'test-v1', { origin: 'model', incomingFingerprint: 'incoming', candidates: [
+        { storyId: b, fingerprint: 'b' }, { storyId: c, fingerprint: 'c' },
+      ] });
+    const rows = (await database.db.query<{ provenance: Record<string, unknown> }>('SELECT provenance FROM story_relations')).rows;
+    expect(rows).toHaveLength(2);
+    expect(rows.map(row => row.provenance.candidates)).toEqual(expect.arrayContaining([
+      [{ storyId: b, fingerprint: 'b' }], [{ storyId: c, fingerprint: 'c' }],
+    ]));
+    for (const row of rows) expect(row.provenance).toMatchObject({ origin: 'model', incomingFingerprint: 'incoming' });
+  });
+  it('compacts legacy catalogue copies without changing decisions or pair evidence', async () => {
+    const [a, b, c] = await Promise.all([story(), story(), story()]);
+    const provenance = { origin: 'model', incomingFingerprint: 'incoming', quarantined: true,
+      relatedPromptVersion: 'test', relatedEvidence: { incomingQuote: 'A', candidateQuote: 'B', connection: 'test' },
+      candidates: [{ storyId: b, fingerprint: 'b' }, { storyId: c, fingerprint: 'c' }] };
+    await database.db.query(`INSERT INTO story_relations(lower_story_id,upper_story_id,relation,classifier_version,provenance)
+      VALUES(least($1::uuid,$2::uuid),greatest($1::uuid,$2::uuid),'related','legacy',$3)`, [a,b,JSON.stringify(provenance)]);
+    const sql = await readFile(new URL('../../migrations/208_pair_relation_provenance.sql', import.meta.url), 'utf8');
+    await database.db.query(sql);
+    await database.db.query(sql);
+    expect((await database.db.query('SELECT relation,classifier_version,provenance FROM story_relations')).rows).toEqual([
+      { relation: 'related', classifier_version: 'legacy', provenance: { ...provenance,candidates:[{ storyId: b,fingerprint:'b' }] } },
+    ]);
   });
   it('inherits related links both directions through verified same editions only, not related-of-related', async () => {
     const [discovery, recap, shutdown, shutdownEdition, unrelated, legacy] = await Promise.all([story(), story(), story(), story(), story(), story()]);
