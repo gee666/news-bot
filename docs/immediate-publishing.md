@@ -15,8 +15,11 @@ or unknown outcome. Failed or unknown attachments do not block canonical text.
 Maintenance resumes prepared work and reconciles unknown text sends and edits
 without selecting more stories. Unknown media batches and unknown text sends
 are never blindly resent. New canonical posts precede edits and replacement
-maintenance. Automatic edit recovery handles one post per pass and backs off
-unresolved reads so old repairs do not monopolize delivery. Telegram cooldowns
+maintenance. Automatic edit recovery handles one post per pass, prioritizing pending snapshots
+without running or unknown edit attempts before reconciliation. Each group is
+oldest first. Unresolved reads back off exponentially from the existing retry
+base, doubling per reconciliation pass up to six hours on the original attempt.
+Unknown edits are never resent. Telegram cooldowns
 apply across publications.
 
 Run-now freezes its own publication selection and reports delivery outcomes for
