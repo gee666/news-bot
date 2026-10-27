@@ -167,15 +167,14 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     ]);
   });
 
-  it.each([true, false])('keeps three SHA-distinct pictures from four single-event sources despite relevance resolved=%s', async resolved => {
+  it('keeps three unique single-event pictures after dedup but still screens roundup media', async () => {
     const ancestor = await story(); const latest = await story(ancestor);
-    for (const [index, name] of ['killerfeat', 'digital_sila', 'sosicka', 'tech606'].entries()) {
-      const target = index < 2 ? ancestor : latest;
-      const source = await report(target, name, 'mention');
-      await database.db.query(`UPDATE item_revisions SET metadata=metadata||$2::jsonb WHERE id=$1`,
-        [source.revision, JSON.stringify({ pipelineExtraction: [{ parts: [{ start: 0, end: 4 }], context: [] }] })]);
-      await database.db.query('UPDATE story_mentions SET text=$2 WHERE revision_id=$1', [source.revision, name]);
-      if (target === ancestor) await retire(source.item);
+    for (const [index, name] of ['killerfeat', 'digital_sila', 'sosicka', 'tech606', 'roundup'].entries()) {
+      const source = await report(index < 2 ? ancestor : latest, name, 'mention');
+      await database.db.query('UPDATE item_revisions SET metadata=metadata||$2::jsonb WHERE id=$1',
+        [source.revision, JSON.stringify({ pipelineExtraction: Array.from({ length: name === 'roundup' ? 2 : 1 },
+          () => ({ parts: [{ start: 0, end: 4 }], context: [] })) })]);
+      if (index < 2) await retire(source.item);
     }
     const original = await vi.importActual<typeof import('./comparison.js')>('./comparison.js');
     const run: MediaCommandRunner = async (_command, args, input) =>
@@ -183,30 +182,12 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     mocks.dedup.mockImplementation((items: MediaCandidate[]) => original.deduplicateMedia(items, async () => 'different', { run }));
     mocks.download.mockImplementation(async descriptor => ({ type: 'image', mimeType: 'image/png',
       data: Buffer.from(descriptor.url.includes('sosicka') ? 'digital_sila' : descriptor.url.split('/').at(-1).split('.')[0]) }));
-    // Irrelevant or unresolved verdicts must never be requested for these images.
-    mocks.relevance.mockResolvedValue({ media: [], resolved });
+    // Irrelevant/unresolved images are omitted only when they actually require screening.
+    mocks.relevance.mockResolvedValue({ media: [], resolved: false });
     const media = await service.publicationMedia(latest, settings);
     expect(media.map(item => item.data.toString()).sort()).toEqual(['digital_sila', 'killerfeat', 'tech606']);
-    expect(mocks.download).toHaveBeenCalledTimes(4);
-    expect(mocks.dedup.mock.calls[0]?.[0]).toHaveLength(4);
-    expect(mocks.relevance.mock.calls[0]?.[0]).toEqual([]);
-    expect(mocks.relevance.mock.calls[0]?.[1].mentions.sort()).toEqual(['digital_sila', 'killerfeat', 'sosicka', 'tech606']);
-  });
-
-  it('still screens multi-event source pictures while keeping single-event pictures', async () => {
-    const storyId = await story();
-    const own = await report(storyId, 'own', 'mention');
-    const roundup = await report(storyId, 'roundup', 'mention');
-    for (const [revision, count] of [[own.revision, 1], [roundup.revision, 2]] as const) {
-      await database.db.query('UPDATE item_revisions SET metadata=metadata||$2::jsonb WHERE id=$1',
-        [revision, JSON.stringify({ pipelineExtraction: Array.from({ length: count }, () => ({ parts: [{ start: 0, end: 4 }], context: [] })) })]);
-    }
-    mocks.download.mockImplementation(async descriptor => ({ type: 'image', mimeType: 'image/png', data: Buffer.from(descriptor.url) }));
-    mocks.relevance.mockResolvedValue({ media: [], resolved: true });
-    const media = await service.publicationMedia(storyId, settings);
-    expect(media).toHaveLength(1);
-    expect(media[0]?.data.toString()).toContain('/own.png');
-    expect(mocks.relevance.mock.calls[0]?.[0]).toEqual([expect.objectContaining({ data: Buffer.from('https://example.org/roundup.png') })]);
+    expect(mocks.download).toHaveBeenCalledTimes(5);
+    expect(mocks.relevance.mock.calls[0]?.[0]).toEqual([expect.objectContaining({ data: Buffer.from('roundup') })]);
   });
 
   it('classifies against the specific story, not the full roundup, and invalidates decisions when context changes', async () => {

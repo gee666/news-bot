@@ -4,6 +4,7 @@ import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import type { PublicationSnapshot } from '../types.js';
 import { eligible, snapshotFor, type StoryContent } from './content.js';
+import { releaseDestination } from './destination-order.js';
 import { generationIsCurrent } from '../pipeline/generation-freshness.js';
 export { eligible, snapshotFor, mergeSources, type StoryContent } from './content.js';
 
@@ -184,4 +185,63 @@ export async function testPublication(destinationId: string): Promise<Publicatio
     if (!row) throw new Error('Test publication not found');
     return row;
   });
+}
+
+/** Terminal settlement runs under the same history lock as staging and delivery. */
+export async function settleExpiredPublications(destinationId?: string, publicationId?: string): Promise<Array<{
+  publication_id: string; message_id: string | null; kind: 'send' | 'edit'; snapshot_id: string; last_error: string | null;
+}>> {
+  const windowMs = z.coerce.number().int().positive().parse(process.env.PUBLICATION_RETRY_WINDOW_MS ?? 14_400_000);
+  const settled = await transaction(async client => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
+    const expired = await client.query<{ publication_id: string; message_id: string | null; kind: 'send' | 'edit';
+      snapshot_id: string; last_error: string | null }>(`WITH work AS (
+      SELECT p.id AS publication_id,p.message_id,'send' AS kind,p.snapshot_id,
+        coalesce((SELECT a.error_code FROM request_attempts a WHERE a.publication_id=p.id
+          AND (a.operation='send' OR a.operation LIKE 'send_media:%') ORDER BY a.dispatched_at DESC,a.id DESC LIMIT 1),p.error_code) AS last_error,
+        coalesce((SELECT min(a.dispatched_at) FROM request_attempts a WHERE a.publication_id=p.id
+          AND (a.operation='send' OR a.operation LIKE 'send_media:%')),p.created_at) AS started_at
+      FROM publications p WHERE p.status IN ('prepared','sending','uncertain')
+        AND ($1::text IS NULL OR p.destination_id=$1) AND ($2::uuid IS NULL OR p.id=$2)
+      UNION ALL
+      SELECT p.id,p.message_id,'edit',snap.id,
+        (SELECT a.error_code FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
+          AND coalesce(a.response_metadata->>'snapshotId',p.pending_snapshot_id::text,p.snapshot_id::text)=snap.id::text
+          ORDER BY a.dispatched_at DESC,a.id DESC LIMIT 1),
+        coalesce((SELECT min(a.dispatched_at) FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
+          AND coalesce(a.response_metadata->>'snapshotId',p.pending_snapshot_id::text,p.snapshot_id::text)=snap.id::text),snap.created_at)
+      FROM publications p JOIN LATERAL (
+        SELECT p.pending_snapshot_id::text AS id WHERE p.pending_snapshot_id IS NOT NULL
+        UNION SELECT coalesce(a.response_metadata->>'snapshotId',p.pending_snapshot_id::text,p.snapshot_id::text)
+          FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit' AND a.status IN ('running','unknown','retryable')
+      ) candidate ON true JOIN publication_snapshots snap ON snap.id::text=candidate.id
+      WHERE p.status='published' AND ($1::text IS NULL OR p.destination_id=$1) AND ($2::uuid IS NULL OR p.id=$2)
+        AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
+          AND a.status='succeeded' AND a.response_metadata->>'snapshotId'=snap.id::text)
+    ) SELECT * FROM work WHERE started_at<=now()-$3*interval '1 millisecond' ORDER BY started_at`,
+    [destinationId ?? null,publicationId ?? null,windowMs]);
+    for (const item of expired.rows) {
+      await client.query(`UPDATE request_attempts SET status='failed',error_code='publication_retry_window_expired',
+        next_retry_at=NULL,finished_at=now(),response_metadata=response_metadata||jsonb_build_object('previousErrorCode',error_code)
+        WHERE publication_id=$1 AND status IN ('running','unknown','retryable') AND
+          (($2='send' AND (operation='send' OR operation LIKE 'send_media:%')) OR ($2='edit' AND operation='edit'
+            AND coalesce(response_metadata->>'snapshotId',$3)= $3))`, [item.publication_id,item.kind,item.snapshot_id]);
+      if (item.kind === 'edit') {
+        await client.query(`INSERT INTO operational_state(key,value) VALUES($1,jsonb_build_object('snapshotId',$2::text,'status','failed','errorCode','publication_retry_window_expired'))
+          ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`,
+        [`publication_edit_settled:${item.publication_id}`,item.snapshot_id]);
+        await client.query(`UPDATE publications SET pending_snapshot_id=NULL,updated_at=now()
+          WHERE id=$1 AND pending_snapshot_id=$2`, [item.publication_id,item.snapshot_id]);
+      } else {
+        await client.query(`UPDATE publications SET status='failed',error_code='publication_retry_window_expired',
+          next_retry_at=NULL,pending_snapshot_id=NULL,updated_at=now() WHERE id=$1`, [item.publication_id]);
+        await client.query(`UPDATE publication_media_batches SET status='failed',error_code='publication_retry_window_expired',next_retry_at=NULL
+          WHERE publication_id=$1 AND status IN ('prepared','running','unknown','retryable')`, [item.publication_id]);
+        await releaseDestination(item.publication_id,client);
+      }
+    }
+    return expired.rows;
+  });
+  for (const item of settled) console.warn(`Publication retry window expired publication=${item.publication_id} message=${item.message_id ?? '-'} kind=${item.kind} last_error=${item.last_error ?? '-'}`);
+  return settled;
 }

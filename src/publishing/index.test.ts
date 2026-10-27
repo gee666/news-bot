@@ -15,7 +15,7 @@ vi.mock('../settings.js', async importOriginal => {
   const original = await importOriginal<typeof import('../settings.js')>();
   return { ...original, getSettings: mocks.getSettings };
 });
-vi.mock('./store.js', () => ({ rateLimited: async () => (await mocks.query('AS waiting')).rows[0]?.waiting ?? false, destination: mocks.destination, state: mocks.state,
+vi.mock('./store.js', () => ({ settleExpiredPublications: async () => [], rateLimited: async () => (await mocks.query('AS waiting')).rows[0]?.waiting ?? false, destination: mocks.destination, state: mocks.state,
   locked: async (_name: string, run: () => Promise<unknown>) => run(),
   tryLocked: mocks.tryLock, prepareDigest: mocks.prepare, adoptPreparedPublications: mocks.adopt, unsafeSendAttempt: "a.status IN ('running','unknown')",
   newsOrderTime: () => 'news.created_at', publicationSelect: 'SELECT p.*, s.content FROM publications p JOIN publication_snapshots s ON s.id=p.snapshot_id',
@@ -160,7 +160,8 @@ describe('automatic publication resumption', () => {
 
   it('requires the publishing toggle and matching successful bot verification', async () => {
     await resumePublications(defaultSettings);
-    expect(mocks.tryLock).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.retryEdits).not.toHaveBeenCalled();
     mocks.state.mockResolvedValue({ verified: false });
     await resumePublications(enabled);
     expect(mocks.send).not.toHaveBeenCalled();

@@ -10,13 +10,14 @@ import { prepareReadyStories } from './ready.js';
 import { retryReplacements } from './repair.js';
 import { recoverPublicationMedia } from './media-plan.js';
 import { recoverDestination, reservedPublication } from './destination-order.js';
-import { adoptPreparedPublications, destination, locked, publicationSelect, rateLimited, state, tryLocked, unsafeSendAttempt, type Publication } from './store.js';
+import { settleExpiredPublications, adoptPreparedPublications, destination, locked, publicationSelect, rateLimited, state, tryLocked, unsafeSendAttempt, type Publication } from './store.js';
 
 const verificationSchema = z.object({ verified: z.literal(true), destinationId: z.string(), botId: z.number().int().positive() });
 const due = '(p.next_retry_at IS NULL OR p.next_retry_at<=now())';
 const reviewExcluded = "p.error_code IS DISTINCT FROM 'send_not_found_requires_review'";
 
 export async function recoverSends(destinationId: string, publicationIds?: string[]): Promise<void> {
+  await settleExpiredPublications(destinationId);
   await db.query(`UPDATE publications SET status='uncertain',error_code='restart_send_unknown',
       next_retry_at=greatest(next_retry_at,now()+interval '5 minutes'),updated_at=now()
     WHERE destination_id=$1 AND ($2::uuid[] IS NULL OR id=ANY($2)) AND (status='sending' OR (status='prepared' AND EXISTS(
@@ -104,7 +105,9 @@ export async function publishDigest(settings: AppSettings): Promise<void> {
 }
 
 export async function resumePublications(settings: AppSettings): Promise<void> {
-  if (!settings.publishingEnabled) return;
   // Never wait behind an active digest/verification or nest its lease.
-  await tryLocked('news-bot-digest', () => dispatch(settings,false));
+  await tryLocked('news-bot-digest', async () => {
+    await settleExpiredPublications();
+    if (settings.publishingEnabled) await dispatch(settings,false);
+  });
 }

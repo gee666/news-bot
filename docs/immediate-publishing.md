@@ -15,11 +15,8 @@ or unknown outcome. Failed or unknown attachments do not block canonical text.
 Maintenance resumes prepared work and reconciles unknown text sends and edits
 without selecting more stories. Unknown media batches and unknown text sends
 are never blindly resent. New canonical posts precede edits and replacement
-maintenance. Automatic edit recovery handles one post per pass, prioritizing pending snapshots
-without running or unknown edit attempts before reconciliation. Each group is
-oldest first. Unresolved reads back off exponentially from the existing retry
-base, doubling per reconciliation pass up to six hours on the original attempt.
-Unknown edits are never resent. Telegram cooldowns
+maintenance. Automatic edit recovery handles one post per pass and backs off
+unresolved reads so old repairs do not monopolize delivery. Telegram cooldowns
 apply across publications.
 
 Run-now freezes its own publication selection and reports delivery outcomes for
@@ -30,3 +27,13 @@ links inside the canonical message. Existing text posts use text edits; old albu
 posts use caption edits. Oversized edits are skipped and record
 `publication_navigation_requires_new_edition`. Operator repair and approval APIs
 are not part of publishing.
+
+`PUBLICATION_RETRY_WINDOW_MS` defaults to 14400000 milliseconds, four hours.
+Unsuccessful sends and edits settle permanently after this window, including
+unknown outcomes and backed-off or unattempted work. The window starts with the
+first attempt, or creation/staging if there was no attempt. Recovery settles
+expired work before queue selection, even while publishing is paused. Settlement
+records one warning with the publication, message, operation and last error.
+Settled sends are failed and never requeued. Settled edits clear their pending
+snapshot and unblock genuinely newer edits; unchanged settled content is not
+staged again. Existing fixed retry backoff remains unchanged.

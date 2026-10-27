@@ -9,7 +9,7 @@ import { prepareUpdates, retryEdits } from './updates.js';
 import { prepareThreadUpdates } from './thread-updates.js';
 import { recoverPublicationMedia } from './media-plan.js';
 import { recoverDestination, reservedPublication } from './destination-order.js';
-import { destination, prepareDigest, publicationSelect, rateLimited, state, type Publication } from './store.js';
+import { settleExpiredPublications, destination, prepareDigest, publicationSelect, rateLimited, state, type Publication } from './store.js';
 
 export interface ManualPublicationResult {
   published: number; updated: number; waiting: boolean; reasons: Record<string, number>;
@@ -45,6 +45,7 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
   let destinationId: string;
   try { destinationId = await destination(); }
   catch { report.reasons.destination_not_configured = 1; return report; }
+  await settleExpiredPublications(destinationId);
   await recoverPublicationMedia(destinationId);
   const reservedId = await recoverDestination(destinationId);
   if (reservedId && (!saved.success || !saved.data.ids.includes(reservedId))) {

@@ -4,7 +4,7 @@ import type { AppSettings } from '../settings.js';
 import { BotApi, BotError, telegramTimeouts } from './bot-api.js';
 import { render, renderPublication, PublicationRenderError, type RenderedMessage } from './render.js';
 import { readSentMessage, ReconciliationReviewError, sendMetadata } from './reconciliation.js';
-import { publicationEditSelect, rateLimited, type Publication } from './store.js';
+import { settleExpiredPublications, publicationEditSelect, rateLimited, type Publication } from './store.js';
 import { publicationAdmission, recordAdmissionDenial, type DeliveryAuthorization } from './freshness.js';
 import { reconcileUnknownEdit } from './edit-reconciliation.js';
 import { preparePublicationMedia } from './media-plan.js';
@@ -30,6 +30,8 @@ export async function recordFailure(attemptId: string, publication: Publication,
 
 export async function beginAttempt(publication: Publication, operation: 'send' | 'edit' | 'delete', metadata: object,
   settings?: AppSettings, authorization: DeliveryAuthorization = {}): Promise<string | null> {
+  if (operation !== 'delete' && (await settleExpiredPublications(publication.destination_id,publication.id))
+    .some(item => item.kind === operation && (operation === 'send' || item.snapshot_id === (publication.pending_snapshot_id ?? publication.snapshot_id)))) return null;
   return transaction(async client => {
     if (await destinationBlocked(publication.destination_id, operation === 'send' && publication.delivery_kind === 'media_first' ? publication.id : undefined, client)) return null;
     if (operation === 'send' && publication.delivery_kind === 'media_first' && (await client.query(`SELECT 1 FROM publication_media_batches
@@ -84,6 +86,7 @@ export async function beginAttempt(publication: Publication, operation: 'send' |
 export async function sendPrepared(publication: Publication, api: BotApi, settings: AppSettings,
   authorization: DeliveryAuthorization = {}): Promise<string | null> {
   if (publication.status !== 'prepared' || publication.message_id || publication.delivery_kind === 'album') return null;
+  if ((await settleExpiredPublications(publication.destination_id,publication.id)).some(item => item.kind === 'send')) return null;
   if (await destinationBlocked(publication.destination_id, publication.delivery_kind === 'media_first' ? publication.id : undefined)) return null;
   try {
     await preparePublicationMedia(publication, settings);
@@ -149,6 +152,8 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
 export async function editPublication(publication: Publication, api: BotApi, settings: AppSettings,
   authorization: DeliveryAuthorization = {}): Promise<boolean> {
   if (!publication.message_id || publication.status !== 'published') return false;
+  if ((await settleExpiredPublications(publication.destination_id,publication.id)).some(item => item.kind === 'edit'
+    && item.snapshot_id === (publication.pending_snapshot_id ?? publication.snapshot_id))) return false;
   const reconciled = await reconcileUnknownEdit(publication);
   if (reconciled !== null) return reconciled;
   let message: RenderedMessage;
@@ -177,6 +182,7 @@ export async function editPublication(publication: Publication, api: BotApi, set
 
 export async function reconcile(publication: Publication, settings: AppSettings,
   reader?: (publication: Publication) => Promise<string | null>): Promise<boolean> {
+  if ((await settleExpiredPublications(publication.destination_id,publication.id)).some(item => item.kind === 'send')) return false;
   let receipt: string | null;
   try { receipt = await (reader ?? readSentMessage)(publication); }
   catch (error) {

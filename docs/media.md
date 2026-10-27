@@ -20,8 +20,7 @@ resent. Startup also clears reservations left by terminal publications.
 
 After deduplication, pictures from a source revision with exactly one extracted
 event belonging to the story or a verified ancestor bypass relevance screening.
-Multi-event source pictures and research media still receive relevance screening,
-using extracted mentions from the same verified story thread as media selection.
+Multi-event source pictures and research media still receive relevance screening.
 
 Unavailable source attachments are omitted without failing text generation.
 Privacy checks still apply before downloads and inference.

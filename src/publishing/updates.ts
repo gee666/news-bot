@@ -7,7 +7,7 @@ import { snapshotSources } from './content.js';
 import { BotApi } from './bot-api.js';
 import { editPublication } from './delivery.js';
 import { renderPublication, PublicationRenderError } from './render.js';
-import { eligible, locked, publicationEditSelect, rateLimited, supersedeAttempts, type Publication, type StoryContent } from './store.js';
+import { settleExpiredPublications, eligible, locked, publicationEditSelect, rateLimited, supersedeAttempts, type Publication, type StoryContent } from './store.js';
 
 /** One tracked survivor per canonical event and destination. Alias audit survives story pruning. */
 export const canonicalPublications = `SELECT DISTINCT ON (s.id) p.id,s.id AS canonical_story_id
@@ -94,6 +94,8 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
         continue;
       }
       const normalized = JSON.stringify(content);
+      if ((await client.query(`SELECT 1 FROM operational_state o JOIN publication_snapshots snap ON snap.id::text=o.value->>'snapshotId'
+        WHERE o.key=$1 AND snap.content=$2::jsonb`, [`publication_edit_settled:${story.publication_id}`,normalized])).rows.length) continue;
       const previous = publicationSnapshotSchema.safeParse(story.pending_snapshot_id ? story.pending_content : story.old_content);
       if (previous.success && JSON.stringify(previous.data) === normalized && (story.pending_snapshot_id || story.format_version === 1) && story.desired_story_id === story.id) {
         if (options.runId && story.pending_snapshot_id) await pinManualEdit(client, options.runId, story.publication_id, story.pending_snapshot_id);
@@ -121,6 +123,7 @@ const editDue = `((p.pending_snapshot_id IS NOT NULL
 
 /** Stored edits still require final freshness; unknown outcomes can only be reconciled. */
 export async function retryEdits(api: BotApi, settings: AppSettings, destinationId: string, storyIds?: string[], publicationIds?: string[]): Promise<number> {
+  await settleExpiredPublications(destinationId);
   await transaction(client => invalidateStaleEdits(client,settings,destinationId,undefined,storyIds));
   let edited = 0;
   const botId = String((await api.identity()).id);
@@ -128,9 +131,7 @@ export async function retryEdits(api: BotApi, settings: AppSettings, destination
     AND NOT EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id)
     AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key='publication_removal:'||p.id::text)
     AND ($2::uuid[] IS NULL OR p.id IN(SELECT chosen.id FROM (${canonicalPublications}) chosen WHERE chosen.canonical_story_id=ANY($2)))
-    AND ${editDue} ORDER BY CASE WHEN p.pending_snapshot_id IS NOT NULL AND NOT EXISTS(
-      SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit' AND a.status IN ('running','unknown'))
-      THEN 0 ELSE 1 END,p.created_at ${storyIds === undefined && publicationIds === undefined ? 'LIMIT 1' : ''}`,
+    AND ${editDue} ORDER BY p.created_at ${storyIds === undefined && publicationIds === undefined ? 'LIMIT 1' : ''}`,
   [destinationId,storyIds ?? null,publicationIds ?? null]);
   for (const row of rows.rows) {
     if (await rateLimited()) break;
@@ -139,11 +140,7 @@ export async function retryEdits(api: BotApi, settings: AppSettings, destination
       const publication = (await client.query<Publication>(`${publicationEditSelect} WHERE p.id=$1 AND ${editDue}`, [row.id])).rows[0];
       if (publication?.bot_id === botId) {
         if (await editPublication(publication,api,settings)) edited++;
-        // Count read-only reconciliation passes on the original request, never new edit requests.
-        else await client.query(`UPDATE request_attempts SET next_retry_at=now()+
-            least(21600000::double precision,$2*power(2,least(15,coalesce((response_metadata->>'reconciliationAttempts')::int,0))))*interval '1 millisecond',
-            response_metadata=response_metadata||jsonb_build_object('reconciliationAttempts',
-              coalesce((response_metadata->>'reconciliationAttempts')::int,0)+1)
+        else await client.query(`UPDATE request_attempts SET next_retry_at=now()+$2*interval '1 millisecond'
           WHERE publication_id=$1 AND operation='edit' AND status='unknown'
             AND (next_retry_at IS NULL OR next_retry_at<=now())`, [row.id,settings.retryBaseMs]);
       }

@@ -11,7 +11,7 @@ vi.mock('../db.js', () => ({ db:{ query:mocks.query },
 vi.mock('../media/story-media.js', () => ({ releaseStoryMedia:vi.fn().mockResolvedValue(undefined) }));
 vi.mock('./freshness.js', () => ({ publicationAdmission:mocks.admission, recordAdmissionDenial:vi.fn() }));
 vi.mock('./destination-order.js', () => ({ destinationBlocked:vi.fn().mockResolvedValue(false), reserveDestination:vi.fn().mockResolvedValue(true) }));
-vi.mock('./store.js', () => ({ rateLimited:vi.fn().mockResolvedValue(false) }));
+vi.mock('./store.js', () => ({ settleExpiredPublications: async () => [], rateLimited:vi.fn().mockResolvedValue(false) }));
 const publication: Publication = { id:'pub',story_id:'story',snapshot_id:'snap',pending_snapshot_id:null,
   destination_id:'-100123',status:'prepared',message_id:null,bot_id:'123',format_version:1,attempt_count:0,
   next_retry_at:null,created_at:new Date(),content:{},delivery_kind:'media_first',media_status:'pending' };

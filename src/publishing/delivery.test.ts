@@ -11,6 +11,7 @@ import { publicationAdmission } from './freshness.js';
 import { publicationMedia } from '../media/story-media.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn() }));
+vi.mock('./store.js', async original => ({ ...await original<typeof import('./store.js')>(), settleExpiredPublications: async () => [] }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: mocks.transaction }));
 vi.mock('../media/story-media.js', () => ({ publicationMedia: vi.fn().mockResolvedValue([]), releaseStoryMedia: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('./freshness.js', async importOriginal => ({ ...await importOriginal<typeof import('./freshness.js')>(), publicationAdmission: vi.fn().mockResolvedValue({ allowed: true }) }));

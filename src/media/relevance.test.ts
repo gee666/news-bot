@@ -33,17 +33,16 @@ beforeEach(() => {
     mentions: [{ text: story.mentions[0], access: 'public' }] }] });
 });
 
-it('loads parameterized, story-specific extracted context including verified ancestors without article bodies', async () => {
+it('loads parameterized, story-specific extracted context without article bodies or ancestor context', async () => {
   const id = randomUUID();
   expect(await loadMediaStoryContext(id)).toEqual(story);
   const [sql, parameters] = mocks.query.mock.calls[0]!;
   expect(parameters).toEqual([id]);
   expect(sql).toContain('WHERE st.id=$1');
-  expect(sql).toContain('WHERE m.story_id IN(SELECT id FROM generation_story_ids)');
-  expect(sql).toContain('m.story_id<>$1 OR i.current_revision_id=r.id');
+  expect(sql).toContain('WHERE m.story_id=st.id');
   expect(sql).toContain('i.current_revision_id=r.id');
   expect(sql).not.toContain('original_text');
-  expect(sql).toContain('classification_version IS NOT NULL');
+  expect(sql).not.toContain('generation_story_ids');
   expect(mocks.privacy).toHaveBeenCalledWith(['public'], `media-context:${id}`);
 });
 

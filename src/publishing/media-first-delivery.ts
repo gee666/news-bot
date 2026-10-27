@@ -4,7 +4,7 @@ import { releaseStoryMedia } from '../media/story-media.js';
 import { BotApi, BotError, mediaUploadType, telegramTimeouts, type PublicationMedia } from './bot-api.js';
 import { publicationAdmission, recordAdmissionDenial, type DeliveryAuthorization } from './freshness.js';
 import { destinationBlocked, reserveDestination } from './destination-order.js';
-import { rateLimited, type Publication } from './store.js';
+import { settleExpiredPublications, rateLimited, type Publication } from './store.js';
 
 interface Batch { id: string; batch_number: number; status: string; attempt_count: number; next_retry_at: Date | null }
 interface Item { id: string; type: PublicationMedia['type']; mime_type: string; digest: string; data: Buffer | null; expires_at: Date }
@@ -20,6 +20,7 @@ export async function deliverMediaFirst(publication: Publication, api: BotApi, s
     JOIN publication_media_batches b ON b.id=i.batch_id WHERE b.publication_id=$1`, [publication.id])).rows[0]?.count ?? 0;
   if (count > 10) return false;
   for (const batch of batches) {
+    if ((await settleExpiredPublications(publication.destination_id,publication.id)).some(item => item.kind === 'send')) return false;
     // An unknown upload may already exist. Never retry it or invent a receipt.
     if (['sent','unknown','failed'].includes(batch.status)) continue;
     if (!['prepared','retryable'].includes(batch.status)) return false;
