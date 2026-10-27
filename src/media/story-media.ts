@@ -16,35 +16,43 @@ import { filterRelevantMedia, loadMediaStoryContext, mediaRelevanceVersion } fro
 import { isPublishableImage } from './codec.js';
 
 // Selection policy changes must invalidate previously retained attachments.
-const preparationVersion = 'media-v7-story-visual-relevance-dimensions';
+const preparationVersion = 'media-v8-single-event-source-pictures';
 const cache = new MediaCache();
 const active = new Map<string, Promise<MediaCandidate[]>>();
 const sourceSchema = z.object({ revision_id: z.string(), metadata: z.record(z.string(), z.unknown()),
-  source_metadata: z.record(z.string(), z.unknown()), access: z.string() });
+  source_metadata: z.record(z.string(), z.unknown()), access: z.string(), own_media: z.boolean() });
 
 async function prepare(storyId: string, settings: AppSettings): Promise<MediaCandidate[]> {
   // Retention owns source lifetime. Fetch/cache TTLs must not hide retained ancestor attachments.
-  const result = await db.query(`${generationThread} SELECT DISTINCT r.id AS revision_id,r.metadata,s.metadata AS source_metadata,s.access
+  const result = await db.query(`${generationThread}, single_event_sources AS (
+    SELECT r.id FROM item_revisions r JOIN story_mentions m ON m.revision_id=r.id
+    WHERE m.story_id IN(SELECT id FROM generation_story_ids)
+      AND CASE WHEN jsonb_typeof(r.metadata->'pipelineExtraction')='array'
+        THEN jsonb_array_length(r.metadata->'pipelineExtraction')=1 ELSE false END
+  ) SELECT DISTINCT r.id AS revision_id,r.metadata,s.metadata AS source_metadata,s.access,
+      r.id IN(SELECT id FROM single_event_sources) AS own_media
     FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
     JOIN source_items i ON i.id=r.item_id AND (m.story_id<>$1 OR i.current_revision_id=r.id)
     JOIN sources s ON s.id=i.source_id
     WHERE m.story_id IN(SELECT id FROM generation_story_ids)
       AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
-    UNION SELECT r.id AS revision_id,r.metadata,s.metadata AS source_metadata,s.access
+    UNION SELECT r.id AS revision_id,r.metadata,s.metadata AS source_metadata,s.access,
+      r.id IN(SELECT id FROM single_event_sources) AS own_media
     FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
     JOIN item_revisions r ON r.id=l.revision_id
     JOIN source_items i ON i.id=r.item_id AND (sl.story_id<>$1 OR i.current_revision_id=r.id)
     JOIN sources s ON s.id=i.source_id WHERE sl.story_id IN(SELECT id FROM generation_story_ids) AND sl.classification='relevant' AND ${evidenceLinkSql}
       AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
-    UNION SELECT e.id AS revision_id,e.metadata,'{}'::jsonb AS source_metadata,e.access
+    UNION SELECT e.id AS revision_id,e.metadata,'{}'::jsonb AS source_metadata,e.access,false AS own_media
     FROM story_evidence se JOIN evidence_documents e ON e.id=se.evidence_id
     WHERE se.story_id IN(SELECT id FROM generation_story_ids) AND se.relevance='relevant' AND e.access='public'
       AND se.superseded_at IS NULL AND (se.story_id<>$1 OR e.expires_at>now())
     ORDER BY revision_id`, [z.uuid().parse(storyId)]);
   const sources = z.array(sourceSchema).parse(result.rows);
-  const descriptors = sources.flatMap(source => {
+  // First-wins URL and visual dedup must retain the single-event provenance.
+  const descriptors = sources.sort((a, b) => Number(b.own_media) - Number(a.own_media)).flatMap(source => {
     const parsed = z.array(mediaDescriptor).safeParse(source.metadata.media ?? []);
     return parsed.success ? distinctSourceMedia(parsed.data).map(descriptor => ({ descriptor, source })) : [];
   });
@@ -57,6 +65,7 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
   const cached = await cache.load(storyId, fingerprint);
   if (cached) return cached;
   const candidates: MediaCandidate[] = [];
+  const ownMedia = new Set<MediaCandidate>();
   const seen = new Set<string>();
   let bytes = 0;
   let resolved = true;
@@ -75,7 +84,9 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
         break;
       }
       if (media.type === 'image' && !await isPublishableImage(media.data)) continue;
-      candidates.push({ ...media, expiresAt: Date.now() + MEDIA_TTL_MS });
+      const candidate = { ...media, expiresAt: Date.now() + MEDIA_TTL_MS };
+      candidates.push(candidate);
+      if (source.own_media) ownMedia.add(candidate);
     } catch {
       resolved = false;
       console.error('Source attachment unavailable; continuing without it.');
@@ -89,12 +100,13 @@ async function prepare(storyId: string, settings: AppSettings): Promise<MediaCan
     pairCache: new MediaPairCache(version),
     durationToleranceRatio: Number(process.env.MEDIA_VIDEO_DURATION_TOLERANCE ?? 0.2),
   });
-  const selection = await filterRelevantMedia(unique, story, storyId, settings);
+  const selection = await filterRelevantMedia(unique.filter(item => !ownMedia.has(item)), story, storyId, settings);
+  const retained = [...unique.filter(item => ownMedia.has(item)), ...selection.media];
   resolved &&= selection.resolved;
   // Keep the first-download deadline even on uncertainty. An incomplete fingerprint
   // can never satisfy a final-selection lookup, so the next publication retries.
-  const expiresAt = await cache.save(storyId, resolved ? fingerprint : `unresolved:${fingerprint}`, selection.media);
-  return selection.media.map(item => ({ ...item, expiresAt }));
+  const expiresAt = await cache.save(storyId, resolved ? fingerprint : `unresolved:${fingerprint}`, retained);
+  return retained.map(item => ({ ...item, expiresAt }));
 }
 
 export function publicationMedia(storyId: string, settings: AppSettings): Promise<MediaCandidate[]> {

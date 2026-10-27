@@ -23,7 +23,7 @@ beforeEach(() => {
   mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media: [
     { type: 'image', url: 'https://example.org/a.jpg' }, { type: 'image', url: 'https://example.org/a.jpg' },
     { type: 'video', url: 'https://example.org/a.mp4' },
-  ] }, source_metadata: {}, access: 'public' }] });
+  ] }, source_metadata: {}, access: 'public', own_media: false }] });
   mocks.load.mockResolvedValue(null);
   mocks.judge.mockResolvedValue('different');
   mocks.save.mockResolvedValue(Date.now() + 604800000);
@@ -51,7 +51,7 @@ it('selects one original from the NVIDIA WordPress pair before downloads or visu
   const url = 'https://blogs.nvidia.com/wp-content/uploads/2026/10/NVIDIA-European-Retail.jpg';
   mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media: [
     { type: 'image', url }, { type: 'image', url: url.replace('.jpg', '-842x450.jpg') },
-  ] }, source_metadata: {}, access: 'public' }] });
+  ] }, source_metadata: {}, access: 'public', own_media: false }] });
   expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(image)]);
   expect(mocks.download).toHaveBeenCalledExactlyOnceWith({ type: 'image', url }, { metadata: {} });
   expect(mocks.dedup.mock.calls[0]?.[0]).toHaveLength(1);
@@ -64,7 +64,7 @@ it('selects one original from the NVIDIA WordPress pair before downloads or visu
 it('does not infer rendition identity across separate source revisions', async () => {
   const url = 'https://example.org/wp-content/uploads/2026/10/chart.jpg';
   mocks.query.mockResolvedValue({ rows: [url, url.replace('.jpg', '-842x450.jpg')].map(url => ({
-    revision_id: randomUUID(), metadata: { media: [{ type: 'image', url }] }, source_metadata: {}, access: 'public',
+    revision_id: randomUUID(), metadata: { media: [{ type: 'image', url }] }, source_metadata: {}, access: 'public', own_media: false,
   })) });
   mocks.download.mockReset().mockResolvedValue(image);
   expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(2);
@@ -131,7 +131,7 @@ it('invalidates final selections when model identity changes', async () => {
 it('keeps all attachments above the old 100-item processing cap', async () => {
   mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media:
     Array.from({ length: 103 }, (_, i) => ({ type: 'image', url: `https://example.org/${i}.jpg` })),
-  }, source_metadata: {}, access: 'public' }] });
+  }, source_metadata: {}, access: 'public', own_media: false }] });
   mocks.download.mockReset().mockResolvedValue(image);
   expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(103);
   expect(mocks.download).toHaveBeenCalledTimes(103);
@@ -182,7 +182,7 @@ it('invalidates cached relevance decisions when the specific story context chang
 it('does not load story text or classify images on a video-only source', async () => {
   mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media: [
     { type: 'video', url: 'https://example.org/a.mp4' },
-  ] }, source_metadata: {}, access: 'public' }] });
+  ] }, source_metadata: {}, access: 'public', own_media: false }] });
   mocks.download.mockReset().mockResolvedValue(video);
   expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(1);
   expect(mocks.context).not.toHaveBeenCalled();

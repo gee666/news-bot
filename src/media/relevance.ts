@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { db } from '../db.js';
+import { generationThread } from '../pipeline/generation-context.js';
 import { classifyMediaRelevance, MEDIA_RELEVANCE_BATCH_SIZE, MEDIA_RELEVANCE_VERSION,
   type MediaStoryContext } from '../models/media-relevance.js';
 import type { ModelImage } from '../models/images.js';
@@ -19,16 +20,16 @@ export function mediaRelevanceVersion(settings: AppSettings): string {
     modelVersion: settings.modelVersion });
 }
 
-/** Only the requested story's extracted mentions, never the full roundup or ancestor stories. */
+/** Extracted mentions from the same verified thread as media selection, never full roundups. */
 export async function loadMediaStoryContext(storyId: string): Promise<MediaStoryContext | null> {
   z.uuid().parse(storyId);
   let parsed: z.infer<typeof contextSchema>;
   try {
-    const result = await db.query(`SELECT st.headline,st.summary,st.chosen_excerpt,
+    const result = await db.query(`${generationThread} SELECT st.headline,st.summary,st.chosen_excerpt,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('text',m.text,'access',s.access) ORDER BY m.ordinal,m.id)
         FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
-        JOIN source_items i ON i.id=r.item_id AND i.current_revision_id=r.id
-        JOIN sources s ON s.id=i.source_id WHERE m.story_id=st.id
+        JOIN source_items i ON i.id=r.item_id AND (m.story_id<>$1 OR i.current_revision_id=r.id)
+        JOIN sources s ON s.id=i.source_id WHERE m.story_id IN(SELECT id FROM generation_story_ids)
           AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
           AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)),
         '[]'::jsonb) AS mentions FROM stories st WHERE st.id=$1`, [storyId]);

@@ -109,7 +109,10 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
   });
 }
 
-const editDue = `((p.pending_snapshot_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM request_attempts a
+const editDue = `((p.pending_snapshot_id IS NOT NULL
+  AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id
+    AND a.operation='edit' AND a.status IN ('running','unknown'))
+  AND NOT EXISTS(SELECT 1 FROM request_attempts a
     WHERE a.publication_id=p.id AND a.operation='edit' AND a.response_metadata->>'snapshotId'=p.pending_snapshot_id::text
       AND (a.status IN ('failed','succeeded') OR a.next_retry_at>now())))
   OR EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
