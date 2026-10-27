@@ -9,9 +9,11 @@ import { modelResult } from './generation.test-helpers.js';
 import type { EventInput } from './consolidation-input.js';
 const cache = vi.hoisted(() => new Map<string, unknown>());
 vi.mock('../db.js', () => ({ db: { query: vi.fn(async (sql: string, args: unknown[]) => {
-  const key = JSON.stringify(args.slice(0, 3));
-  if (sql.includes('SELECT value')) return { rows: cache.has(key) ? [{ value: cache.get(key) }] : [] };
-  cache.set(key, JSON.parse(String(args[3])));
+  const key = (inputHash: unknown) => JSON.stringify([inputHash, ...args.slice(1, 3)]);
+  if (sql.includes('SELECT input_hash,value')) return { rows: (args[0] as string[])
+    .flatMap(input_hash => cache.has(key(input_hash)) ? [{ input_hash, value: cache.get(key(input_hash)) }] : []) };
+  const values = args[3] as string[];
+  for (const [index, inputHash] of (args[0] as string[]).entries()) cache.set(key(inputHash), JSON.parse(String(values[index])));
   return { rows: [] };
 }) } }));
 beforeEach(() => { cache.clear(); });
@@ -20,7 +22,7 @@ vi.mock('./privacy.js', () => ({ approveRemoteInput: vi.fn() }));
 vi.mock('./generation-model.js', () => ({ recordGenerationFailure: vi.fn(), generationError: vi.fn() }));
 const context = { id: randomUUID(), attempt: 3, batchId: null, revisionId: null, storyId: null };
 function report(text: string, url = 'https://example.org/news'): EventInput {
-  return { id: randomUUID(), text, fingerprint: randomUUID(), reports: [{ text, sourceUrl: url, links: [url] }] };
+  return { id: randomUUID(), text, fingerprint: randomUUID(), reports: [{ text, sourceUrl: url, links: [url], publishedAt: '2026-10-26T19:00:00.000Z' }] };
 }
 it('compares every retained group in bounded requests with complete report provenance', async () => {
   const incoming = report('Compiler 2 is now available for $40.');
@@ -43,6 +45,14 @@ it('compares every retained group in bounded requests with complete report prove
   expect(request?.systemPrompt).toContain('no bridging');
   expect(request?.systemPrompt).toContain('downloadable quantized checkpoint');
   expect(request?.systemPrompt).toContain('same SPECIFIC headline');
+  expect(request?.systemPrompt).toContain('One incident affecting several subjects at once');
+  expect(request?.systemPrompt).toContain('the partial report is the same event with fewer details');
+  expect(request?.systemPrompt).toContain('one specific headline, not joined separate headlines');
+  expect(request?.systemPrompt).toContain('Telegram outage worldwide versus Telegram and Max fell synchronously worldwide versus Max also has mass failures, published within hours, are SAME');
+  expect(request?.systemPrompt).toContain('Use report publishedAt times');
+  expect(request?.systemPrompt).toContain('different days, are separate occurrences unless evidence links them');
+  expect(request?.systemPrompt).toContain('Time proximity alone never makes unrelated subjects same');
+  expect(request?.systemPrompt).toContain('joining genuinely different developments with and');
 });
 it.each(['same', 'unrelated', 'related'] as const)('requires nullable evidence in the provider schema for %s decisions', async relation => {
   const incoming = report('A discovered a PHP flaw.');
@@ -81,6 +91,7 @@ it('rejects invented or repeated IDs rather than attaching reports to an unrelat
   const generator = { generate: vi.fn().mockResolvedValue(modelResult({ matches: [{ storyId: randomUUID(), relation: 'same' }] })) };
   await expect(groupReport(report('Release.'),[candidate],defaultSettings,context,generator)).rejects.toThrow();
   expect(generator.generate).toHaveBeenCalledTimes(2);
+  expect(cache.size).toBe(0);
 });
 it('uses only the original comparison for related decisions and caches it without a second model call', async () => {
   const incoming=report('OpenAI found a critical PHP flaw.');
@@ -233,4 +244,57 @@ it('tells the bounded repair which candidate IDs were missing without expanding 
   expect(generate.mock.calls[1]?.[0].prompt).toBe(generate.mock.calls[0]?.[0].prompt);
   expect(generate.mock.calls[1]?.[0].systemPrompt).toContain(`Missing candidate IDs: ${candidates[1]?.id}`);
   expect(generate).toHaveBeenCalledTimes(2);
+});
+
+
+it('reuses chunk-1 pairs after chunk 2 fails and an inserted candidate changes chunk composition', async () => {
+  vi.stubEnv('GROUPING_MAX_CANDIDATES', '2');
+  const incoming = report('Telegram and Max fell synchronously worldwide');
+  const same = report('Telegram outage worldwide');
+  const related = report('A response to the Telegram outage');
+  const later = report('Max also has mass failures');
+  const inserted = report('An independent release');
+  const evidence = { incomingQuote: incoming.text, candidateQuote: related.text, connection: 'A response to the outage.' };
+  const seen: string[][] = [];
+  let fail = true;
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    const chunk = JSON.parse(request.prompt) as { candidates: EventInput[] };
+    seen.push(chunk.candidates.map(candidate => candidate.id));
+    if (fail && seen.length === 2) { fail = false; throw new Error('network timeout'); }
+    return modelResult({ matches: [...chunk.candidates].reverse().map(candidate => ({ storyId: candidate.id,
+      relation: candidate.id === same.id && seen.length === 1 || candidate.id === later.id ? 'same'
+        : candidate.id === related.id ? 'related' : 'unrelated',
+      relatedEvidence: candidate.id === related.id ? evidence : null,
+    })) });
+  }) };
+  await expect(groupReport(incoming, [same, related, later], defaultSettings, context, generator)).rejects.toThrow('network timeout');
+  expect(cache.size).toBe(2);
+  const ranked = [inserted, same, related, later];
+  const expected = [
+    { storyId: inserted.id, relation: 'unrelated' },
+    { storyId: same.id, relation: 'same' },
+    { storyId: related.id, relation: 'related', relatedEvidence: evidence, relatedPromptVersion: 'duplicate-v6' },
+  ];
+  expect(await groupReport(incoming, ranked, defaultSettings, { ...context, attempt: 4 }, generator)).toEqual(expected);
+  expect(seen).toEqual([[same.id, related.id], [later.id], [inserted.id, later.id]]);
+  expect(await groupReport(incoming, ranked, defaultSettings, context, generator)).toEqual(expected);
+  expect(await groupReport(incoming, [later, same, related, inserted], defaultSettings, context, generator)).toEqual([
+    { storyId: later.id, relation: 'same' }, expected[2], expected[0],
+  ]);
+  expect(generator.generate).toHaveBeenCalledTimes(3);
+});
+
+it('invalidates pairs when incoming evidence or source publication times change, but not local receipts', async () => {
+  const incoming = report('Telegram outage worldwide');
+  const candidate = report('Max also has mass failures');
+  const generator = { generate: vi.fn(async () => modelResult({ matches: [{ storyId: candidate.id, relation: 'same' }] })) };
+  await groupReport(incoming, [candidate], defaultSettings, context, generator);
+  await groupReport({ ...incoming, fingerprint: 'new receipt' }, [{ ...candidate, fingerprint: 'new receipt' }], defaultSettings, context, generator);
+  expect(generator.generate).toHaveBeenCalledOnce();
+  const changedCandidate = { ...candidate, reports: candidate.reports.map(report => ({ ...report, publishedAt: '2026-10-27T19:00:00.000Z' })) };
+  await groupReport(incoming, [changedCandidate], defaultSettings, context, generator);
+  expect(generator.generate).toHaveBeenCalledTimes(2);
+  const changedIncoming = { ...incoming, reports: incoming.reports.map(report => ({ ...report, text: 'A later outage' })) };
+  await groupReport(changedIncoming, [candidate], defaultSettings, context, generator);
+  expect(generator.generate).toHaveBeenCalledTimes(3);
 });

@@ -2,16 +2,16 @@ import type { PoolClient } from 'pg';
 import { db } from '../db.js';
 import { hash } from './state.js';
 
-export interface EventReport { text: string; sourceUrl: string | null; links: string[] }
+export interface EventReport { text: string; sourceUrl: string | null; links: string[]; publishedAt?: string | null }
 export interface EventInput { id: string; text: string; fingerprint: string; reports: EventReport[] }
 export interface HistoricalEventRef { revisionId: string; batchId: string; text: string }
-interface ReportRow { id: string; revision_id: string; text: string; source_url: string | null; links: string[] }
-const reportColumns = `m.id,m.revision_id,m.text,i.original_url AS source_url,
+interface ReportRow { id: string; revision_id: string; text: string; source_url: string | null; links: string[]; published_at: Date | null }
+const reportColumns = `m.id,m.revision_id,m.text,i.original_url AS source_url,i.published_at,
   ARRAY(SELECT DISTINCT l.url FROM mention_links ml JOIN item_links l ON l.id=ml.link_id
     WHERE ml.mention_id=m.id AND ml.classification='relevant' ORDER BY l.url) AS links`;
 function input(id: string, rows: ReportRow[]): EventInput | null {
   return rows.length ? { id, text: [...new Set(rows.map(row => row.text))].join('\n\n'), fingerprint: hash(rows),
-    reports: rows.map(row => ({ text: row.text, sourceUrl: row.source_url, links: row.links })) } : null;
+    reports: rows.map(row => ({ text: row.text, sourceUrl: row.source_url, links: row.links, publishedAt: row.published_at?.toISOString() ?? null })) } : null;
 }
 
 /** Metadata-created IDs and report order are not new collected evidence. Keep all

@@ -11,9 +11,8 @@ import { checkProcessingSlice } from './processing-slice.js';
 import type { StoryRelationDecision } from './story-relations.js';
 import { groupingBudget, groupingChunks, groupingPrompt, type GroupingBudget } from './grouping-budget.js';
 
-// Keep the event-identity version: existing verified publication threads remain valid.
-export const GROUPING_VERSION = 'grouping-v2';
-const CACHE_VERSION = `${GROUPING_VERSION}:bounded-v1`;
+export const GROUPING_VERSION = 'grouping-v3';
+const CACHE_VERSION = `${GROUPING_VERSION}:pair-v1`;
 const groupingSchema = z.object({
   matches: z.array(z.object({ storyId: z.uuid(), relation: z.enum(['same', 'related', 'unrelated']),
     relatedEvidence: z.object({ incomingQuote: z.string().trim().min(1), candidateQuote: z.string().trim().min(1),
@@ -39,12 +38,6 @@ async function compare(incoming: EventInput, candidates: readonly EventInput[], 
   context: StageContext, generator?: TextGenerator): Promise<Matches> {
   const prompt = groupingPrompt(incoming, candidates);
   const inputHash = hash({ systemPrompt, prompt, incoming, candidates });
-  const modelKey = `${settings.piProvider}/${settings.piModel}/${settings.modelVersion}`;
-  const cached = await db.query<{ value: unknown }>(`SELECT value FROM model_cache WHERE kind='generation'
-    AND input_hash=$1 AND model_key=$2 AND prompt_version=$3 AND expires_at>now()`, [inputHash, modelKey, CACHE_VERSION]);
-  const parsed = groupingSchema.safeParse(cached.rows[0]?.value);
-  if (parsed.success && complete(parsed.data.matches, candidates)) return parsed.data.matches;
-  // Completed chunks survive lease checkpoints and retries of later chunks.
   checkProcessingSlice();
   const client = generator ?? await generationClient(settings);
   const boundedGenerator: TextGenerator = {
@@ -69,10 +62,6 @@ async function compare(incoming: EventInput, candidates: readonly EventInput[], 
     },
     responseSchema: { name: 'story_grouping', schema: groupingResponseSchema },
   }, { operationId: `${context.id}:group:${inputHash}`, attempt: context.attempt }, recordGenerationFailure);
-  await db.query(`INSERT INTO model_cache(kind,input_hash,model_key,prompt_version,value,expires_at)
-    VALUES('generation',$1,$2,$3,$4,now()+$5*interval '1 day')
-    ON CONFLICT(kind,input_hash,model_key,prompt_version) DO UPDATE SET value=EXCLUDED.value,expires_at=EXCLUDED.expires_at`,
-  [inputHash, modelKey, CACHE_VERSION, JSON.stringify(result.value), settings.retentionDays]);
   return result.value.matches;
 }
 
@@ -88,10 +77,37 @@ export async function groupReport(incoming: EventInput, candidates: readonly Eve
   if (!candidates.length) return [];
   for (const candidate of candidates) await approveRemoteInput('https://api.openai.com', context.id, { storyId: candidate.id });
   await approveRemoteInput('https://api.openai.com', context.id, context);
-  const budget = groupingBudget();
-  const chunks = await chunksFor(incoming, candidates, budget, context);
-  const decisions: Matches = [];
-  for (const chunk of chunks) decisions.push(...await compare(incoming, chunk, settings, context, generator));
+  const modelKey = `${settings.piProvider}/${settings.piModel}/${settings.modelVersion}`;
+  const incomingHash = hash({ id: incoming.id, reports: incoming.reports });
+  const pairHashes = new Map(candidates.map(candidate => [candidate.id,
+    hash({ incoming: incomingHash, candidate: hash({ id: candidate.id, reports: candidate.reports }) })]));
+  const cached = await db.query<{ input_hash: string; value: unknown }>(`SELECT input_hash,value FROM model_cache
+    WHERE kind='generation' AND input_hash=ANY($1::text[]) AND model_key=$2 AND prompt_version=$3 AND expires_at>now()`,
+  [[...pairHashes.values()], modelKey, CACHE_VERSION]);
+  const cachedByHash = new Map(cached.rows.map(row => [row.input_hash, row.value]));
+  const byId = new Map<string, Matches[number]>();
+  for (const candidate of candidates) {
+    const parsed = groupingSchema.shape.matches.element.safeParse(cachedByHash.get(pairHashes.get(candidate.id) ?? ''));
+    if (parsed.success && parsed.data.storyId === candidate.id) byId.set(candidate.id, parsed.data);
+  }
+  const chunks = await chunksFor(incoming, candidates.filter(candidate => !byId.has(candidate.id)), groupingBudget(), context);
+  for (const chunk of chunks) {
+    const matches = await compare(incoming, chunk, settings, context, generator);
+    // Commit every validated pair before attempting the next chunk. Candidate insertion
+    // or re-ranking on retry must not discard a completed same verdict.
+    await db.query(`INSERT INTO model_cache(kind,input_hash,model_key,prompt_version,value,expires_at)
+      SELECT 'generation',pairs.input_hash,$2,$3,pairs.value,now()+$5*interval '1 day'
+      FROM unnest($1::text[],$4::jsonb[]) AS pairs(input_hash,value)
+      ON CONFLICT(kind,input_hash,model_key,prompt_version) DO UPDATE SET value=EXCLUDED.value,expires_at=EXCLUDED.expires_at`,
+    [matches.map(match => pairHashes.get(match.storyId)), modelKey, CACHE_VERSION,
+      matches.map(match => JSON.stringify(match)), settings.retentionDays]);
+    for (const match of matches) byId.set(match.storyId, match);
+  }
+  const decisions: Matches = candidates.map(candidate => {
+    const decision = byId.get(candidate.id);
+    if (!decision) throw new Error('Missing grouping decision');
+    return decision;
+  });
   // Candidate order is the ranking order, even if a model returns decisions in another order.
   const firstSame = candidates.find(candidate => decisions.some(decision => decision.storyId === candidate.id && decision.relation === 'same'));
   return decisions.flatMap((decision): StoryRelationDecision[] => {
