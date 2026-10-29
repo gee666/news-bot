@@ -11,7 +11,7 @@ import { recordProcessingDiagnostic } from './processing-diagnostics.js';
 import { retryDecision, Waiting } from './state.js';
 import { reconcileEdits } from './revisions.js';
 import { consolidateStories } from './consolidation.js';
-import { completeBatchItems, expireUnassignedMentions } from './item-failures.js';
+import { completeBatchItems, dueBatchItems, expireUnassignedMentions } from './item-failures.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 
 const batchSchema = z.object({ id: z.uuid(), cutoff_at: z.date(), settings_snapshot: settingsSchema,
@@ -26,15 +26,13 @@ async function processBatchSlice(recoverOnly: boolean, batchId?: string,
   if(!batchId) await expireUnassignedMentions(await getSettings());
   const selected = batchId ? await db.query('SELECT * FROM processing_batches WHERE id=$1', [batchId])
     : await db.query(`SELECT * FROM processing_batches b WHERE completed_at IS NULL AND status<>'failed'
-      AND (next_retry_at IS NULL OR next_retry_at<=now())
+      AND (next_retry_at IS NULL OR next_retry_at<=now() OR (
+        (error_code IS NULL OR error_code IN ('partial_unit_failure','partial_source_failure','telegram_collection_cooldown',
+          'telegram_rate_limit','telegram_connection_failed','telegram_collection_failed')) AND ${dueBatchItems('b.id')}))
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='run_now_batch:'||b.id::text)
-      ORDER BY b.last_served_at ASC,EXISTS(SELECT 1 FROM batch_items bi JOIN story_mentions m ON m.revision_id=bi.revision_id
-        JOIN source_items i ON i.current_revision_id=m.revision_id WHERE bi.batch_id=b.id AND bi.status<>'rejected'
-          AND m.story_id IS NULL AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window') DESC,
-        EXISTS(SELECT 1 FROM batch_items i WHERE i.batch_id=b.id
-          AND i.status IN ('pending','processing')) DESC,cutoff_at DESC,started_at DESC,b.id LIMIT 1`);
+      ORDER BY cutoff_at DESC,b.last_served_at ASC,started_at DESC,b.id LIMIT 1`);
   let batch = selected.rows.length ? batchSchema.parse(selected.rows[0]) : undefined;
-  if (batch && (batch.status === 'failed' || batch.completed_at || (batch.next_retry_at && batch.next_retry_at>new Date()))) return;
+  if (batch && (batch.status === 'failed' || batch.completed_at || (batchId && batch.next_retry_at && batch.next_retry_at>new Date()))) return;
   if (!batch) {
     if (recoverOnly || batchId) return;
     const settings = await getSettings();
@@ -56,8 +54,7 @@ async function processBatchSlice(recoverOnly: boolean, batchId?: string,
     const vectors = new Vectors(await getActiveEmbeddingConfig(), settings);
     try {
       const processingBatchId = batch.id;
-      // Saved extraction must reach matching even while another revision waits on links.
-      await matchBatch(batch.id, settings, vectors);
+      // Extract fresh inputs before resuming partial comparisons from earlier slices.
       await extractBatch(batch.id, settings, async revisionId => {
         const mentions = await db.query<{ id: string }>('SELECT id FROM story_mentions WHERE revision_id=$1', [revisionId]);
         await matchBatch(processingBatchId, settings, vectors, mentions.rows.map(mention => mention.id));

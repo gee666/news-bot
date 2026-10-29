@@ -6,11 +6,12 @@ import type { AppSettings } from '../settings.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 
-const mocks = vi.hoisted(() => ({ empty: vi.fn(), collection: vi.fn(), stories: vi.fn(), clock: 0 }));
+const mocks = vi.hoisted(() => ({ empty: vi.fn(), collection: vi.fn(), stories: vi.fn(), telegram:vi.fn(), clock: 0 }));
 vi.mock('./generation-model.js', () => ({ generationClient: async () => ({}), recordGenerationFailure: vi.fn(), requireInferenceApproval: vi.fn() }));
 vi.mock('./extraction-model.js', () => ({ extractEvents: mocks.empty }));
 vi.mock('./grouping-model.js', () => ({ GROUPING_VERSION: 'grouping-v1', groupReport: async () => [] }));
 vi.mock('./collection.js', () => ({ collectBatch: mocks.collection }));
+vi.mock('../telegram/batch.js',()=>({collectTelegramBatch:mocks.telegram}));
 vi.mock('./stories.js', () => ({ finishBatchStories: mocks.stories }));
 vi.mock('../models/jev.js', async original => ({ ...await original<typeof import('../models/jev.js')>(), JevClient: class {
   async judge(template: string, state: unknown, context: { operationId: string }) {
@@ -100,23 +101,22 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     expect(mocks.empty).not.toHaveBeenCalled();
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[automatic])).rows).toEqual([{status:'completed'}]);
   });
-  it('processes least-recently-served intake before newer pending batches and ignores future retries', async () => {
+  it('prioritizes newest due intake instead of rotating through stale batches', async () => {
     const old=await batch('queued'); await item(old,'Old release.');
     await database.db.query("UPDATE processing_batches SET cutoff_at=now()-interval '2 days',last_served_at=now()-interval '2 days' WHERE id=$1",[old]);
-    const future=await batch('waiting'); await item(future,'Future retry.');
-    await database.db.query("UPDATE processing_batches SET next_retry_at=now()+interval '1 hour',last_served_at=now()-interval '3 days' WHERE id=$1",[future]);
+    const future=await batch('waiting'); const futureRevision=await item(future,'Future retry.');
+    await database.db.query(`INSERT INTO stage_state(batch_id,revision_id,stage,status,next_retry_at)
+      VALUES($1,$2,'extract:events-v6','waiting',now()+interval '1 hour')`,[future,futureRevision]);
+    await database.db.query("UPDATE processing_batches SET cutoff_at=now()+interval '1 hour',next_retry_at=now()+interval '1 hour' WHERE id=$1",[future]);
     const recent=await batch('queued'); await item(recent,'Recent new release.');
-    const served: string[]=[];
-    mocks.collection.mockImplementation(async (id:string)=>{served.push(id); throw new ProcessingYield();});
-    const process=(await import('./batches.js')).processBatch;
-    await process(false,true);
-    expect(served).toEqual([old]);
-    // Make the checkpoint due again. Its new last-served timestamp must give another batch a turn.
-    await database.db.query("UPDATE processing_batches SET next_retry_at=now()-interval '1 second' WHERE id=$1",[old]);
-    await process(false,true);
-    expect(served).toEqual([old,recent]);
-    expect((await database.db.query('SELECT retry_attempts FROM processing_batches WHERE id=ANY($1::uuid[])',[served])).rows)
-      .toEqual([{retry_attempts:0},{retry_attempts:0}]);
+    const served:string[]=[];
+    mocks.collection.mockImplementation(async (id:string)=>{served.push(id);throw new ProcessingYield();});
+    await (await import('./batches.js')).processBatch(false,true);
+    expect(served).toEqual([recent]);
+    const newest=await batch('queued'); await item(newest,'Newest release.');
+    await database.db.query("UPDATE processing_batches SET cutoff_at=now()+interval '1 second' WHERE id=$1",[newest]);
+    await (await import('./batches.js')).processBatch(false,true);
+    expect(served).toEqual([recent,newest]);
   });
   it('bounds repeated batch infrastructure failures instead of resetting to attempt one', async () => {
     const id=await batch('queued');
@@ -143,9 +143,55 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     await (await import('./batches.js')).processBatch(false,true);
     expect(mocks.collection).toHaveBeenCalledOnce();
   });
+  it('schedules untouched input before another revision saved retry deadline',async () => {
+    const id=await batch(); const blocked=await item(id,'Broken held extraction.'); const fresh=await item(id,'Fresh release.');
+    await database.db.query(`INSERT INTO stage_state(batch_id,revision_id,stage,status,attempts,next_retry_at)
+      VALUES($1,$2,'extract:events-v6','waiting',1,now()+interval '1 hour')`,[id,blocked]);
+    await (await import('./item-failures.js')).completeBatchItems(id);
+    const next=(await database.db.query('SELECT next_retry_at FROM processing_batches WHERE id=$1',[id])).rows[0]?.next_retry_at;
+    expect(next.getTime()).toBeLessThan(Date.now()+2000);
+    await database.db.query("UPDATE processing_batches SET next_retry_at=now()+interval '1 hour' WHERE id=$1",[id]);
+    await (await import('./batches.js')).processBatch(false,true);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[fresh])).rows[0]?.story_id).toBeTruthy();
+    expect(mocks.empty).toHaveBeenCalledExactlyOnceWith('Fresh release.',expect.anything(),expect.anything(),expect.anything(),settings.interestProfile);
+    const held=(await database.db.query("SELECT attempts,next_retry_at FROM stage_state WHERE batch_id=$1 AND revision_id=$2 AND stage='extract:events-v6'",[id,blocked])).rows[0];
+    expect(held.attempts).toBe(1); expect(held.next_retry_at.getTime()).toBeGreaterThan(Date.now()+3_500_000);
+  });
+  it('processes collected primary input while Telegram collection backs off',async () => {
+    const id=await batch('queued'); const fresh=await item(id,'Fresh primary release.');
+    await database.db.query('UPDATE processing_batches SET primary_collection_completed_at=now() WHERE id=$1',[id]);
+    const actual=await vi.importActual<typeof import('./collection.js')>('./collection.js');
+    mocks.collection.mockImplementation(actual.collectBatch); mocks.telegram.mockRejectedValue(new Error('ECONNRESET'));
+    await (await import('./batches.js')).processBatch(false,true);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[fresh])).rows[0]?.story_id).toBeTruthy();
+    const saved=(await database.db.query('SELECT status,next_retry_at,retry_attempts FROM processing_batches WHERE id=$1',[id])).rows[0];
+    expect(saved.status).toBe('waiting'); expect(saved.retry_attempts).toBe(0); expect(saved.next_retry_at.getTime()).toBeGreaterThan(Date.now());
+    expect(mocks.telegram).toHaveBeenCalledOnce();
+    await database.db.query('UPDATE processing_batches SET next_retry_at=NULL WHERE id=$1',[id]);
+    await (await import('./batches.js')).processBatch(false,true);
+    expect(mocks.telegram).toHaveBeenCalledOnce();
+  });
+  it('retires stale unextracted automatic revisions before model work but preserves manual pins and receipts',async () => {
+    const id=await batch(); const stale=await item(id,'Stale raw release.'); const fresh=await item(id,'Fresh raw release.');
+    const pinned=await item(id,'Pinned raw release.'); const extracted=await item(id,'Saved empty receipt.');
+    const pin=await batch(); await database.db.query('UPDATE processing_batches SET manual_operation_id=$2 WHERE id=$1',[pin,randomUUID()]);
+    await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[pin,pinned]);
+    await (await import('./extraction-store.js')).applyExtraction(id,extracted,'Saved empty receipt.',[]);
+    await database.db.query("UPDATE item_revisions SET created_at=now()-interval '49 hours' WHERE id=ANY($1::uuid[])",[[stale,pinned,extracted]]);
+    await database.db.query("UPDATE source_items SET collected_at=now()-interval '49 hours' WHERE current_revision_id=ANY($1::uuid[])",[[stale,pinned,extracted]]);
+    await (await import('./item-failures.js')).expireUnassignedMentions(settings);
+    expect((await database.db.query('SELECT status,disposition_reason FROM batch_items WHERE batch_id=$1 AND revision_id=$2',[id,stale])).rows)
+      .toEqual([{status:'rejected',disposition_reason:'outside_collection_window'}]);
+    expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1 AND revision_id=$2',[id,pinned])).rows).toEqual([{status:'pending'}]);
+    await (await import('./batches.js')).processBatch(false,true,id);
+    expect(mocks.empty.mock.calls.map(call=>call[0])).toEqual(expect.arrayContaining(['Fresh raw release.','Pinned raw release.']));
+    expect(mocks.empty.mock.calls.map(call=>call[0])).not.toContain('Stale raw release.');
+    expect(mocks.empty.mock.calls.map(call=>call[0])).not.toContain('Saved empty receipt.');
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[fresh])).rows[0]?.story_id).toBeTruthy();
+  });
   it('does not let reopened association-only batches starve unfinished news', async () => {
     const news=await batch('queued'); const revision=await item(news,'Recent real release.');
-    await database.db.query("UPDATE processing_batches SET cutoff_at=now()-interval '1 hour' WHERE id=$1",[news]);
+    await database.db.query("UPDATE processing_batches SET cutoff_at=now()+interval '1 second' WHERE id=$1",[news]);
     const enrichment=await batch('waiting'); const empty=await item(enrichment,'Empty source-only recap.');
     await (await import('./extraction-store.js')).applyExtraction(enrichment,empty,'Empty source-only recap.',[]);
     await (await import('./batches.js')).processBatch(false,true);
@@ -155,13 +201,13 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[enrichment])).rows).toEqual([{status:'completed'}]);
     expect(mocks.empty).toHaveBeenCalledOnce();
   });
-  it('groups saved orphan reports before starting newer raw extraction', async () => {
+  it('prioritizes newer raw intake over an older saved orphan batch', async () => {
     const orphan=await batch('queued'); const revision=await item(orphan,'Saved report.');
     await (await import('./extraction-store.js')).applyExtraction(orphan,revision,'Saved report.',[{start:0,end:13}]);
     const raw=await batch('queued'); await item(raw,'Newer raw report.');
     await (await import('./batches.js')).processBatch(false,true);
-    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows[0]?.story_id).toBeTruthy();
-    expect((await database.db.query('SELECT count(*)::int AS n FROM stage_state WHERE batch_id=$1',[raw])).rows).toEqual([{n:0}]);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows[0]?.story_id).toBeNull();
+    expect((await database.db.query('SELECT count(*)::int AS n FROM stage_state WHERE batch_id=$1',[raw])).rows[0]?.n).toBeGreaterThan(0);
   });
   it('matches committed mentions before extraction waits on unfinished links', async () => {
     const batchId = await batch(); const revision = await item(batchId,'Recent extracted release.');
@@ -275,9 +321,9 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     mocks.stories.mockImplementationOnce(async () => { mocks.clock=1001; return {completedStories:1,failedStories:0,skippedStories:0}; });
     try {
       await (await import('./batches.js')).processBatch(false,true);
-      expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1 AND revision_id=$2', [batchId,first])).rows)
-        .toEqual([{status:'completed'}]);
       expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1 AND revision_id=$2', [batchId,second])).rows)
+        .toEqual([{status:'completed'}]);
+      expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1 AND revision_id=$2', [batchId,first])).rows)
         .toEqual([{status:'pending'}]);
       expect((await database.db.query('SELECT status,completed_at FROM processing_batches WHERE id=$1', [batchId])).rows)
         .toEqual([{status:'waiting',completed_at:null}]);

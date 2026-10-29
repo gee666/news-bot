@@ -122,15 +122,15 @@ describe.skipIf(!url)('bounded manual orchestration with PostgreSQL', () => {
     expect((await database.db.query('SELECT revision_id FROM batch_items WHERE batch_id=$1', [current.batchId])).rows)
       .toEqual([{ revision_id: original.revisions[0] }]);
   });
-  it('automatically retries failed manual batches without blocking subsequent runs', async () => {
+  it('stops a terminal manual batch without blocking a subsequent independent run', async () => {
     await source(1); const current = job();
     mocks.extraction.mockImplementation(async (batchId: string) => {
       await database.db.query("UPDATE processing_batches SET status='failed',error_code='invalid_request' WHERE id=$1", [batchId]);
       throw new (await import('./state.js')).Waiting('Failed request');
     });
     const { runNow } = await import('./run-now.js');
-    expect((await runNow(current, async () => {}, new AbortController().signal)).status).toBe('waiting');
-    expect((await database.db.query('SELECT completed_at FROM processing_batches WHERE id=$1', [current.batchId])).rows[0]?.completed_at).toBeNull();
+    expect((await runNow(current, async () => {}, new AbortController().signal)).status).toBe('failed');
+    expect((await database.db.query('SELECT completed_at FROM processing_batches WHERE id=$1', [current.batchId])).rows[0]?.completed_at).toBeInstanceOf(Date);
     const next = job(); await runNow(next, async () => {}, new AbortController().signal);
     expect(next.batchId).toBeDefined(); expect(next.batchId).not.toBe(current.batchId);
   });

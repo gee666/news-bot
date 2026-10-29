@@ -107,7 +107,10 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
     JOIN batch_items b ON b.revision_id=m.revision_id JOIN item_revisions r ON r.id=m.revision_id
     JOIN source_items i ON i.current_revision_id=r.id WHERE b.batch_id=$1 AND b.status<>'rejected'
     AND m.story_id IS NULL AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window'
-    AND ($2::uuid[] IS NULL OR m.id=ANY($2)) ORDER BY i.collected_at DESC,m.created_at,m.id`, [batchId, selectedIds]);
+    AND ($2::uuid[] IS NULL OR m.id=ANY($2))
+    ORDER BY (SELECT max(st.updated_at) FROM stage_state st WHERE st.batch_id=b.batch_id AND st.revision_id=m.revision_id
+      AND (st.stage LIKE 'match:%:'||m.id::text OR st.stage LIKE 'embed:%:'||m.id::text)) ASC NULLS FIRST,
+      i.collected_at DESC,m.created_at,m.id`, [batchId, selectedIds]);
   for (const mention of result.rows) {
     try {
       const vector = await stage(batchId, { revisionId: mention.revision_id }, `embed:${vectors.config.config_key}:${mention.id}`, settings,

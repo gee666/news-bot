@@ -10,11 +10,14 @@ it('scheduled dispatcher collects publishers before isolated Telegram failure an
   mocks.primary.mockResolvedValue({ collected: 1, failed: 1 });
   mocks.query.mockResolvedValue({ rows: [{ attempt: 1, id: 'request' }] });
   mocks.telegram.mockRejectedValue(new Error('ECONNRESET'));
-  await expect(collectBatch('batch', new Date('2026-10-01T12:00:00Z'), defaultSettings)).rejects.toThrow('ECONNRESET');
+  await expect(collectBatch('batch', new Date('2026-10-01T12:00:00Z'), defaultSettings)).resolves.toBeUndefined();
   expect(mocks.primary).toHaveBeenCalledTimes(1);
   expect(mocks.telegram).toHaveBeenCalledTimes(1);
   expect(mocks.primary.mock.invocationCallOrder[0]).toBeLessThan(mocks.telegram.mock.invocationCallOrder[0] ?? 0);
-  expect(mocks.query.mock.calls.some(call => call[0].includes('request_attempts'))).toBe(true);
+  expect(mocks.query.mock.calls.some(([sql,args])=>String(sql).includes('UPDATE request_attempts SET status=$2')
+    && args?.[1]==='retryable' && args[2] instanceof Date)).toBe(true);
+  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes("UPDATE processing_batches SET error_code='partial_source_failure'"))).toBe(true);
+  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes('UPDATE processing_batches SET status='))).toBe(false);
 });
 it('records partial primary intake once and never re-fetches failed sources at processing checkpoints', async () => {
   let finished = false;
@@ -33,6 +36,7 @@ it('records partial primary intake once and never re-fetches failed sources at p
 it('preserves a primary collection receipt even while Telegram waits', async () => {
   mocks.primary.mockResolvedValue({ collected: 1, failed: 1 }); mocks.telegram.mockRejectedValue(new Error('ECONNRESET'));
   mocks.query.mockResolvedValue({ rows: [] });
-  await expect(collectBatch('batch', new Date(), defaultSettings)).rejects.toThrow('ECONNRESET');
+  await expect(collectBatch('batch', new Date(), defaultSettings)).resolves.toBeUndefined();
   expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('SET primary_collection_completed_at=now()'))).toBe(true);
+  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes("UPDATE processing_batches SET error_code='partial_source_failure'"))).toBe(true);
 });

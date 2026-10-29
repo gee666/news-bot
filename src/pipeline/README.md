@@ -38,3 +38,21 @@ create cumulative editions with verified same-event ancestry.
 Leases serialize processing; checkpoints resume through recovery.
 See [manual runs](../../docs/run-now.md) and
 [reliability](../../docs/news-reliability.md).
+
+Automatic work prefers the newest due collection cutoff. `last_served_at` only
+breaks equal-cutoff ties; recovery does not rotate through stale whole batches.
+Automatic unextracted revisions and unassigned reports outside
+`collectionWindowHours` retire with `outside_collection_window`. Active manual
+pins and committed extraction receipts stay intact.
+
+A source connector's saved cooldown does not delay already collected inputs.
+Ready revisions or mentions run before another unit's future retry deadline.
+After collected work finishes, the batch waits for its remaining connector or
+stage receipts. Connector failures still stop at the configured attempt limit;
+checkpoint deferrals do not consume failure attempts.
+
+Extraction serves untouched revisions before previously served work. There is no
+eager whole-batch matching pass ahead of extraction. Long comparisons checkpoint
+with cached pair decisions intact and pause only their stage for
+`max(retryBaseMs, processingSliceMs())`, two minutes with defaults. This pause
+charges no failure attempt and gives other fresh inputs a turn.

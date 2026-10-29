@@ -24,8 +24,10 @@ export async function extractBatch(batchId: string, settings: AppSettings,
   const result = await db.query(`SELECT r.id,r.original_text,s.access FROM batch_items b JOIN item_revisions r ON r.id=b.revision_id
     JOIN source_items i ON i.id=r.item_id JOIN sources s ON s.id=i.source_id WHERE b.batch_id=$1 AND i.current_revision_id=r.id
       AND b.disposition_reason IS DISTINCT FROM 'outside_collection_window'
-    ORDER BY (b.status IN ('pending','processing')) DESC,b.created_at,r.id`, [batchId]);
-  // Replay saved receipts for recovery, but not before unfinished intake gets a turn.
+    ORDER BY (b.status IN ('pending','processing')) DESC,
+      (SELECT max(st.updated_at) FROM stage_state st WHERE st.batch_id=b.batch_id AND st.revision_id=r.id) ASC NULLS FIRST,
+      i.collected_at DESC,b.created_at,r.id`, [batchId]);
+  // Untouched inputs and siblings get a turn before a comparison that used the last slice.
   const failed = await existingItemFailures(batchId);
   for (const revision of z.array(revisionSchema).parse(result.rows)) {
     await itemWork(batchId, revision.id, failed, async () => {

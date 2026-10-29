@@ -20,9 +20,9 @@ vi.mock('../telegram/batch.js',()=>({collectTelegramBatch:mocks.collect}));
 it('does not dispatch Telegram after an exhausted scheduled-collection budget',async () => {
   mocks.query.mockImplementation(async (sql:string)=>({rows:sql.includes('primary_collection_completed_at')
     ? [{primary_collection_completed_at:new Date()}] : sql.includes('MAX(attempt_number)') ? [{attempt:defaultSettings.requestMaxAttempts+1}] : []}));
-  await expect(collectBatch('batch',new Date(),defaultSettings)).rejects.toThrow('Stage retry limit reached');
+  await expect(collectBatch('batch',new Date(),defaultSettings)).resolves.toBeUndefined();
   expect(mocks.collect).not.toHaveBeenCalled();
-  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes("status='failed'"))).toBe(true);
+  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes("UPDATE processing_batches SET status='failed'"))).toBe(false);
 });
 it('reuses successful Telegram collection across more checkpoints than the retry budget',async () => {
   vi.clearAllMocks();
@@ -47,5 +47,31 @@ it('reuses successful Telegram collection across more checkpoints than the retry
   expect(mocks.collect).toHaveBeenCalledExactlyOnceWith('batch',cutoff,defaultSettings.collectionWindowHours);
   expect(dispatches).toBe(1);
   expect(mocks.query.mock.calls.filter(([sql])=>String(sql).includes('SELECT max(next_retry_at)'))).toHaveLength(1);
-  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes("status='failed'"))).toBe(false);
+  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes("UPDATE processing_batches SET status='failed'"))).toBe(false);
+});
+
+it('backs off the connector without parking already collected sibling inputs',async () => {
+  vi.clearAllMocks();
+  mocks.collect.mockRejectedValue(new Error('ECONNRESET'));
+  let cooldown:Date | null=null;
+  mocks.query.mockImplementation(async (sql:string,args:unknown[]=[])=>{
+    if(sql.includes('primary_collection_completed_at')) return {rows:[{primary_collection_completed_at:new Date()}]};
+    if(sql.includes('MAX(attempt_number)')) return {rows:[{attempt:1,completed:false,terminal:false}]};
+    if(sql.includes('SELECT max(next_retry_at)')) return {rows:[{next:cooldown}]};
+    if(sql.includes('INSERT INTO request_attempts')) return {rows:[{id:'attempt'}]};
+    if(sql.includes('UPDATE request_attempts SET status=$2')) cooldown=args[2] instanceof Date ? args[2] : null;
+    return {rows:[]};
+  });
+  await expect(collectBatch('batch',new Date(),defaultSettings)).resolves.toBeUndefined();
+  expect(cooldown).toBeInstanceOf(Date);
+  await expect(collectBatch('batch',new Date(),defaultSettings)).resolves.toBeUndefined();
+  expect(mocks.collect).toHaveBeenCalledOnce();
+  expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes('UPDATE processing_batches SET status='))).toBe(false);
+});
+it('does not repeat a terminal connector failure while input processing resumes',async () => {
+  vi.clearAllMocks();
+  mocks.query.mockImplementation(async (sql:string)=>({rows:sql.includes('primary_collection_completed_at')
+    ? [{primary_collection_completed_at:new Date()}] : sql.includes('MAX(attempt_number)') ? [{attempt:2,completed:false,terminal:true}] : []}));
+  await expect(collectBatch('batch',new Date(),defaultSettings)).resolves.toBeUndefined();
+  expect(mocks.collect).not.toHaveBeenCalled();
 });

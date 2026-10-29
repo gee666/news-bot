@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { defaultSettings } from '../settings.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 import { FailedStageError, retryDecision, stage, Waiting } from './state.js';
-import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
+import { ProcessingYield, processingSliceMs, withProcessingSlice } from './processing-slice.js';
 
 const mocks = vi.hoisted(() => ({ query: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
@@ -37,6 +37,8 @@ it('a checkpoint is not a failure', async () => {
     throw new ProcessingYield();
   })).rejects.toBeInstanceOf(ProcessingYield);
   expect(JSON.stringify(mocks.query.mock.calls)).not.toContain('attempts=attempts+1');
+  expect(mocks.query.mock.calls.at(-1)?.[0]).toContain("status='waiting'");
+  expect(mocks.query.mock.calls.at(-1)?.[1]).toEqual([id, Math.max(defaultSettings.retryBaseMs, processingSliceMs())]);
 });
 it.each(['pi','jev','embedding'] as const)('automatically backs off %s failures and stops after N failures', async service => {
   const error = new ModelRequestError(failureMetadata(new RequestFault('transient'), id, service, 1, 0));

@@ -5,7 +5,7 @@ import { ModelRequestError, type ModelFailure } from '../models/index.js';
 import { failureResponseMetadata } from '../models/errors.js';
 import type { AppSettings } from '../settings.js';
 import { recordProcessingDiagnostic } from './processing-diagnostics.js';
-import { checkProcessingSlice, ProcessingYield } from './processing-slice.js';
+import { checkProcessingSlice, processingSliceMs, ProcessingYield } from './processing-slice.js';
 import { StoryIntegrityError } from './event-integrity-error.js';
 import { StageOutputError, validateStageOutput } from './stage-output-error.js';
 
@@ -96,8 +96,10 @@ export async function stage<T>(batchId: string, owner: { revisionId: string },
     return output;
   } catch (error) {
     if (error instanceof ProcessingYield) {
-      await db.query(`UPDATE stage_state SET status='pending',next_retry_at=NULL,error_code=NULL,waiting_reason=NULL,
-        updated_at=now() WHERE id=$1`, [saved.id]);
+      // A long comparison keeps its receipts but yields its place to ready siblings.
+      await db.query(`UPDATE stage_state SET status='waiting',next_retry_at=now()+$2*interval '1 millisecond',
+        error_code=NULL,waiting_reason='Processing checkpoint reached.',updated_at=now() WHERE id=$1`,
+      [saved.id, Math.max(settings.retryBaseMs, processingSliceMs())]);
     } else {
       await saveStageFailure(error, saved.id, context.attempt, { batchId, storyId, revisionId, task: name.split(':')[0] ?? '' }, settings);
     }
