@@ -248,7 +248,7 @@ describe("Pi SSE failure handling without live inference", () => {
     })}\n\n`, { status: 200 }));
     const recorded: ModelFailure[] = [];
     const client = await generator(async failure => { recorded.push(failure); });
-    await expect(client.generate(request, { operationId: "synthetic-reset", attempt: 20 })).rejects.toMatchObject({
+    await expect(client.generate(request, { operationId: "synthetic-reset", attempt: 1 })).rejects.toMatchObject({
       metadata: { kind: "throttled", providerErrorCode: "usage_limit_reached", status: 200, retryable: true },
     });
     expect(Date.parse(recorded[0]?.nextRetryAt ?? "")).toBeGreaterThanOrEqual(reset * 1000);

@@ -37,7 +37,7 @@ export async function collectRunNow(batchId: string, cutoff: Date, settings: App
         await withUserClient(client => collectSource(new TelegramHistory(client), store, batchId,
           parseSource(row), cutoff, settings.collectionWindowHours, budget));
       } else {
-        await collectPublisher(publisherReader, store, batchId, parsePrimarySource(row), cutoff, settings.collectionWindowHours, budget);
+        await collectPublisher(publisherReader, store, batchId, parsePrimarySource(row), cutoff, settings.collectionWindowHours, budget,settings.requestMaxAttempts);
       }
     } catch (error) {
       if (error instanceof Waiting) throw error;
@@ -45,7 +45,7 @@ export async function collectRunNow(batchId: string, cutoff: Date, settings: App
         const failure = collectionFailure(error, attempt, settings);
         await db.query(`INSERT INTO request_attempts(provider,operation,attempt_number,status,finished_at,next_retry_at,error_code)
           VALUES('telegram-user',$1,$2,$3,now(),$4,$5)`, [`${batchId}:${source.id}`, attempt,
-          failure.unknown ? 'unknown' : failure.next ? 'retryable' : 'failed', failure.next, failure.code]);
+          failure.unknown ? 'unknown' : failure.next ? 'retryable' : 'failed', failure.next ?? failure.cooldown, failure.code]);
         if (failure.next) {
           await db.query(`UPDATE processing_batches SET status='waiting',next_retry_at=$2,error_code=$3 WHERE id=$1`, [batchId, failure.next, failure.code]);
           throw new Waiting('Telegram collection is waiting for its saved retry time.');

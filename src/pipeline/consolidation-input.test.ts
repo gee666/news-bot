@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
 import { eventInput, mentionInput } from './consolidation-input.js';
 import { historicalEventInput } from './historical-input.js';
-import { groupingPrompt } from './grouping-budget.js';
+import { groupingState } from './grouping-input.js';
 
 const { query } = vi.hoisted(() => ({ query: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query } }));
@@ -18,9 +18,9 @@ it.each([mentionInput, eventInput])('%s includes the source publication time in 
   expect(unknown?.reports).toEqual([{ ...report, publishedAt: null }]);
   expect(query.mock.calls[0]?.[0]).toContain('i.published_at');
   if (!known || !unknown) throw new Error('Missing fixture');
-  expect(JSON.parse(groupingPrompt(known, [unknown]))).toEqual({
+  expect(groupingState(known, unknown)).toEqual({
     incoming: { id: 'known', reports: [report] },
-    candidates: [{ id: 'unknown', reports: [{ ...report, publishedAt: null }] }],
+    candidate: { id: 'unknown', reports: [{ ...report, publishedAt: null }] },
   });
 });
 

@@ -82,3 +82,10 @@ describe('private usage outbox monitor', () => {
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain('PRIVATE_');
   });
 });
+
+it('keeps exhausted records visible as unrecorded usage after successful empty replay passes',async () => {
+  await initializeUsageOutbox();
+  await writeFile(join(path,randomUUID()+'.json.failed'),'PRIVATE_EXHAUSTED',{mode:0o600});
+  stop=startUsageRecovery(1000); await stop(); stop=undefined;
+  expect(await usageOutboxStatus()).toMatchObject({state:'ready',pendingRecords:1,lastReplayFailed:true,oldestPendingAt:expect.any(String)});
+});

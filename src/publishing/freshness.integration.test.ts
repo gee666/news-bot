@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BotApi } from './bot-api.js';
+import { BotApi, BotError } from './bot-api.js';
 import { acceptFixtureStories } from './publishing.test-helpers.js';
 import type { AppSettings } from '../settings.js';
 import type { Publication, StoryContent } from './store.js';
@@ -39,7 +39,7 @@ async function fixture(status: 'prepared' | 'published' = 'prepared', review?: G
   ['Acme released an open model. The model weights and source code are available to download. '.repeat(20)]);
   await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance,assessment,assessed_at,verified_at)
     VALUES($1,$2,'primary','relevant','Official announcement',now(),now())`,[storyId,evidence]);
-  await acceptFixtureStories(settings);
+  await acceptFixtureStories(settings,[storyId]);
   const receipt = await one("SELECT id FROM judgments WHERE story_id=$1 AND stage='generation_research' ORDER BY created_at DESC,id DESC LIMIT 1",[storyId]);
   if (review) await database.db.query("UPDATE judgments SET result=jsonb_set(result,'{review}',$2::jsonb) WHERE id=$1",
     [receipt, JSON.stringify(review)]);
@@ -165,7 +165,86 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
       VALUES($1,'telegram-bot','edit',2,'unknown',$2)`,[f.id,JSON.stringify(metadata)]);
     const reader = vi.fn().mockResolvedValue(outcome === 'match' ? metadata.fingerprint : outcome === 'different' ? 'different' : null);
     expect(await (await import('./edit-reconciliation.js')).reconcileUnknownEdit(f.pub,reader)).toBe(outcome === 'match');
-    expect((await publication(f.id)).pending_snapshot_id).toBe(outcome === 'match' ? null : f.desired);
+    expect((await publication(f.id)).pending_snapshot_id).toBe(outcome === 'match' || outcome === 'ambiguous' ? null : f.desired);
     expect(BotApi.prototype.edit).not.toHaveBeenCalled(); expect(BotApi.prototype.send).not.toHaveBeenCalled();
   });
+  it('retires an orphan admission-denied edit once and lets later UPD/correction edits dispatch',async () => {
+    const orphan=await fixture('published');
+    await database.db.query("UPDATE publications SET message_id='928' WHERE id=$1",[orphan.id]);
+    const upd=await fixture('published');
+    await database.db.query("UPDATE publications SET message_id='2076' WHERE id=$1",[upd.id]);
+    const correction=await fixture('published');
+    await database.db.query("UPDATE publications SET message_id='2064' WHERE id=$1",[correction.id]);
+    await database.db.query('DELETE FROM stories WHERE id=$1',[orphan.storyId]);
+    await database.db.query(`UPDATE publication_snapshots SET content=content||'{"updatedTo":"https://t.me/c/123/2101"}'::jsonb WHERE id=$1`,[orphan.prior]);
+    const {desiredNavigation}=await import('./navigation.js');
+    const sent=(await database.db.query<{content:unknown}>('SELECT content FROM publication_snapshots WHERE id=$1',[orphan.prior])).rows[0]?.content;
+    const {publicationSnapshotSchema}=await import('../types.js');
+    const desired=await desiredNavigation(database.db,await publication(orphan.id),publicationSnapshotSchema.parse(sent));
+    await database.db.query('UPDATE publication_snapshots SET content=$2 WHERE id=$1',[orphan.desired,JSON.stringify(desired)]);
+    await database.db.query("UPDATE publications SET created_at=now()-interval '1 day' WHERE id=$1",[orphan.id]);
+    const { retryEdits }=await import('./updates.js');
+    expect(await retryEdits(new BotApi(),settings,'-100123')).toBe(0);
+    expect((await publication(orphan.id)).pending_snapshot_id).toBeNull();
+    await (await import('./thread-updates.js')).prepareThreadUpdates('-100123');
+    expect((await publication(orphan.id)).pending_snapshot_id).toBeNull();
+    expect(await store.state(`publication_edit_settled:${orphan.id}:${orphan.desired}`)).toMatchObject({snapshotId:orphan.desired});
+    expect(await retryEdits(new BotApi(),settings,'-100123')).toBe(1);
+    expect(await retryEdits(new BotApi(),settings,'-100123')).toBe(1);
+    expect(BotApi.prototype.edit).toHaveBeenCalledTimes(2);
+    expect((await publication(upd.id)).pending_snapshot_id).toBeNull();
+    expect((await publication(correction.id)).pending_snapshot_id).toBeNull();
+    expect((await database.db.query("SELECT value->>'occurrences' AS n FROM operational_state WHERE key LIKE $1",[`publication_admission:${orphan.id}:%`])).rows)
+      .toEqual([{n:'1'}]);
+  });
+  it('stops known edit rejections after the configured snapshot budget and preserves the global cooldown',async () => {
+    const f=await fixture('published'); const api=new BotApi();
+    vi.mocked(BotApi.prototype.edit).mockRejectedValue(new BotError('telegram_rate_limit','retryable',60_000));
+    for(let attempt=1;attempt<=settings.requestMaxAttempts;attempt++) {
+      expect(await delivery.editPublication(await publication(f.id),api,settings)).toBe(false);
+      if(attempt<settings.requestMaxAttempts) await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second' WHERE publication_id=$1",[f.id]);
+    }
+    expect(BotApi.prototype.edit).toHaveBeenCalledTimes(settings.requestMaxAttempts);
+    expect((await publication(f.id)).pending_snapshot_id).toBeNull();
+    expect(await store.rateLimited()).toBe(true);
+    const { retryEdits }=await import('./updates.js');
+    expect(await retryEdits(api,settings,'-100123')).toBe(0);
+    expect(BotApi.prototype.edit).toHaveBeenCalledTimes(settings.requestMaxAttempts);
+  });
+  it('bounds unknown-edit reconciliation, retires its snapshot and never resends after exhaustion',async () => {
+    const f=await fixture('published');
+    const {render}=await import('./render.js'); const {sendMetadata}=await import('./reconciliation.js');
+    const meta={...sendMetadata(render(f.pub.content)),snapshotId:f.desired};
+    await database.db.query(`INSERT INTO request_attempts(publication_id,provider,operation,attempt_number,status,response_metadata)
+      VALUES($1,'telegram-bot','edit',1,'unknown',$2)`,[f.id,JSON.stringify(meta)]);
+    const {reconcileUnknownEdit}=await import('./edit-reconciliation.js'); const reader=vi.fn().mockResolvedValue(null);
+    for(let attempt=1;attempt<=settings.requestMaxAttempts;attempt++) {
+      expect(await reconcileUnknownEdit(await publication(f.id),reader,settings)).toBe(false);
+      if(attempt<settings.requestMaxAttempts) {
+        expect((await database.db.query('SELECT next_retry_at FROM request_attempts WHERE publication_id=$1',[f.id])).rows[0]?.next_retry_at.getTime()).toBeGreaterThan(Date.now());
+        expect(await reconcileUnknownEdit(await publication(f.id),reader,settings)).toBe(false);
+        await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second' WHERE publication_id=$1",[f.id]);
+      }
+    }
+    expect(reader).toHaveBeenCalledTimes(settings.requestMaxAttempts);
+    expect((await publication(f.id)).pending_snapshot_id).toBeNull();
+    // Even a direct call with the old snapshot cannot bypass the terminal ambiguity marker.
+    expect(await delivery.editPublication(f.pub,new BotApi(),settings)).toBe(false);
+    expect(BotApi.prototype.edit).not.toHaveBeenCalled();
+  });
+  it('stops unavailable send reconciliation after several reads without resending',async () => {
+    const f=await fixture();
+    vi.mocked(BotApi.prototype.send).mockRejectedValue(new BotError('telegram_outcome_unknown','unknown'));
+    expect(await delivery.sendPrepared(f.pub,new BotApi(),settings)).toBeNull();
+    const reader=vi.fn().mockRejectedValue(new Error('read unavailable'));
+    for(let attempt=1;attempt<=settings.requestMaxAttempts;attempt++) {
+      expect(await delivery.reconcile(await publication(f.id),settings,reader)).toBe(false);
+    }
+    expect(await delivery.reconcile(await publication(f.id),settings,reader)).toBe(false);
+    expect(reader).toHaveBeenCalledTimes(settings.requestMaxAttempts);
+    expect(BotApi.prototype.send).toHaveBeenCalledOnce();
+    expect((await database.db.query('SELECT status,error_code,next_retry_at FROM publications WHERE id=$1',[f.id])).rows)
+      .toEqual([{status:'uncertain',error_code:'send_not_found_requires_review',next_retry_at:null}]);
+  });
+
 });

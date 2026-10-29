@@ -29,7 +29,8 @@ beforeEach(() => {
   vi.mocked(publicationAdmission).mockReset().mockResolvedValue({ allowed: true });
   vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({ id: 123,is_bot: true });
   mocks.query.mockReset().mockImplementation(async (sql: string) => ({ rows:
-    sql.includes('SELECT 1 FROM request_attempts') ? []
+    sql.includes("RETURNING (response_metadata->>'reconciliationAttempts')") ? [{attempt:1}]
+      : sql.includes('SELECT 1 FROM request_attempts') ? []
       : sql.includes('SELECT * FROM publications') ? [publication]
         : sql.includes('SELECT delivery_kind') ? [{ delivery_kind: 'text', media_status: 'none', media_snapshot_id: 'snap' }]
           : sql.includes('INSERT INTO request_attempts') ? [{ id: 'attempt' }] : [] }));
@@ -120,7 +121,7 @@ describe('durable publication delivery', () => {
 
   it('keeps a no-match send uncertain for explicit review rather than retrying', async () => {
     expect(await reconcile({ ...publication,status: 'uncertain' },defaultSettings,async () => null)).toBe(false);
-    expect(mocks.query.mock.calls[0]?.[0]).toContain('send_not_found_requires_review');
+    expect(mocks.query.mock.calls.some(([sql])=>String(sql).includes('send_not_found_requires_review'))).toBe(true);
     expect(mocks.query.mock.calls.some(call => String(call[0]).includes("status='prepared'"))).toBe(false);
   });
 
@@ -167,7 +168,7 @@ describe('durable publication delivery', () => {
     const broken = { ...publication, status: 'published' as const, message_id: '9', content: { invalid: true } };
     expect(await editPublication(broken,api,defaultSettings)).toBe(false);
     expect(edit).not.toHaveBeenCalled();
-    expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('publication_navigation_requires_new_edition'))).toBe(true);
+    expect(JSON.stringify(mocks.query.mock.calls)).toContain('publication_navigation_requires_new_edition');
   });
 
   it('supersedes and inserts a replacement edit in one committed transaction before dispatch', async () => {

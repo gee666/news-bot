@@ -1,3 +1,4 @@
+import { settleEdit } from './edit-settlement.js';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
@@ -15,16 +16,23 @@ export { readSentMessage } from './reconciliation.js';
 export async function recordFailure(attemptId: string, publication: Publication, operation: 'send' | 'edit' | 'delete', error: unknown,
   settings: AppSettings): Promise<void> {
   const failure = error instanceof BotError ? error : new BotError('telegram_outcome_unknown', 'unknown');
-  const delay = Math.max(failure.retryAfterMs, Math.min(settings.retryMaxMs, settings.retryBaseMs * 2 ** Math.min(publication.attempt_count, 10)));
-  const retryAt = failure.outcome === 'failed' ? null : new Date(Date.now() + delay);
   await transaction(async client => {
+    const count = (await client.query<{ count: number }>(`SELECT count(*)::int AS count FROM request_attempts
+      WHERE publication_id=$1 AND operation=$2 AND ($2<>'edit' OR response_metadata->>'snapshotId'=$3)`,
+    [publication.id,operation,publication.pending_snapshot_id ?? publication.snapshot_id])).rows[0]?.count ?? publication.attempt_count+1;
+    const exhausted = count >= settings.requestMaxAttempts;
+    const outcome = failure.outcome === 'retryable' && exhausted ? 'failed' : failure.outcome;
+    const delay = Math.max(failure.retryAfterMs, Math.min(settings.retryMaxMs, settings.retryBaseMs * 2 ** Math.min(Math.max(0,count-1), 10)));
+    const retryAt = outcome === 'failed' && failure.code !== 'telegram_rate_limit' ? null : new Date(Date.now() + delay);
     await client.query(`UPDATE request_attempts SET status=$1,error_code=$2,next_retry_at=$3,finished_at=now() WHERE id=$4`,
-      [failure.outcome,failure.code,retryAt,attemptId]);
+      [outcome,failure.code,retryAt,attemptId]);
     if (operation === 'send') {
       await client.query(`UPDATE publications SET status=$1,error_code=$2,next_retry_at=$3,updated_at=now() WHERE id=$4`,
-        [failure.outcome === 'unknown' ? 'uncertain' : failure.outcome === 'retryable' ? 'prepared' : 'failed',failure.code,retryAt,publication.id]);
-      if (failure.outcome !== 'retryable') await releaseDestination(publication.id,client);
+        [outcome === 'unknown' ? 'uncertain' : outcome === 'retryable' ? 'prepared' : 'failed',failure.code,outcome === 'failed' ? null : retryAt,publication.id]);
+      if (outcome !== 'retryable') await releaseDestination(publication.id,client);
     }
+    if (operation === 'edit' && outcome === 'failed') await settleEdit(client,publication.id,
+      publication.pending_snapshot_id ?? publication.snapshot_id,exhausted ? 'publication_retry_exhausted' : failure.code);
   });
 }
 
@@ -68,6 +76,21 @@ export async function beginAttempt(publication: Publication, operation: 'send' |
         || duplicate.snapshot_id!==publication.snapshot_id || duplicate.bot_id!==canonical.bot_id
         || duplicate.destination_id!==canonical.destination_id) return null;
     }
+    const history = (await client.query<{ count: number; next:Date | null }>(`SELECT count(*)::int AS count,
+      max(next_retry_at) FILTER(WHERE status='retryable') AS next FROM request_attempts
+      WHERE publication_id=$1 AND operation=$2 AND ($2<>'edit' OR response_metadata->>'snapshotId'=$3)`,
+    [publication.id,operation,publication.pending_snapshot_id ?? publication.snapshot_id])).rows[0];
+    const count=history?.count ?? 0;
+    if (history?.next && history.next>new Date() || await rateLimited(client)) return null;
+    if (settings && count >= settings.requestMaxAttempts) {
+      if (operation === 'edit') await settleEdit(client,publication.id,publication.pending_snapshot_id ?? publication.snapshot_id,'publication_retry_exhausted');
+      if (operation === 'send') {
+        await client.query("UPDATE publications SET status='failed',error_code='publication_retry_exhausted',next_retry_at=NULL,updated_at=now() WHERE id=$1 AND status='prepared'",[publication.id]);
+        await releaseDestination(publication.id,client);
+      }
+      if (operation === 'delete') await client.query("UPDATE publication_replacements SET status='failed',error_code='publication_retry_exhausted',next_retry_at=NULL WHERE duplicate_publication_id=$1",[publication.id]);
+      return null;
+    }
     // Replace the durable desired edit atomically, including on retry after restart.
     if (operation === 'edit') await client.query(`UPDATE request_attempts SET status='failed',error_code='edit_superseded',finished_at=now(),next_retry_at=NULL
       WHERE publication_id=$1 AND operation='edit' AND status='retryable'`, [publication.id]);
@@ -97,9 +120,12 @@ export async function sendPrepared(publication: Publication, api: BotApi, settin
   } catch (error) {
     const failure = error instanceof BotError ? error : new BotError('publication_media_prepare_failed', 'retryable');
     if (failure.outcome === 'retryable') {
-      await db.query(`UPDATE publications SET error_code=$2,next_retry_at=$3,updated_at=now()
+      const attempt = publication.attempt_count+1;
+      await db.query(`UPDATE publications SET error_code=$2,next_retry_at=$3,attempt_count=attempt_count+1,
+        status=CASE WHEN attempt_count+1 >= $4 THEN 'failed' ELSE status END,updated_at=now()
         WHERE id=$1 AND status='prepared'`, [publication.id,failure.code,
-        new Date(Date.now() + Math.max(failure.retryAfterMs, settings.retryBaseMs))]);
+        attempt >= settings.requestMaxAttempts ? null : new Date(Date.now() + Math.max(failure.retryAfterMs,
+          Math.min(settings.retryMaxMs,settings.retryBaseMs * 2 ** Math.min(attempt-1,10)))),settings.requestMaxAttempts]);
       return null;
     }
     await transaction(async client => {
@@ -154,13 +180,13 @@ export async function editPublication(publication: Publication, api: BotApi, set
   if (!publication.message_id || publication.status !== 'published') return false;
   if ((await settleExpiredPublications(publication.destination_id,publication.id)).some(item => item.kind === 'edit'
     && item.snapshot_id === (publication.pending_snapshot_id ?? publication.snapshot_id))) return false;
-  const reconciled = await reconcileUnknownEdit(publication);
+  const reconciled = await reconcileUnknownEdit(publication,undefined,settings);
   if (reconciled !== null) return reconciled;
   let message: RenderedMessage;
   try { message = renderPublication(publication); }
   catch (error) {
     if (!(error instanceof PublicationRenderError)) throw error;
-    await db.query(`UPDATE publications SET error_code='publication_navigation_requires_new_edition',updated_at=now() WHERE id=$1`, [publication.id]);
+    await transaction(client => settleEdit(client,publication.id,publication.pending_snapshot_id ?? publication.snapshot_id,'publication_navigation_requires_new_edition'));
     return false;
   }
   if (publication.bot_id !== String((await api.identity()).id)) return false;
@@ -183,13 +209,25 @@ export async function editPublication(publication: Publication, api: BotApi, set
 export async function reconcile(publication: Publication, settings: AppSettings,
   reader?: (publication: Publication) => Promise<string | null>): Promise<boolean> {
   if ((await settleExpiredPublications(publication.destination_id,publication.id)).some(item => item.kind === 'send')) return false;
+  const attempt = (await db.query<{ attempt: number }>(`UPDATE request_attempts SET response_metadata=response_metadata||
+    jsonb_build_object('reconciliationAttempts',coalesce((response_metadata->>'reconciliationAttempts')::int,0)+1)
+    WHERE publication_id=$1 AND operation='send' AND status IN ('running','unknown')
+      AND coalesce((response_metadata->>'reconciliationAttempts')::int,0)<$2
+    RETURNING (response_metadata->>'reconciliationAttempts')::int AS attempt`,[publication.id,settings.requestMaxAttempts])).rows[0]?.attempt;
+  if (!attempt) {
+    await transaction(async client => {
+      await client.query(`UPDATE publications SET error_code='send_not_found_requires_review',next_retry_at=NULL,updated_at=now() WHERE id=$1`,[publication.id]);
+      await releaseDestination(publication.id,client);
+    });
+    return false;
+  }
   let receipt: string | null;
   try { receipt = await (reader ?? readSentMessage)(publication); }
   catch (error) {
-    const code = error instanceof ReconciliationReviewError ? 'send_not_found_requires_review' : 'reconciliation_unavailable';
+    const code = error instanceof ReconciliationReviewError || attempt >= settings.requestMaxAttempts ? 'send_not_found_requires_review' : 'reconciliation_unavailable';
     await transaction(async client => {
       await client.query(`UPDATE publications SET status='uncertain',error_code=$1,next_retry_at=$2,updated_at=now() WHERE id=$3`,
-        [code,code === 'send_not_found_requires_review' ? null : new Date(Date.now()+settings.retryMaxMs),publication.id]);
+        [code,code === 'send_not_found_requires_review' ? null : new Date(Date.now()+Math.min(settings.retryMaxMs,settings.retryBaseMs * 2 ** Math.min(attempt-1,10))),publication.id]);
       await releaseDestination(publication.id,client);
     });
     return false;

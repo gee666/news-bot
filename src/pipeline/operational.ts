@@ -16,14 +16,16 @@ export class OperationalDeferred extends Error {
 const stateSchema = z.object({ attempt: z.number().int().nonnegative().default(0), next: z.string().nullable().default(null),
   phase: z.enum(['running','waiting','failed','completed']).optional() });
 
-export async function operationalWork(key: string, settings: AppSettings, _manual: boolean,
+export async function operationalWork(key: string, settings: AppSettings, newRun: boolean,
   run: (attempt: number) => Promise<void | OperationalReport>): Promise<boolean> {
   const parsed = stateSchema.safeParse((await db.query<{ value: unknown }>(
     'SELECT value FROM operational_state WHERE key=$1', [key])).rows[0]?.value);
-  const state = parsed.success ? parsed.data : { attempt: 0, next: null };
+  const state = parsed.success && !(newRun && (parsed.data.phase === 'failed' || parsed.data.attempt >= settings.requestMaxAttempts))
+    ? parsed.data : { attempt: 0, next: null, phase:undefined };
+  if (state.phase === 'failed' || state.attempt >= settings.requestMaxAttempts) return false;
   if (state.next && Date.parse(state.next)>Date.now()) return false;
   const attempt = state.attempt+1;
-  await saveOperational(key, { attempt: state.attempt, phase: 'running', next: null });
+  await saveOperational(key, { attempt, phase: 'running', next: null });
   try {
     const report = await run(attempt);
     await saveOperational(key, { attempt: 0, phase: 'completed', next: null,
@@ -37,9 +39,7 @@ export async function operationalWork(key: string, settings: AppSettings, _manua
     }
     await recordProcessingDiagnostic(error, { scope: 'operation', operation: key });
     const decision = retryDecision(error, attempt, settings);
-    // Infrastructure retries never require a healthy-provider probe or operator approval.
-    // Story failures already have their own bounded budgets.
-    await saveOperational(key, { attempt, phase: 'waiting', next: decision.next ?? new Date(Date.now()+settings.retryMaxMs),
+    await saveOperational(key, { attempt, phase: decision.next ? 'waiting' : 'failed', next: decision.next,
       code: decision.code, reason: decision.reason });
     throw error;
   }

@@ -67,7 +67,7 @@ describe("inference reliability", () => {
       .toBe(now + 121 * 60_000);
     expect(retryTime(new Headers({ "x-ratelimit-reset-requests": "2m3s" }), now)).toBe(now + 123_000);
     const fault = new RequestFault("throttled", { status: 429, retryAt: now + 3_600_000 });
-    expect(failureMetadata(fault, "stage", "pi", 50, 10, now).nextRetryAt)
+    expect(failureMetadata(fault, "stage", "pi", 1, 10, now).nextRetryAt)
       .toBe(new Date(now + 3_600_000).toISOString());
     expect(failureMetadata(new RequestFault("transient"), "stage", "jev", 5, 10).retryable).toBe(false);
     expect(failureMetadata(new RequestFault("authentication"), "stage", "pi", 1, 10).nextRetryAt).toBeNull();
@@ -90,9 +90,9 @@ describe("inference reliability", () => {
       .toMatchObject({ retryable: false, nextRetryAt: null });
   });
 
-  it("keeps throttling uncapped even with a configured single attempt", () => {
+  it("caps throttling even with a configured single attempt", () => {
     expect(failureMetadata(new RequestFault("throttled"), "stage", "pi", 50, 10, Date.now(), 1))
-      .toMatchObject({ retryable: true });
+      .toMatchObject({ retryable: false, nextRetryAt:null });
   });
 
   it("classifies corrective failures and never stores provider payloads", () => {

@@ -41,7 +41,7 @@ export interface PrimaryStore {
     cursor: object, completed: boolean): Promise<number>;
 }
 export async function collectPublisher(reader: PrimaryReader, store: PrimaryStore, batchId: string,
-  source: PrimarySource, cutoff: Date, windowHours = 48, entryLimit?: number): Promise<number> {
+  source: PrimarySource, cutoff: Date, windowHours = 48, entryLimit?: number, maxAttempts = 3): Promise<number> {
   if (!Number.isFinite(cutoff.getTime()) || !Number.isFinite(windowHours) || windowHours < 1 || windowHours > 48) {
     throw new Error('invalid_collection_window');
   }
@@ -55,7 +55,7 @@ export async function collectPublisher(reader: PrimaryReader, store: PrimaryStor
     firstFailure = collectionError(error, 'index');
     if (!cursor.backlog.length) throw firstFailure;
   }
-  const entries = discoverPublisherEntries(cursor, indexEntries, source, cutoff, since);
+  const entries = discoverPublisherEntries(cursor, indexEntries, source, cutoff, since,maxAttempts);
   // Save discoveries before any article read. Failed and abandoned batches must not lose a rotating feed.
   try { await store.commitProgress(batchId, source, [], cursor, false); }
   catch (error) { throw collectionError(error, 'store'); }
@@ -133,7 +133,7 @@ Promise<{ collected: number; failed: number }> {
   let collected = 0;
   let failed = 0;
   for (const source of sources) {
-    try { collected += await collectPublisher(publisherReader, store, batchId, source, cutoff, settings.collectionWindowHours); }
+    try { collected += await collectPublisher(publisherReader, store, batchId, source, cutoff, settings.collectionWindowHours,undefined,settings.requestMaxAttempts); }
     catch (error) {
       failed++;
       const failure = collectionError(error, 'index');

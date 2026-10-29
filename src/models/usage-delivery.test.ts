@@ -10,10 +10,10 @@ vi.mock('./usage.js', async importOriginal => ({
 }));
 const paths: string[] = [];
 let stop: (() => Promise<void>) | undefined;
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers({toFake:['Date']}); });
 afterEach(async () => {
   await stop?.(); stop = undefined;
-  vi.unstubAllEnvs();
+  vi.useRealTimers(); vi.unstubAllEnvs();
   for (const path of paths.splice(0)) await rm(path, { recursive: true, force: true });
 });
 async function directory(): Promise<string> {
@@ -46,9 +46,13 @@ describe('usage storage recovery', () => {
     await deliverUsage(entry, { directory: path, record: writer, report });
     const file = join(path, entry.id + '.json');
     expect((await lstat(file)).mode & 0o077).toBe(0);
-    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual(entry);
+    expect(JSON.parse(await readFile(file, 'utf8'))).toMatchObject({...entry,_delivery:{attempts:1,next:expect.any(String)}});
+    vi.setSystemTime(Date.now()+30_001);
     expect(await retryUsageWrites({ directory: path, record: writer, report })).toBe(0);
     expect(await readdir(path)).toEqual([entry.id + '.json']);
+    expect(await retryUsageWrites({ directory: path, record: writer, report })).toBe(0);
+    expect(writer).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(Date.now()+60_001);
     expect(await retryUsageWrites({ directory: path, record: writer, report })).toBe(1);
     expect(await readdir(path)).toEqual([]);
     expect(writer.mock.calls.map(([value]) => value.id)).toEqual([entry.id, entry.id, entry.id]);
@@ -61,10 +65,12 @@ describe('usage storage recovery', () => {
     const entries = [call(), call()];
     for (const entry of entries) await deliverUsage(entry, { directory: path, report,
       record: async () => { throw new Error('Database offline'); } });
+    vi.setSystemTime(Date.now()+30_001);
     const offline = vi.fn(async () => { throw new Error('Database offline'); });
     expect(await retryUsageWrites({ directory: path, report, record: offline })).toBe(0);
     expect(offline).toHaveBeenCalledOnce();
     expect(await readdir(path)).toHaveLength(2);
+    vi.setSystemTime(Date.now()+60_001);
     expect(await retryUsageWrites({ directory: path, report })).toBe(2);
     expect(await readdir(path)).toEqual([]);
   });
@@ -87,7 +93,7 @@ describe('usage storage recovery', () => {
     expect(await retryUsageWrites({ directory: path, report })).toBe(0);
     expect(recordUsage).not.toHaveBeenCalled();
     expect(report.mock.calls).toEqual([[id, 'outbox_read']]);
-    expect(await readdir(path)).toEqual([id + '.json']);
+    expect(await readdir(path)).toEqual([id + '.json.failed']);
   });
 
   it('runs storage-only recovery on startup and drains before shutdown', async () => {
@@ -96,6 +102,7 @@ describe('usage storage recovery', () => {
     const entry = call();
     vi.mocked(recordUsage).mockRejectedValueOnce(new Error('PRIVATE_DATABASE_ERROR')).mockResolvedValue(undefined);
     await deliverUsage(entry, { directory: path, report: vi.fn() });
+    vi.setSystemTime(Date.now()+30_001);
     stop = startUsageRecovery(1000);
     await stop(); stop = undefined;
     expect(recordUsage).toHaveBeenCalledTimes(2);
@@ -109,4 +116,23 @@ describe('usage storage recovery', () => {
     vi.stubEnv('MODEL_USAGE_RETRY_MS', '5000');
     expect(usageRecoveryInterval()).toBe(5000);
   });
+});
+
+it('stops replaying exhausted writes and retains their bytes for inspection', async () => {
+  const path=await directory(); const entry=call(); const report=vi.fn();
+  const record=vi.fn(async () => {throw new Error('offline');});
+  const options={directory:path,record,report};
+  await deliverUsage(entry,options);
+  for (const delay of [30_001,60_001,120_001]) {
+    vi.setSystemTime(Date.now()+delay); await retryUsageWrites(options);
+  }
+  expect(record).toHaveBeenCalledTimes(3);
+  expect(await readdir(path)).toEqual([entry.id+'.json.failed']);
+  expect(JSON.parse(await readFile(join(path,entry.id+'.json.failed'),'utf8'))).toMatchObject(entry);
+});
+it('replays legacy outbox records without moving their deadline forward on every scan', async () => {
+  const path=await directory(); const entry=call(); const record=vi.fn(async () => {});
+  await writeFile(join(path,entry.id+'.json'),JSON.stringify(entry),{mode:0o600});
+  expect(await retryUsageWrites({directory:path,record})).toBe(1);
+  expect(record).toHaveBeenCalledWith(entry);
 });

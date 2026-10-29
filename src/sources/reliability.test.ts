@@ -78,7 +78,8 @@ it('failed attempts exhaust the same-cutoff budget and use configurable bounded 
   if (!blocked) throw new Error('missing_backlog_entry');
   cursor.backlog[0] = { ...blocked, failures: 10 };
   await expect(run(2, { maxArticles: 1, retryDelayMinutes: 30 })).rejects.toThrow('publisher_article_failed');
-  expect(cursor.backlog[0]?.nextAttemptAt).toBe('2026-10-02T02:00:00.000Z');
+  expect(cursor.backlog[0]?.nextAttemptAt).toBe(blocked.nextAttemptAt);
+  expect(reader.article).toHaveBeenCalledTimes(2);
 });
 
 it('drains a saved backlog during an index outage without hiding the index failure', async () => {

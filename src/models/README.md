@@ -18,7 +18,7 @@ interface RequestContext {
 
 News-source origin classification is separate from factual verification: an original tweet or report can be primary without proving personal experimental involvement, and unreadable origin links remain references. Summary prompts prohibit attribution to secondary relays.
 
-There are no immediate automatic retries. The processing loop resumes eligible failed work at `nextRetryAt`; authentication, model, input/context and invalid-output failures need correction. Transport/server and timeout errors stop at the client's `requestMaxAttempts`, default five. Pipeline and settings-page clients receive the saved setting; UI restart recovery uses it too. Throttling has increasing delays without a daily quota or attempt cap. Timeouts and recognized interrupted Pi streams with unknown outcomes wait at least five minutes before a later retry. Deadline duration starts after acquiring the shared `inferenceLimiter`, not while waiting locally. The same gate covers generation and settings-page test calls from every client instance.
+There are no immediate automatic retries. The processing loop resumes eligible failed work at `nextRetryAt`; authentication, model, input/context and invalid-output failures need correction. Transport/server and timeout errors stop at the client's `requestMaxAttempts`, default three. Pipeline and settings-page clients receive the saved setting; UI restart recovery uses it too. Throttling uses the same attempt cap and respects a later provider retry deadline. Timeouts and recognized interrupted Pi streams with unknown outcomes wait at least five minutes before a later retry. Deadline duration starts after acquiring the shared `inferenceLimiter`, not while waiting locally. The same gate covers generation and settings-page test calls from every client instance.
 
 HTTP clients use a 10-second connection deadline and separate total/idle request deadlines. JEV defaults to 20 minutes and rejects settings below its documented minimum. Ollama defaults to 10 minutes. Pi defaults to five minutes, configurable through `piTimeoutMs`. Migration 194 shortens only the former twenty-minute default for automatic work; custom deadlines and manual batch snapshots remain unchanged. Pipeline coherence, representative selection, news eligibility and interest judgments fall back to Pi on JEV context-limit errors, using the same criteria and full input. Pi receipts retain their actual model key; no calibrated JEV probabilities are claimed. Close replaced HTTP clients with `close()`.
 
@@ -45,7 +45,7 @@ interface PiConfig {
   provider?: string; // V1 accepts only openai-codex OAuth.
   model?: string;    // Defaults to gpt-6-luna. No fallback substitution.
   timeoutMs?: number;
-  requestMaxAttempts?: number; // Defaults to 5; does not cap throttling.
+  requestMaxAttempts?: number; // Defaults to 3, including throttling.
   nativeSchema?: boolean;
 }
 ```
@@ -96,7 +96,7 @@ new EmbeddingClient(config: EmbeddingConfig)
 
 Both configs take `baseUrl`, `recordFailure`, optional `model`, `timeoutMs`, `connectTimeoutMs`, `requestMaxAttempts`. JEV also requires `apiKey` and accepts `prefixCache`, `onMetrics`. Embeddings accept `dimensions`, default 4096.
 
-JEV template names and state fields. The pipeline uses JEV for coherence, representative selection, eligibility and interest. Extraction uses Pi with exact source coordinates and a review. Grouping and link assessment use the shared identity/relevance instructions in one Pi call across all candidates; they no longer dispatch pair-by-pair JEV judgments.
+JEV template names and state fields. The pipeline uses JEV for coherence, representative selection, eligibility and interest. Extraction uses Pi with exact source coordinates and a review. Grouping calls JEV's `duplicate` template directly for each uncached pair and retains pair receipts and checkpoints. It does not fall back to Pi. Link assessment uses one Pi call across all candidates.
 
 | Template | State | Answer |
 | --- | --- | --- |
@@ -155,3 +155,5 @@ Pi receives the configured `timeoutMs` and no provider retries. The adapter's di
 Synthetic adapter checks passed through localhost JEV/Ollama and actual Codex OAuth. Safe reports are in `tmp/models-live-*-report.jsonl`. gpt-6-luna produced Russian prose and native-schema output without repair, including a probe asking it to violate the schema. JEV returned valid response shapes for every template and reused 533 prefix tokens on consecutive story-count calls. Ollama returned 4096-dimensional vectors and rejected an over-context input with HTTP 400 instead of truncating.
 
 Browser login completion by the user and container-to-host connectivity remain deployment checks. Unit tests cover UI flow, cancellation, secret-safe status, built-in locked refresh, direct SDK isolation/schema injection, shared dispatch, metadata persistence and response validation. Persisted retry scheduling, result caching, corpus re-embedding, stage grouping and endpoint/UI wiring belong to the host.
+
+Usage-outbox writes retain their call ID and a durable `_delivery` attempt/deadline. Recovery backs off using the saved startup retry settings and stops after `requestMaxAttempts`, including the original write. Exhausted or malformed files are retained with a `.json.failed` suffix for inspection, not automatically replayed. Legacy records without delivery metadata are due immediately. Storage recovery never reruns inference.

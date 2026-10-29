@@ -32,6 +32,8 @@ export const publicStatusSchema = z.object({
     next_retry_at: timestamp.nullable(), waiting_reason: text.nullable(), error_code: text.nullable(), item_counts: batchItemCountsSchema,
     source_counts: z.object({ total: count, completed: count, failed: count, pending: count }).optional(),
     source_failures: z.array(z.object({ sourceId: z.uuid(), code: text.nullable() })).optional() })),
+  publicationMaintenance: z.object({ phase:z.enum(['waiting','failed']), attempts:count,
+    code:text.nullable(),next_retry_at:timestamp.nullable() }).nullable().optional(),
   digestRecovery: z.object({ phase: z.enum(['running','waiting','failed','completed']),
     code: text.nullable(), next_retry_at: timestamp.nullable() }).nullable().optional(),
 

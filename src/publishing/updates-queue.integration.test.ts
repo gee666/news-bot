@@ -67,6 +67,14 @@ describe.skipIf(!url)('edit queue SQL admission before oldest-first limit', () =
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('retires an oldest edit owned by another bot instead of monopolizing the single slot',async () => {
+    const older=await publication('928',-60); const newer=await publication('2076',0);
+    await database.db.query("UPDATE publications SET bot_id='456' WHERE id=$1",[older.id]);
+    expect(await updates.retryEdits(new BotApi('123:synthetic'),defaultSettings,'-100123')).toBe(0);
+    expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE id=$1',[older.id])).rows).toEqual([{pending_snapshot_id:null}]);
+    expect(await updates.retryEdits(new BotApi('123:synthetic'),defaultSettings,'-100123')).toBe(1);
+    expect(mocks.edit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({id:newer.id}),expect.any(BotApi),defaultSettings);
+  });
   it('settles expired sends and edits once without blocking fresh work or a newer snapshot', async () => {
     const older = await publication('4', -60);
     await database.db.query("INSERT INTO story_publication_threads(story_id,classification_version) SELECT story_id,'test' FROM publications WHERE id=$1", [older.id]);

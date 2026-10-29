@@ -88,7 +88,7 @@ export const defaultSettings: AppSettings = validateSettings({
   collectionWindowHours: 48,
   researchMaxPages: 5,
   researchMaxSearches: 2,
-  requestMaxAttempts: 5,
+  requestMaxAttempts: 3,
   retryBaseMs: 30_000,
   retryMaxMs: 3_600_000,
 });

@@ -72,7 +72,7 @@ export function createServices(pipeline: RuntimePipeline, runtime: PiRuntime) {
     },
     status: async () => {
       // Select only operational fields. Never return snapshots, raw source content or connector metadata.
-      const [batches, waits, embeddings, publications, readyPublications, digestRecovery, admissionDenials] = await Promise.all([
+      const [batches, waits, embeddings, publications, readyPublications, digestRecovery, admissionDenials, publicationMaintenance] = await Promise.all([
         db.query(`SELECT b.id,b.status,b.started_at,b.completed_at,b.next_retry_at,b.waiting_reason,
           coalesce(b.error_code,CASE WHEN b.status='completed' AND EXISTS(SELECT 1 FROM batch_sources s
             WHERE s.batch_id=b.id AND s.status='failed') THEN 'partial_source_failure' END) AS error_code,
@@ -101,6 +101,9 @@ export function createServices(pipeline: RuntimePipeline, runtime: PiRuntime) {
           coalesce(value->>'lastSeenAt',value->>'at',to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')) AS "lastSeenAt",
           coalesce(value->'occurrences','1'::jsonb) AS occurrences
           FROM operational_state WHERE key LIKE 'publication_admission:%' ORDER BY updated_at DESC LIMIT 100`),
+        db.query(`SELECT value->>'status' AS phase,coalesce((value->>'attempts')::int,0) AS attempts,
+          value->>'errorCode' AS code,value->>'nextRetryAt' AS next_retry_at
+          FROM operational_state WHERE key='telegram_publication_maintenance'`),
       ]);
       const publicationAdmissionDenials = admissionDenials.rows.flatMap((row: unknown) => {
         const parsed = publicationAdmissionDenialSchema.safeParse(row);
@@ -108,7 +111,7 @@ export function createServices(pipeline: RuntimePipeline, runtime: PiRuntime) {
       });
       return { batches: batches.rows, waits: waits.rows, embeddings: embeddings.rows, publications: publications.rows,
         readyPublications: readyPublications.rows, digestRecovery: digestRecovery.rows[0] ?? null,
-        publicationAdmissionDenials };
+        publicationAdmissionDenials,publicationMaintenance:publicationMaintenance.rows[0] ?? null };
     },
     loginStatus: () => oauth.status(),
     loginStart: async () => {

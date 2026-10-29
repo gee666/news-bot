@@ -59,9 +59,14 @@ it.each(['waiting','failed'])('does not redispatch a %s stage', async status => 
   expect(run).not.toHaveBeenCalled();
 });
 it('validation and throttling use the same bounded budget as transport failures', () => {
-  for (const kind of ['invalid_output','throttled','authentication'] as const) {
+  for (const kind of ['invalid_output','throttled'] as const) {
     const error = new ModelRequestError(failureMetadata(new RequestFault(kind), id, 'pi', 1, 0));
     expect(retryDecision(error, 1, defaultSettings).next).not.toBeNull();
     expect(retryDecision(error, defaultSettings.requestMaxAttempts, defaultSettings).next).toBeNull();
   }
+});
+
+it.each(['authentication','invalid_request','model_unavailable','context_limit','cancelled','unknown'] as const)('does not retry permanent %s failures', kind => {
+  const error=new ModelRequestError(failureMetadata(new RequestFault(kind),id,'jev',1,0));
+  expect(retryDecision(error,1,defaultSettings).next).toBeNull();
 });

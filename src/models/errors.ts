@@ -138,13 +138,13 @@ export function faultFromError(error: unknown): RequestFault {
       ...(retryAt === undefined ? {} : { retryAt }) });
 }
 
-export function canRetryFailure(kind: FailureKind, attempt: number, requestMaxAttempts = 5): boolean {
-  return kind === "throttled" || (attempt < requestMaxAttempts && ["transient", "timeout"].includes(kind));
+export function canRetryFailure(kind: FailureKind, attempt: number, requestMaxAttempts = 3): boolean {
+  return attempt < requestMaxAttempts && ["throttled", "transient", "timeout"].includes(kind);
 }
 
 export function failureMetadata(
   fault: RequestFault, operationId: string, service: ModelFailure["service"],
-  attempt: number, durationMs: number, now = Date.now(), requestMaxAttempts = 5,
+  attempt: number, durationMs: number, now = Date.now(), requestMaxAttempts = 3,
 ): ModelFailure {
   const kind = fault.kind;
   const retryable = canRetryFailure(kind, attempt, requestMaxAttempts);

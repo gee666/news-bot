@@ -30,10 +30,12 @@ export async function retryReplacements(api: BotApi, settings: AppSettings, dest
     }
     catch (error) {
       await recordFailure(attemptId,publication,'delete',error,settings);
+      const attempt = (await db.query<{ count:number }>("SELECT count(*)::int AS count FROM request_attempts WHERE publication_id=$1 AND operation='delete'",[publication.id])).rows[0]?.count ?? 1;
       const failure = error instanceof BotError ? error : new BotError('telegram_outcome_unknown','unknown');
       await db.query(`UPDATE publication_replacements SET status=$1,error_code=$2,next_retry_at=$3 WHERE duplicate_publication_id=$4`,
-        [failure.outcome === 'failed' ? 'failed' : 'pending',failure.code,
-          failure.outcome === 'failed' ? null : new Date(Date.now() + Math.max(settings.retryMaxMs,failure.retryAfterMs)),publication.id]);
+        [failure.outcome === 'retryable' && attempt<settings.requestMaxAttempts ? 'pending' : 'failed',failure.code,
+          failure.outcome === 'retryable' && attempt<settings.requestMaxAttempts ? new Date(Date.now() + Math.max(
+            Math.min(settings.retryMaxMs,settings.retryBaseMs * 2 ** Math.min(attempt-1,10)),failure.retryAfterMs)) : null,publication.id]);
       continue;
     }
     await transaction(async client => {

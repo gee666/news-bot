@@ -18,7 +18,7 @@ export async function startServer(): Promise<() => Promise<void>> {
   const usageRetryMs = usageRecoveryInterval();
   await migrate();
   await cleanupMedia();
-  await getSettings();
+  const settings = await getSettings();
   const runtime = await openPiRuntime(resolve(process.env.PI_AUTH_PATH ?? 'tmp/models-private-auth/auth.json'));
   await initializeUsageOutbox();
   if ((await usageOutboxStatus()).state !== 'ready') throw new Error('Model usage storage is not private and ready');
@@ -33,7 +33,7 @@ export async function startServer(): Promise<() => Promise<void>> {
     const listener = app.listen(port, host, () => resolveServer(listener));
     listener.once('error', reject);
   });
-  const stopUsageRecovery = startUsageRecovery(usageRetryMs);
+  const stopUsageRecovery = startUsageRecovery(usageRetryMs,{ settings });
   console.info(`Settings server listening on port ${port}. Access through loopback or an SSH tunnel only.`);
   let stopBot: (() => Promise<void>) | undefined;
   const ready = Promise.allSettled([

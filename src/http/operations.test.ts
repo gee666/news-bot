@@ -208,15 +208,15 @@ describe('durable asynchronous operations', () => {
       expect(storage.attempts[0]?.[6]).toBeNull();
     }
   });
-  it('leaves throttled UI tests uncapped', async () => {
+  it('caps throttled UI tests', async () => {
     const runner: OperationRunner = async (operation, recordFailure) => {
       await recordFailure({ ...failure(operation), kind: 'throttled' });
       throw new Error('synthetic rate limit');
     };
     operations = new Operations(runner, undefined, async () => 1);
     const current = await operations.start('test_pi');
-    await vi.waitFor(async () => expect((await operations.get(current.id))?.status).toBe('waiting'));
-    expect((await operations.get(current.id))?.nextRetryAt).not.toBeNull();
+    await vi.waitFor(async () => expect((await operations.get(current.id))?.status).toBe('failed'));
+    expect((await operations.get(current.id))?.nextRetryAt).toBeNull();
   });
   it('observes a waiting collection without resubmitting it, and reports a later batch failure', async () => {
     vi.useFakeTimers();

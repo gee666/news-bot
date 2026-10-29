@@ -40,7 +40,7 @@ export async function prepareThreadUpdates(destinationId: string, latestPublicat
       if (pending.success && JSON.stringify(pending.data) === JSON.stringify(desired)) continue;
       const content: PublicationSnapshot = desired;
       if ((await client.query(`SELECT 1 FROM operational_state o JOIN publication_snapshots snap ON snap.id::text=o.value->>'snapshotId'
-        WHERE o.key=$1 AND snap.content=$2::jsonb`, [`publication_edit_settled:${row.id}`,JSON.stringify(content)])).rows.length) continue;
+        WHERE (o.key=$1 OR o.key LIKE $1||':%') AND snap.content=$2::jsonb`, [`publication_edit_settled:${row.id}`,JSON.stringify(content)])).rows.length) continue;
       try { renderPublication({content,delivery_kind:row.delivery_kind ?? 'text'}); }
       catch (error) {
         if (!(error instanceof PublicationRenderError)) throw error;

@@ -24,23 +24,26 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
       return modelResult({ associations: links.data.targets.filter(target=>target.reports.some(report=>report.text.includes('Compiler 2')))
         .flatMap(target=>links.data.links.map(link=>({linkId:link.id,targetId:target.id,classification:'relevant'}))) });
     }
-    const event = z.object({ id: z.uuid(), reports: z.array(z.object({ text: z.string() })) })
-      .transform(value => ({ ...value, text: value.reports.map(report => report.text).join('\n\n') }));
-    const input = z.object({ incoming: event, candidates: z.array(event) }).parse(raw);
-
-    model.groupingCalls++;
-    if (input.incoming.text.includes('Сбой')) throw new ModelRequestError(
-      failureMetadata(new RequestFault('transient'), 'grouping', 'pi', 1, 0));
-    return modelResult({ matches: input.candidates.map(candidate => ({ storyId: candidate.id,
-      relatedEvidence: { incomingQuote:input.incoming.reports[0]?.text,candidateQuote:candidate.reports[0]?.text,
-        connection:'The shutdown is a consequence of the PHP vulnerability.' }, relation: model.relation ||
-      (candidate.text.includes('PHP') && input.incoming.text.includes('PHP')
-        ? (candidate.text.includes('Alderon') === input.incoming.text.includes('Alderon') ? 'same' : 'related')
-        : candidate.text.includes('Compiler 2') && input.incoming.text.includes('Compiler 2') ? 'same' : 'unrelated') })) });
+    throw new Error('Pi must not handle grouping');
   } }),
 }));
 vi.mock('../models/jev.js', async original => ({ ...await original<typeof import('../models/jev.js')>(), JevClient: class {
-  async judge(template: string) {
+  async judge(template: string, state: unknown) {
+    if (template === 'duplicate') {
+      const event = z.object({ id: z.uuid(), reports: z.array(z.object({ text: z.string() })) })
+        .transform(value => ({ ...value, text: value.reports.map(report => report.text).join('\n\n') }));
+      const input = z.object({ incoming: event, candidate: event }).parse(state);
+      model.groupingCalls++;
+      if (input.incoming.text.includes('Сбой')) throw new ModelRequestError(
+        failureMetadata(new RequestFault('transient'), 'grouping', 'jev', 1, 0));
+      const candidate = input.candidate;
+      const relation = model.relation ||
+        (candidate.text.includes('PHP') && input.incoming.text.includes('PHP')
+          ? (candidate.text.includes('Alderon') === input.incoming.text.includes('Alderon') ? 'same' : 'related')
+          : candidate.text.includes('Compiler 2') && input.incoming.text.includes('Compiler 2') ? 'same' : 'unrelated');
+      return { answers: { relation: { type: 'choice', choice: relation, probabilities: {}, confidence: 1 } },
+        metrics: {}, model: 'fixture' };
+    }
     const answer = template==='interest' ? { type: 'score', score: 7, probabilities: {}, confidence: 1, legend: {} }
       : { type: 'choice', choice: template==='event_group_integrity' ? 'coherent' : template==='representative' ? 'left' : 'eligible', probabilities: {}, confidence: 1 };
     return { answers: { answer }, metrics: {}, model: 'fixture' };
@@ -166,7 +169,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     const calls=model.groupingCalls;
     await processIntake(await intake(['Compiler 2 получила поддержку Linux.'])); await publish();
     const next=await one("SELECT story_id AS id FROM story_mentions WHERE text LIKE '%поддержку Linux%'");
-    expect(model.groupingCalls-calls).toBe(1);
+    expect(model.groupingCalls-calls).toBe(2);
     expect((await database.db.query(`SELECT relation FROM story_relations
       WHERE lower_story_id=$1 OR upper_story_id=$1 ORDER BY relation`,[next])).rows)
       .toEqual([{relation:'same'}]);
@@ -186,10 +189,8 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]); expect((await database.db.query('SELECT * FROM story_publication_threads')).rows).toEqual([]);
     const { relatedStoryIds }=await import('./story-relations.js');
     expect(await relatedStoryIds(discovery)).toEqual([shutdown]); expect(await relatedStoryIds(shutdown)).toEqual([discovery]);
-    expect((await database.db.query("SELECT provenance->'relatedEvidence' AS evidence FROM story_relations WHERE relation='related'")).rows)
-      .toEqual([{ evidence:{ incomingQuote:'Alderon shut down its game because of the PHP vulnerability.',
-        candidateQuote:'OpenAI model discovered a PHP vulnerability.',
-        connection:'The shutdown is a consequence of the PHP vulnerability.' } }]);
+    expect((await database.db.query("SELECT classifier_version FROM story_relations WHERE relation='related'")).rows)
+      .toEqual([{ classifier_version: 'grouping-jev-v1' }]);
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[discovery])).rows[0]).toEqual(original);
     expect((await database.db.query('SELECT text FROM story_mentions WHERE story_id=$1',[shutdown])).rows)
       .toEqual([{text:'Alderon shut down its game because of the PHP vulnerability.'}]);
@@ -270,7 +271,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query("SELECT status FROM stories WHERE chosen_excerpt LIKE '%Database 3%'")).rows)
       .toEqual([{status:'completed'}]);
   });
-  it('checks every source in a legacy incoming aggregate before sending it to Pi', async () => {
+  it('checks every source in a legacy incoming aggregate before sending it to remote JEV', async () => {
     const seed=await intake(['Acme выпустила Compiler 2.']); await processIntake(seed);
     await processIntake(await intake(['Beta выпустила Database 3.']));
     const compiler=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
@@ -283,10 +284,10 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
       JOIN item_revisions r ON r.item_id=i.id WHERE r.id=$1)`,[revision]);
     await database.db.query('DELETE FROM consolidation_intake WHERE revision_id IN(SELECT revision_id FROM batch_items WHERE batch_id=$1)',[seed]);
     const calls=model.groupingCalls;
-    await (await import('./consolidation.js')).consolidateStories(settings,seed);
+    await (await import('./consolidation.js')).consolidateStories({ ...settings, jevUrl: 'https://jev.example.org' },seed);
     expect(model.groupingCalls).toBe(calls);
     expect((await database.db.query("SELECT status,error_code FROM stage_state WHERE batch_id=$1 AND stage LIKE 'consolidate:%'",[seed])).rows)
-      .toEqual([{status:'waiting',error_code:'invalid_request'}]);
+      .toEqual([{status:'failed',error_code:'invalid_request'}]);
   });
   it('reopens completed legacy draft intake and merges it before publishing', async () => {
     await processIntake(await intake(['Acme выпустила Compiler 2.']));

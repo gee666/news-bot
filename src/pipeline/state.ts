@@ -42,8 +42,9 @@ export function retryDecision(error: unknown, attempt: number, settings: AppSett
   const delay = Math.min(settings.retryMaxMs, settings.retryBaseMs * 2 ** Math.max(0, attempt - 1));
   const model = error instanceof ModelRequestError ? error.metadata : null;
   const known = error instanceof StageOutputError || error instanceof StoryCompletionError || error instanceof StoryIntegrityError;
+  const permanent = model && ['authentication','model_unavailable','invalid_request','context_limit','cancelled','unknown'].includes(model.kind);
   return {
-    next: attempt < settings.requestMaxAttempts && !(error instanceof FailedStageError)
+    next: !permanent && attempt < settings.requestMaxAttempts && !(error instanceof FailedStageError)
       ? new Date(Math.max(Date.now() + delay, Date.parse(model?.nextRetryAt ?? '') || 0)) : null,
     code: model?.kind ?? (known || error instanceof FailedStageError ? error.code : 'pipeline_failed'),
     unknown: model?.outcome === 'unknown',

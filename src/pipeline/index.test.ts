@@ -14,6 +14,7 @@ vi.mock('./judgments.js', () => ({ Judgments: class { async close() {} } }));
 vi.mock('./batches.js', () => ({ processBatch: vi.fn() }));
 vi.mock('./source-links.js', () => ({ associateSourceLinks: vi.fn() }));
 vi.mock('./vectors.js', () => ({ reembedPending: vi.fn() }));
+import { reembedPending } from './vectors.js';
 import { createPipeline } from './index.js';
 import { associateSourceLinks } from './source-links.js';
 import { ProcessingYield } from './processing-slice.js';
@@ -57,4 +58,12 @@ it('records and retries infrastructure failures rather than pretending the sweep
   mocks.held.push(true,true);
   await expect((await createPipeline()).runDigest()).rejects.toThrow('fixture database outage');
   expect(states().at(-1)).toMatchObject({ phase: 'waiting', attempt: 1 });
+});
+
+it('terminal failed batches do not block pending reembedding work',async () => {
+  mocks.held.push(true);
+  mocks.query.mockImplementation(async (sql:string)=>({rows:sql.includes('FROM processing_batches') && sql.includes("'failed'") ? [{id:'terminal'}]
+    : sql.includes("embedding_configs WHERE status='pending'") ? [{id:'config'}] : []}));
+  await (await createPipeline()).runCollection();
+  expect(reembedPending).toHaveBeenCalledOnce();
 });

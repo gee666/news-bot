@@ -29,7 +29,7 @@ export function publisherProgress(input: PrimarySource['cursor'], cutoff: Date,
 
 /** Keep rotating-index discoveries until their collection window expires. */
 export function discoverPublisherEntries(cursor: PrimaryCursor, index: PublisherEntry[], source: PrimarySource,
-  cutoff: Date, since: number): PublisherEntry[] {
+  cutoff: Date, since: number, maxAttempts = 3): PublisherEntry[] {
   const eligible = (entry: PublisherBacklogEntry) => publisherArticle(entry.url, source) === entry.url
     && Date.parse(entry.discoveredAt) <= cutoff.getTime()
     && (entry.publishedAt ? Date.parse(entry.publishedAt) >= since && Date.parse(entry.publishedAt) <= cutoff.getTime()
@@ -60,7 +60,7 @@ export function discoverPublisherEntries(cursor: PrimaryCursor, index: Publisher
   const ids = new Set(cursor.backlog.map(entry => entry.id));
   cursor.seen = cursor.seen.filter(item => ids.has(item.id));
   cursor.skippedUnknownIds = cursor.skippedUnknownIds.filter(id => ids.has(id));
-  return cursor.backlog.filter(entry => !cursor.completedIds.includes(entry.id)
+  return cursor.backlog.filter(entry => entry.failures < maxAttempts && !cursor.completedIds.includes(entry.id)
     && !cursor.attemptedIds.includes(entry.id)
     && !(entry.nextAttemptAt && Date.parse(entry.nextAttemptAt) > cutoff.getTime())
     && !((!entry.publishedAt || source.feedDateRole === 'submission') && (cursor.unknownIds.includes(entry.id)
@@ -92,7 +92,7 @@ export function reservePublisherAttempt(cursor: PrimaryCursor, entry: PublisherE
   return { ...cursor, attemptedIds: [...cursor.attemptedIds, entry.id],
     rechecked: cursor.rechecked || cursor.seen.some(item => item.id === entry.id),
     backlog: cursor.backlog.map(item => item.id !== entry.id ? item : { ...item,
-      failures: Math.min(10, item.failures + 1),
+      failures: Math.min(20, item.failures + 1),
       nextAttemptAt: new Date(Date.parse(cursor.cutoff ?? '')
         + Math.min(720, (source.retryDelayMinutes ?? 60) * 2 ** item.failures) * 60000).toISOString() }) };
 }

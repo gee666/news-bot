@@ -12,7 +12,7 @@ const operationSchema = z.object({
   digestRun: z.object({ retryEpoch: z.number().int().nonnegative(), totalAttempts: z.number().int().nonnegative(),
     updatedAt: z.iso.datetime() }).strict().optional(),
   status: z.enum(['queued', 'running', 'waiting', 'succeeded', 'completed_with_errors', 'failed']),
-  attempt: z.number().int().positive(),
+  attempt: z.number().int().positive(), retryFailures:z.number().int().nonnegative().optional(),
   createdAt: z.iso.datetime(), updatedAt: z.iso.datetime(),
   nextRetryAt: z.iso.datetime().nullable(),
   message: z.string(),
@@ -38,7 +38,7 @@ export class Operations {
   private timer: ReturnType<typeof setInterval> | undefined;
   private ticking = false;
   constructor(private readonly runner: OperationRunner, private readonly observer?: OperationObserver,
-    private readonly requestMaxAttempts: () => Promise<number> = async () => 5) {}
+    private readonly requestMaxAttempts: () => Promise<number> = async () => 3) {}
 
   private async observe(operation: Operation): Promise<Operation> {
     if (!this.observer || this.active.has(operation.id) || ['completed_with_errors', 'failed'].includes(operation.status)) return operation;
@@ -95,8 +95,9 @@ export class Operations {
       const operation = operationSchema.parse(row.value);
       if (operation.kind === 'run_now') {
         if (operation.status === 'running') {
-          operation.status = 'waiting';
-          operation.nextRetryAt = new Date(Date.now() + 300000).toISOString();
+          operation.retryFailures=(operation.retryFailures ?? 0)+1;
+          operation.status=operation.retryFailures < requestMaxAttempts ? 'waiting' : 'failed';
+          operation.nextRetryAt=operation.status === 'waiting' ? new Date(Date.now()+Math.min(3_600_000,300000 * 2 ** Math.min(operation.retryFailures-1,10))).toISOString() : null;
           operation.message = 'Interrupted by restart. Saved batch and publication IDs will resume after the unknown-request cooldown.';
           operation.updatedAt = new Date().toISOString();
           await persist(operation);
@@ -140,7 +141,9 @@ export class Operations {
       for (const row of stranded.rows) {
         const operation = operationSchema.parse(row.value);
         if (this.active.has(operation.id)) continue;
-        operation.status = 'waiting'; operation.nextRetryAt = new Date(Date.now() + 300000).toISOString();
+        operation.retryFailures=(operation.retryFailures ?? 0)+1;
+        operation.status=operation.retryFailures < await this.requestMaxAttempts() ? 'waiting' : 'failed';
+        operation.nextRetryAt=operation.status === 'waiting' ? new Date(Date.now()+Math.min(3_600_000,300000 * 2 ** Math.min(operation.retryFailures-1,10))).toISOString() : null;
         operation.message = 'Manual run interrupted while saving progress. Retrying its saved batch after cooldown.';
         operation.updatedAt = new Date().toISOString(); await persist(operation);
       }
@@ -175,6 +178,11 @@ export class Operations {
   }
 
   private async execute(operation: Operation): Promise<void> {
+    if (operation.status === 'waiting' && operation.kind !== 'run_now' && operation.attempt >= await this.requestMaxAttempts()) {
+      operation.status = 'failed'; operation.nextRetryAt = null;
+      operation.message = 'Operation retry limit reached. Saved progress is retained.';
+      await persist(operation); return;
+    }
     if (operation.status === 'waiting') operation.attempt++;
     operation.status = 'running';
     operation.message = operation.kind.startsWith('test_') ? 'Waiting for the shared model slot or response.' : 'Running.';
@@ -211,10 +219,13 @@ export class Operations {
       operation.message = result?.message ?? 'Completed.';
       operation.nextRetryAt = result?.nextRetryAt ?? null;
       operation.failure = null;
+      operation.retryFailures=0;
     } catch {
       if (!recorded) {
-        operation.status = operation.kind === 'run_now' ? 'waiting' : 'failed';
-        operation.nextRetryAt = operation.kind === 'run_now' ? new Date(Date.now() + 300000).toISOString() : null;
+        operation.retryFailures=(operation.retryFailures ?? 0)+1;
+        const retry = operation.kind === 'run_now' && operation.retryFailures < await this.requestMaxAttempts();
+        operation.status = retry ? 'waiting' : 'failed';
+        operation.nextRetryAt = retry ? new Date(Date.now() + Math.min(3_600_000, 300000 * 2 ** Math.min(operation.retryFailures-1,10))).toISOString() : null;
         operation.message = operation.kind === 'run_now'
           ? 'Manual run interrupted. Saved batch ownership is retained; retrying after cooldown. Check service availability.'
           : 'Operation failed. Check configuration, login and service availability.';

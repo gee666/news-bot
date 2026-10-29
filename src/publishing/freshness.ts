@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import type { AppSettings } from '../settings.js';
 import type { Publication } from './store.js';
+import { settleEdit } from './edit-settlement.js';
 import { releaseDestination } from './destination-order.js';
 
 export interface DeliveryAuthorization { verificationTest?: boolean }
@@ -28,7 +29,8 @@ export async function publicationAdmission(client: Pick<PoolClient, 'query'>, pu
         JOIN source_items i ON i.current_revision_id=r.id WHERE m.story_id=s.id
         AND r.metadata @> '{"pipelineFailure":true}'::jsonb) THEN 'story_ineligible'
     WHEN EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation=$8
-      AND a.status IN ('running','unknown','succeeded') AND ($8='send' OR a.status<>'succeeded')) THEN 'delivery_outcome_unknown'
+      AND (a.status IN ('running','unknown','succeeded') OR (a.response_metadata->>'terminalUnknown'='true' AND a.response_metadata->>'snapshotId'=coalesce(p.pending_snapshot_id,p.snapshot_id)::text))
+      AND ($8='send' OR a.status<>'succeeded')) THEN 'delivery_outcome_unknown'
     WHEN s.id IS NULL AND NOT coalesce(($7 AND test.value->>'publicationId'=p.id::text
       AND test.value->>'destinationId'=p.destination_id),false) THEN 'story_ineligible'
     WHEN s.id IS NOT NULL AND (snap.story_version IS DISTINCT FROM s.content_version
@@ -65,12 +67,14 @@ export async function recordAdmissionDenial(client: Pick<PoolClient, 'query'>, p
   if (recorded.rows[0]?.first_seen) console.warn('Publication admission denied', {
     publicationId: publication.id, snapshotId, operation, reason,
   });
+  if (operation === 'edit' && (reason === 'snapshot_changed' || reason === 'story_ineligible' || reason === 'settings_changed')) {
+    await settleEdit(client,publication.id,snapshotId,`publication_admission_${reason}`);
+  }
   if (operation === 'send' && (reason === 'snapshot_changed' || reason === 'story_ineligible')) {
     await client.query(`UPDATE publications p SET status='failed',error_code=$2,next_retry_at=NULL,updated_at=now()
       WHERE p.id=$1 AND p.status='prepared' AND p.message_id IS NULL
         AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='send'
-          AND a.status IN ('running','unknown','succeeded'))
-        AND EXISTS(SELECT 1 FROM publication_destination_reservations r WHERE r.publication_id=p.id)`,
+          AND a.status IN ('running','unknown','succeeded'))`,
     [publication.id,`publication_admission_${reason}`]);
     await releaseDestination(publication.id,client);
   }

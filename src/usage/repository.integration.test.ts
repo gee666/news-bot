@@ -90,6 +90,7 @@ describe.skipIf(!databaseUrl)('persistent usage accounting', () => {
         throw new Error('Connection dropped after commit');
       } });
       expect(await usageOutboxStatus()).toMatchObject({ state: 'ready', pendingRecords: 1 });
+      vi.useFakeTimers({toFake:['Date']}); vi.setSystemTime(Date.now()+30_001);
       stop = startUsageRecovery(1000, { directory, record: value => recordUsage(value, pool) });
       await stop(); stop = undefined;
       expect(await usageOutboxStatus()).toMatchObject({ state: 'ready', pendingRecords: 0, replaying: false,
@@ -98,7 +99,7 @@ describe.skipIf(!databaseUrl)('persistent usage accounting', () => {
       expect(stats.totals).toMatchObject({ calls: 1, inputTokens: 50, outputTokens: 5,
         cacheReadTokens: 40, cacheWriteTokens: 10, totalTokens: 105 });
     } finally {
-      await stop?.(); vi.unstubAllEnvs();
+      await stop?.(); vi.useRealTimers(); vi.unstubAllEnvs();
       await rm(directory, { recursive: true, force: true });
     }
   });

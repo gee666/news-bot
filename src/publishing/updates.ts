@@ -1,3 +1,4 @@
+import { settleEdit } from './edit-settlement.js';
 import type { PoolClient } from 'pg';
 import { ZodError } from 'zod';
 import { db, transaction } from '../db.js';
@@ -95,7 +96,7 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
       }
       const normalized = JSON.stringify(content);
       if ((await client.query(`SELECT 1 FROM operational_state o JOIN publication_snapshots snap ON snap.id::text=o.value->>'snapshotId'
-        WHERE o.key=$1 AND snap.content=$2::jsonb`, [`publication_edit_settled:${story.publication_id}`,normalized])).rows.length) continue;
+        WHERE (o.key=$1 OR o.key LIKE $1||':%') AND snap.content=$2::jsonb`, [`publication_edit_settled:${story.publication_id}`,normalized])).rows.length) continue;
       const previous = publicationSnapshotSchema.safeParse(story.pending_snapshot_id ? story.pending_content : story.old_content);
       if (previous.success && JSON.stringify(previous.data) === normalized && (story.pending_snapshot_id || story.format_version === 1) && story.desired_story_id === story.id) {
         if (options.runId && story.pending_snapshot_id) await pinManualEdit(client, options.runId, story.publication_id, story.pending_snapshot_id);
@@ -111,7 +112,9 @@ export async function prepareUpdates(settings: AppSettings, destinationId: strin
   });
 }
 
-const editDue = `((p.pending_snapshot_id IS NOT NULL
+const editDue = `(NOT EXISTS(SELECT 1 FROM request_attempts terminal WHERE terminal.publication_id=p.id
+  AND terminal.operation='edit' AND terminal.response_metadata->>'terminalUnknown'='true'
+  AND terminal.response_metadata->>'snapshotId'=coalesce(p.pending_snapshot_id,p.snapshot_id)::text) AND ((p.pending_snapshot_id IS NOT NULL
   AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id
     AND a.operation='edit' AND a.status IN ('running','unknown'))
   AND NOT EXISTS(SELECT 1 FROM request_attempts a
@@ -119,7 +122,7 @@ const editDue = `((p.pending_snapshot_id IS NOT NULL
       AND (a.status IN ('failed','succeeded') OR a.next_retry_at>now())))
   OR EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='edit'
     AND a.status IN ('running','unknown','retryable') AND (a.next_retry_at IS NULL OR a.next_retry_at<=now())
-    AND (a.status IN ('running','unknown') OR a.response_metadata->>'snapshotId'=coalesce(p.pending_snapshot_id,p.snapshot_id)::text)))`;
+    AND (a.status IN ('running','unknown') OR a.response_metadata->>'snapshotId'=coalesce(p.pending_snapshot_id,p.snapshot_id)::text))))`;
 
 /** Stored edits still require final freshness; unknown outcomes can only be reconciled. */
 export async function retryEdits(api: BotApi, settings: AppSettings, destinationId: string, storyIds?: string[], publicationIds?: string[]): Promise<number> {
@@ -143,6 +146,8 @@ export async function retryEdits(api: BotApi, settings: AppSettings, destination
         else await client.query(`UPDATE request_attempts SET next_retry_at=now()+$2*interval '1 millisecond'
           WHERE publication_id=$1 AND operation='edit' AND status='unknown'
             AND (next_retry_at IS NULL OR next_retry_at<=now())`, [row.id,settings.retryBaseMs]);
+      } else if (publication) {
+        await settleEdit(client,publication.id,publication.pending_snapshot_id ?? publication.snapshot_id,'publication_edit_bot_changed');
       }
     });
   }

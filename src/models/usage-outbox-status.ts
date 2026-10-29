@@ -31,8 +31,11 @@ export async function usageOutboxStatus(): Promise<UsageOutboxStatus> {
     await access(path, constants.R_OK | constants.W_OK | constants.X_OK);
     let pendingRecords = 0;
     let oldest: Date | undefined;
+    let exhausted=false;
     for (const name of await readdir(path)) {
-      if (!name.endsWith('.json') || !z.uuid().safeParse(name.slice(0, -5)).success) continue;
+      const id=name.endsWith('.json.failed') ? name.slice(0,-12) : name.endsWith('.json') ? name.slice(0,-5) : '';
+      if (!z.uuid().safeParse(id).success) continue;
+      exhausted ||= name.endsWith('.json.failed');
       try {
         const file = await lstat(join(path, name));
         if (!file.isFile() || file.isSymbolicLink() || (file.mode & 0o077) !== 0) return unavailable;
@@ -44,7 +47,7 @@ export async function usageOutboxStatus(): Promise<UsageOutboxStatus> {
         if (!missing(error)) return unavailable;
       }
     }
-    return { state: 'ready', pendingRecords, oldestPendingAt: oldest?.toISOString() ?? null, ...recovery };
+    return { state: 'ready', pendingRecords, oldestPendingAt: oldest?.toISOString() ?? null, ...recovery,lastReplayFailed:exhausted || recovery.lastReplayFailed };
   } catch (error) {
     return missing(error) ? { ...unavailable, state: 'missing', pendingRecords: 0 } : unavailable;
   }

@@ -2,12 +2,12 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../settings.js';
 import { BotError } from './bot-api.js';
 
-const mocks = vi.hoisted(() => ({ settings: vi.fn(), resume: vi.fn(), expire: vi.fn(), save: vi.fn(), query: vi.fn() }));
+const mocks = vi.hoisted(() => ({ settings: vi.fn(), resume: vi.fn(), expire: vi.fn(), save: vi.fn(), query: vi.fn(), state:vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('../settings.js', async original => ({ ...await original<typeof import('../settings.js')>(), getSettings: mocks.settings }));
 vi.mock('./digest.js', () => ({ resumePublications: mocks.resume }));
 vi.mock('./media-plan.js', () => ({ expirePublicationMedia: mocks.expire }));
-vi.mock('./store.js', () => ({ saveState: mocks.save }));
+vi.mock('./store.js', () => ({ saveState: mocks.save,state:mocks.state }));
 import { startPublicationMaintenance } from './maintenance.js';
 
 let stop: (() => Promise<void>) | undefined;
@@ -37,9 +37,9 @@ it.each([
   await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledOnce());
   const diagnostic = { phase, errorName: 'Error', sqlState: '42601', frames: [], botErrorCode: undefined };
   expect(console.error).toHaveBeenCalledWith(
-    'Telegram publication maintenance failed; retrying on the next maintenance tick.', diagnostic);
+    'Telegram publication maintenance failed.', diagnostic);
   expect(mocks.save).toHaveBeenCalledWith('telegram_publication_maintenance', {
-    status: 'waiting', errorCode: 'publication_resume_failed', diagnostic, nextRetryAt: expect.any(String),
+    status: 'waiting', attempts:1, errorCode: 'publication_resume_failed', diagnostic, nextRetryAt: expect.any(String),
   });
   expect(JSON.stringify([mocks.save.mock.calls, vi.mocked(console.error).mock.calls])).not.toMatch(/private|secret/u);
   expect(fetch).not.toHaveBeenCalled();
@@ -84,4 +84,18 @@ it('clears stale maintenance errors on a successful tick', async () => {
   expect(mocks.save).not.toHaveBeenCalled();
   expect(console.error).not.toHaveBeenCalled();
   expect(fetch).not.toHaveBeenCalled();
+});
+
+it('backs off consecutive worker failures, stops at the cap and allows an explicit restart',async () => {
+  mocks.settings.mockResolvedValue({...defaultSettings,retryBaseMs:5,retryMaxMs:20});
+  mocks.resume.mockRejectedValue(new Error('offline'));
+  stop=await startPublicationMaintenance();
+  await vi.waitFor(()=>expect(mocks.save).toHaveBeenCalledTimes(defaultSettings.requestMaxAttempts));
+  expect(mocks.save.mock.calls.at(-1)?.[1]).toMatchObject({status:'failed',attempts:3,nextRetryAt:null});
+  await stop(); stop=undefined;
+  mocks.state.mockResolvedValue({status:'failed',attempts:3,nextRetryAt:null});
+  mocks.resume.mockResolvedValue(undefined);
+  stop=await startPublicationMaintenance();
+  await vi.waitFor(()=>expect(mocks.query).toHaveBeenCalledWith("DELETE FROM operational_state WHERE key='telegram_publication_maintenance'"));
+  expect(mocks.resume).toHaveBeenCalledTimes(4);
 });

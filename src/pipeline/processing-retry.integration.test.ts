@@ -100,16 +100,48 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     expect(mocks.empty).not.toHaveBeenCalled();
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[automatic])).rows).toEqual([{status:'completed'}]);
   });
-  it('processes newest due intake before a large old backlog without letting a future retry block it', async () => {
-    const old = await batch('queued'); await item(old,'Old release.');
-    await database.db.query("UPDATE processing_batches SET cutoff_at=now()-interval '7 days',started_at=now()-interval '7 days' WHERE id=$1", [old]);
-    const future = await batch('waiting'); await item(future,'Future retry.');
-    await database.db.query("UPDATE processing_batches SET cutoff_at=now()+interval '1 second',next_retry_at=now()+interval '1 hour' WHERE id=$1", [future]);
-    const recent = await batch('queued'); const revision = await item(recent,'Recent new release.');
+  it('processes least-recently-served intake before newer pending batches and ignores future retries', async () => {
+    const old=await batch('queued'); await item(old,'Old release.');
+    await database.db.query("UPDATE processing_batches SET cutoff_at=now()-interval '2 days',last_served_at=now()-interval '2 days' WHERE id=$1",[old]);
+    const future=await batch('waiting'); await item(future,'Future retry.');
+    await database.db.query("UPDATE processing_batches SET next_retry_at=now()+interval '1 hour',last_served_at=now()-interval '3 days' WHERE id=$1",[future]);
+    const recent=await batch('queued'); await item(recent,'Recent new release.');
+    const served: string[]=[];
+    mocks.collection.mockImplementation(async (id:string)=>{served.push(id); throw new ProcessingYield();});
+    const process=(await import('./batches.js')).processBatch;
+    await process(false,true);
+    expect(served).toEqual([old]);
+    // Make the checkpoint due again. Its new last-served timestamp must give another batch a turn.
+    await database.db.query("UPDATE processing_batches SET next_retry_at=now()-interval '1 second' WHERE id=$1",[old]);
+    await process(false,true);
+    expect(served).toEqual([old,recent]);
+    expect((await database.db.query('SELECT retry_attempts FROM processing_batches WHERE id=ANY($1::uuid[])',[served])).rows)
+      .toEqual([{retry_attempts:0},{retry_attempts:0}]);
+  });
+  it('bounds repeated batch infrastructure failures instead of resetting to attempt one', async () => {
+    const id=await batch('queued');
+    mocks.collection.mockRejectedValue(new Error('offline'));
+    for(let attempt=1;attempt<=settings.requestMaxAttempts;attempt++) {
+      await expect((await import('./batches.js')).processBatch(false,true)).rejects.toThrow('offline');
+      const row=(await database.db.query('SELECT status,retry_attempts,next_retry_at FROM processing_batches WHERE id=$1',[id])).rows[0];
+      expect(row).toMatchObject({status:attempt<settings.requestMaxAttempts ? 'waiting' : 'failed',retry_attempts:attempt});
+      if(attempt<settings.requestMaxAttempts) expect(row.next_retry_at.getTime()).toBeGreaterThan(Date.now());
+      await database.db.query('UPDATE processing_batches SET next_retry_at=NULL WHERE id=$1',[id]);
+    }
+    await (await import('./batches.js')).processBatch(false,true,id);
+    expect(mocks.collection).toHaveBeenCalledTimes(settings.requestMaxAttempts);
+  });
+  it('preserves a collection-owned terminal decision without buying another batch retry', async () => {
+    const id=await batch('queued');
+    mocks.collection.mockImplementation(async () => {
+      await database.db.query("UPDATE processing_batches SET status='failed',error_code='telegram_collection_failed',next_retry_at=NULL WHERE id=$1",[id]);
+      throw new Error('terminal connector failure');
+    });
+    await expect((await import('./batches.js')).processBatch(false,true)).rejects.toThrow('terminal connector failure');
+    expect((await database.db.query('SELECT status,retry_attempts,error_code FROM processing_batches WHERE id=$1',[id])).rows)
+      .toEqual([{status:'failed',retry_attempts:0,error_code:'telegram_collection_failed'}]);
     await (await import('./batches.js')).processBatch(false,true);
-    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1', [revision])).rows[0]?.story_id).toBeTruthy();
-    expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[old])).rows).toEqual([{status:'queued'}]);
-    expect((await database.db.query('SELECT count(*)::int AS n FROM stage_state WHERE batch_id=$1',[old])).rows).toEqual([{n:0}]);
+    expect(mocks.collection).toHaveBeenCalledOnce();
   });
   it('does not let reopened association-only batches starve unfinished news', async () => {
     const news=await batch('queued'); const revision=await item(news,'Recent real release.');

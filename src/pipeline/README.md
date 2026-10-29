@@ -4,10 +4,10 @@
 - Extract exact source passages in one structured model call.
   Local validation checks coordinates, overlap and complete coverage.
   Save successful extraction once, including empty results.
-- Compare each report with every retained eligible story group.
-  Bounded, cached chunks preserve full reports and provenance.
+- Compare each report with every retained eligible story group using JEV.
+  Cached pair decisions preserve full reports and provenance.
   Attach only to the highest-ranked `same` candidate.
-  Record other `same` matches as `related`, without extra comparisons.
+  Leave additional `same` matches unrecorded, never relabel them as `related`.
   Related stories stay separate and never contribute generation material.
 - Classify item links together, then read and assess relevant documents.
   Link relevance and primary origin do not prove factual verification.
@@ -28,8 +28,9 @@ Stories use only the `story-failures.ts` marker, not stage retry receipts.
 Checkpoints and successful calls do not consume attempts.
 Healthy siblings continue while failed units wait or exhaust their budget.
 
-`GROUPING_MAX_PROMPT_BYTES` defaults to 98304; candidates per chunk to 32.
-Complete pairs that exceed the byte limit fail rather than lose evidence.
+Grouping uses JEV directly, once per uncached incoming/candidate pair, with full
+reports, source URLs and publication times. Completed pairs survive checkpoints
+and candidate reordering. JEV context limits fail without truncation or a Pi fallback.
 Private inference requires approval or `ALLOW_PRIVATE_INFERENCE=true`.
 `NEWS_SUMMARY_MAX_CHARS` defaults to 1000. Headlines allow 180 characters.
 Links render separately. Published text stays immutable; matching reports

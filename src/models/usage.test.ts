@@ -1,13 +1,15 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { infer, type Dispatch } from './inference.js';
 import { RequestFault } from './errors.js';
 import { codexUsage, operationStage, sdkUsage, type UsageCall } from './usage.js';
 import { retryUsageWrites } from './usage-delivery.js';
 
 const directories: string[] = [];
+beforeEach(()=>vi.useFakeTimers({toFake:['Date']}));
 afterEach(async () => {
+  vi.useRealTimers();
   for (const path of directories.splice(0)) await rm(path, { recursive: true, force: true });
 });
 async function outbox(): Promise<string> {
@@ -94,6 +96,7 @@ describe('per-call accounting boundary', () => {
     })).resolves.toBe('ok');
     const call = write.mock.calls[0]?.[0];
     expect(report).toHaveBeenCalledWith(call?.id, 'database_write');
+    vi.setSystemTime(Date.now()+30_001);
     expect(await retryUsageWrites({ directory, record: write, report })).toBe(1);
     expect(write.mock.calls[1]?.[0]).toEqual(call);
     expect(await readdir(directory)).toEqual([]);
@@ -115,6 +118,7 @@ describe('per-call accounting boundary', () => {
       reportUsageFailure: () => { throw new Error('Broken logger'); },
     })).rejects.toMatchObject({ metadata: { kind: 'throttled', retryable: true, status: 429,
       attempt: 2, nextRetryAt: expect.any(String) } });
+    vi.setSystemTime(Date.now()+30_001);
     expect(await retryUsageWrites({ directory, record: write })).toBe(1);
     expect(write.mock.calls[1]?.[0]).toEqual(write.mock.calls[0]?.[0]);
     expect(execute).toHaveBeenCalledOnce();

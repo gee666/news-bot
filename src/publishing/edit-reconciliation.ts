@@ -1,3 +1,5 @@
+import { defaultSettings, type AppSettings } from '../settings.js';
+import { settleEdit } from './edit-settlement.js';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import { publicationSnapshotSchema } from '../types.js';
@@ -36,11 +38,42 @@ async function ordinaryMessage(publication: Publication, expected: string): Prom
 
 /** null means no ambiguous delivery exists. Reconciliation observes one recorded request; it never sends. */
 export async function reconcileUnknownEdit(publication: Publication,
-  reader: (publication: Publication) => Promise<string | null> = readMessageFingerprint): Promise<boolean | null> {
+  reader: (publication: Publication) => Promise<string | null> = readMessageFingerprint,
+  settings: AppSettings = defaultSettings): Promise<boolean | null> {
   const rows = (await db.query<EditAttempt>(attemptsQuery,[publication.id])).rows;
   if (!rows.length) return null;
   const attempt = rows[0];
-  if (rows.length !== 1 || !attempt || !ready(attempt) || publication.status !== 'published' || !publication.message_id) return false;
+  if (rows.length>1) {
+    await transaction(async client => {
+      await settleEdit(client,publication.id,publication.pending_snapshot_id ?? publication.snapshot_id,'publication_reconciliation_ambiguous');
+      await client.query(`UPDATE request_attempts SET status='failed',next_retry_at=NULL,finished_at=now(),
+        error_code='publication_reconciliation_ambiguous',response_metadata=response_metadata||'{"terminalUnknown":true}'::jsonb
+        WHERE publication_id=$1 AND operation='edit' AND status IN ('running','unknown')`,[publication.id]);
+    });
+    return false;
+  }
+  if (!attempt || !ready(attempt) || publication.status !== 'published' || !publication.message_id) return false;
+  const metadataRecord=z.record(z.string(),z.unknown()).safeParse(attempt.response_metadata);
+  const count = z.object({ reconciliationAttempts:z.number().int().nonnegative().default(0) }).safeParse(attempt.response_metadata).data?.reconciliationAttempts ?? 0;
+  if (count >= settings.requestMaxAttempts) {
+    await transaction(client => settleEdit(client,publication.id,
+      metadataSchema.safeParse(attempt.response_metadata).data?.snapshotId ?? publication.pending_snapshot_id ?? publication.snapshot_id,'publication_reconciliation_exhausted'));
+    return false;
+  }
+  attempt.response_metadata = { ...(metadataRecord.success ? metadataRecord.data : {}), reconciliationAttempts:count+1 };
+  await db.query('UPDATE request_attempts SET response_metadata=$2 WHERE id=$1',[attempt.id,JSON.stringify(attempt.response_metadata)]);
+  const result = await observeUnknownEdit(publication,attempt,reader);
+  if (!result) {
+    const snapshotId = metadataSchema.safeParse(attempt.response_metadata).data?.snapshotId ?? publication.pending_snapshot_id ?? publication.snapshot_id;
+    if (count+1 >= settings.requestMaxAttempts) await transaction(client => settleEdit(client,publication.id,snapshotId,'publication_reconciliation_exhausted'));
+    else await db.query(`UPDATE request_attempts SET next_retry_at=$2 WHERE id=$1 AND status='unknown'`,
+      [attempt.id,new Date(Date.now()+Math.min(settings.retryMaxMs,settings.retryBaseMs * 2 ** Math.min(count,10)))]);
+  }
+  return result;
+}
+
+async function observeUnknownEdit(publication: Publication, attempt: EditAttempt,
+  reader: (publication: Publication) => Promise<string | null>): Promise<boolean> {
   const parsed = metadataSchema.safeParse(attempt.response_metadata);
   if (!parsed.success) return false;
   const metadata = parsed.data;

@@ -57,7 +57,7 @@ export const inferenceLimiter = new InferenceLimiter();
 export interface InferenceOptions {
   recordFailure: FailureRecorder;
   recordUsage?: UsageRecorder;
-  /** Total attempts for transport/deadline failures. Throttling is uncapped. */
+  /** Total attempts, including throttling and transport/deadline failures. */
   requestMaxAttempts?: number;
 }
 export interface Dispatch {
@@ -77,7 +77,7 @@ export interface UsageAccounting {
 
 export async function infer<T>(
   service: ModelFailure["service"], timeoutMs: number, context: RequestContext,
-  recordFailure: FailureRecorder, execute: (dispatch: Dispatch) => Promise<T>, requestMaxAttempts = 5,
+  recordFailure: FailureRecorder, execute: (dispatch: Dispatch) => Promise<T>, requestMaxAttempts = 3,
   accounting?: UsageAccounting,
 ): Promise<T> {
   if (!context.operationId || !Number.isSafeInteger(context.attempt ?? 1) || (context.attempt ?? 1) < 1) {

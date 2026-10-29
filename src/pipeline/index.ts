@@ -51,7 +51,7 @@ export async function createPipeline(): Promise<Pipeline> {
     await withLease('news-bot-pipeline', async () => {
       await drainScheduledIntake();
       await processBatch(manual, slot ? true : recoverOnly);
-      const active = await db.query("SELECT 1 FROM processing_batches WHERE status IN ('queued','collecting','processing','waiting','failed') AND completed_at IS NULL LIMIT 1");
+      const active = await db.query("SELECT 1 FROM processing_batches WHERE status IN ('queued','collecting','processing','waiting') AND completed_at IS NULL LIMIT 1");
       if (active.rows.length) return;
       const settings = await getSettings();
       const pending = await db.query("SELECT 1 FROM embedding_configs WHERE status='pending'");
@@ -63,7 +63,7 @@ export async function createPipeline(): Promise<Pipeline> {
     await withLease('news-bot-digest-refresh', async () => {
       const settings = await getSettings();
 
-      await operationalWork('pipeline_digest', settings, manual, async () => {
+      await operationalWork('pipeline_digest', settings, manual || scheduled, async () => {
         const judgments = new Judgments(settings);
         try {
           let partial = false;
