@@ -6,7 +6,10 @@ post IDs, and attachments are never replies or navigation targets.
 
 The publisher freezes up to ten distinct images/videos before dispatch. Images
 that Telegram cannot send as photos are normalized. Native photos/videos share
-batches; documents use separate batches. Each batch must have a receipt or a
+batches; documents use separate batches. Batches are limited to ten files and
+45 MB of combined file bytes, leaving room for multipart overhead below Telegram's
+request limit. A larger inherited media selection is split into multiple uploads
+without dropping files from the frozen selection. Each batch must have a receipt or a
 terminal outcome before text. Temporary upload bytes expire after seven days,
 including unresolved requests.
 

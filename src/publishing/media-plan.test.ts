@@ -111,6 +111,22 @@ describe('temporary durable media plan', () => {
 
 
 describe('original-format plan partitioning', () => {
+  it('splits the inherited picture and seven videos from post 2031 by total upload bytes', () => {
+    const sizes = [795526, 9534417, 20533285, 6192958, 3535659, 22033699, 4001341, 17119076];
+    const items = sizes.map((size, index) => ({ type: index === 0 ? 'image' as const : 'video' as const,
+      mimeType: index === 0 ? 'image/png' : 'video/mp4', data: Buffer.alloc(size) }));
+    const batches = partitionMedia(items);
+    expect(batches.map(batch => batch.length)).toEqual([5, 3]);
+    expect(batches.flat()).toEqual(items);
+    expect(batches.every(batch => batch.reduce((bytes, item) => bytes + item.data.length, 0) <= 45_000_000)).toBe(true);
+  });
+  it('allows the exact byte boundary and starts a new batch for the next byte', () => {
+    const items = [20_000_000, 25_000_000, 1].map(size => ({ type: 'video' as const,
+      mimeType: 'video/mp4', data: Buffer.alloc(size) }));
+    expect(partitionMedia(items).map(batch => batch.length)).toEqual([2, 1]);
+    expect(() => partitionMedia([{ ...items[0]!, data: Buffer.alloc(45_000_001) }]))
+      .toThrow('publication_media_too_large');
+  });
   it('keeps contiguous document/native buckets in order and splits each at ten', () => {
     const native = Array.from({ length: 11 }, (_, index) => ({ type: 'image' as const, mimeType: 'image/png', data: Buffer.from(`png${index}`) }));
     const documents = [

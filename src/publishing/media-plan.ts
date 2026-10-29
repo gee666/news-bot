@@ -3,7 +3,7 @@ import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { publicationMedia } from '../media/story-media.js';
 import { normalizeImage } from '../media/codec.js';
-import { BotError, MAX_ALBUM_MEDIA, mediaUploadType, type PublicationMedia } from './bot-api.js';
+import { BotError, MAX_ALBUM_MEDIA, MAX_MEDIA_BATCH_BYTES, mediaUploadType, type PublicationMedia } from './bot-api.js';
 import type { Publication } from './store.js';
 
 export function deduplicateMedia(media: PublicationMedia[]): Array<PublicationMedia & { digest: string }> {
@@ -26,19 +26,24 @@ export function deduplicateMedia(media: PublicationMedia[]): Array<PublicationMe
   });
 }
 
-/** Telegram permits photo/video albums together, but documents need their own albums. */
+/** Bound the entire upload, not just each file. Documents need separate albums. */
 export function partitionMedia<T extends PublicationMedia>(media: T[]): T[][] {
   const batches: T[][] = [];
   let batch: T[] = [];
   let documents = false;
+  let bytes = 0;
   for (const item of media) {
+    if (item.data.length > MAX_MEDIA_BATCH_BYTES) throw new BotError('publication_media_too_large', 'failed');
     const document = mediaUploadType(item) === 'document';
-    if (batch.length && (batch.length === 10 || document !== documents)) {
+    if (batch.length && (batch.length === MAX_ALBUM_MEDIA || document !== documents
+      || bytes + item.data.length > MAX_MEDIA_BATCH_BYTES)) {
       batches.push(batch);
       batch = [];
+      bytes = 0;
     }
     documents = document;
     batch.push(item);
+    bytes += item.data.length;
   }
   if (batch.length) batches.push(batch);
   return batches;

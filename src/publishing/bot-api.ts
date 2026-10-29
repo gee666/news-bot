@@ -45,6 +45,8 @@ export function isTelegramPreconnectFailure(error: unknown): boolean {
 }
 
 export const MAX_ALBUM_MEDIA = 10;
+// Leave room below Telegram's 50 MB request limit for multipart fields and headers.
+export const MAX_MEDIA_BATCH_BYTES = 45_000_000;
 
 const messageSchema = z.object({ message_id: z.number().int().positive(), chat: z.object({ id: z.number().int() }) });
 const userSchema = z.object({ id: z.number().int().positive(), is_bot: z.boolean() });
@@ -136,6 +138,9 @@ export class BotApi {
     if (!media.length || media.length > 10
       || media.some(item => !item.data.length || !(item.type === 'image' || item.type === 'video'))) {
       throw new BotError('telegram_media_invalid', 'failed');
+    }
+    if (media.reduce((bytes, item) => bytes + item.data.length, 0) > MAX_MEDIA_BATCH_BYTES) {
+      throw new BotError('publication_media_too_large', 'failed');
     }
     const uploads = media.map(mediaUploadType);
     const documents = uploads.every(type => type === 'document');

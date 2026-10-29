@@ -7,6 +7,14 @@ const token = '123:synthetic';
 function response(body: object, status = 200): Response { return new Response(JSON.stringify(body),{ status }); }
 
 describe('Telegram Bot API', () => {
+  it('rejects oversized total uploads before making a network request', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const media = [23_000_000, 23_000_000].map(size => ({ type: 'video' as const,
+      mimeType: 'video/mp4', data: Buffer.alloc(size) }));
+    await expect(new BotApi(token, fetcher).sendMedia('-100123', undefined, media))
+      .rejects.toMatchObject({ code: 'publication_media_too_large', outcome: 'failed' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it.each(['9','0',''])('rejects text/media reply references %j before any network request', async replyTo => {
     const fetcher = vi.fn<typeof fetch>(); const api = new BotApi(token,fetcher);
     await expect(api.send('-100123',message,replyTo)).rejects.toMatchObject({ code:'publication_replies_forbidden',outcome:'failed' });
