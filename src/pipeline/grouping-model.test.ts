@@ -54,6 +54,21 @@ it('compares every retained group in bounded requests with complete report prove
   expect(request?.systemPrompt).toContain('Time proximity alone never makes unrelated subjects same');
   expect(request?.systemPrompt).toContain('joining genuinely different developments with and');
 });
+it('keeps vendor-roundup announcements distinct in the existing grouping prompt without extra calls', async () => {
+  const url = 'https://blogs.nvidia.com/blog/local-ai-rtx-spark-laptops-updates-models-agents-games/';
+  const incoming = report('S-GAME launches Phantom Blade Zero with NVIDIA graphics support on RTX Spark.', url);
+  const candidate = report('Liquid AI releases LFM3 models with local RTX Spark support.', url);
+  const generator = { generate: vi.fn(async (request: PiRequest) => {
+    expect(request.systemPrompt).toContain('A vendor roundup is a container, not one event');
+    expect(request.systemPrompt).toContain('share sourceUrl, publication time, vendor hardware or platform support');
+    expect(request.systemPrompt).toContain('Liquid AI releasing LFM3 models versus S-GAME launching Phantom Blade Zero with NVIDIA graphics support are UNRELATED');
+    expect(request.systemPrompt).toContain('one shared occurrence, not separate products in a vendor update');
+    return modelResult({ matches: [{ storyId: candidate.id, relation: 'unrelated', relatedEvidence: null }] });
+  }) };
+  expect(await groupReport(incoming, [candidate], defaultSettings, context, generator))
+    .toEqual([{ storyId: candidate.id, relation: 'unrelated' }]);
+  expect(generator.generate).toHaveBeenCalledOnce();
+});
 it.each(['same', 'unrelated', 'related'] as const)('requires nullable evidence in the provider schema for %s decisions', async relation => {
   const incoming = report('A discovered a PHP flaw.');
   const candidate = report('B shut down because of the PHP flaw.');
