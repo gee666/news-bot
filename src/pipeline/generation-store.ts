@@ -18,7 +18,7 @@ const storySchema = z.object({
   headline: z.string().nullable(), summary: z.string().nullable(), researched: z.boolean(),
   translated_excerpt: z.string().nullable(), content_version: z.number().int(), meaningful_hash: z.string().nullable(),
 });
-export const GENERATION_VERSION = 'generation-v14-retained-editions';
+export const GENERATION_VERSION = 'generation-v15-primary-editions';
 const timestampSchema = z.union([z.date().transform(value => value.toISOString()), z.iso.datetime({ offset: true })]);
 const mentionSchema = z.object({ id: z.uuid(), text: z.string(), access: accessSchema, original_url: z.string().nullable(),
   media: z.array(z.unknown()).nullish(),
@@ -172,6 +172,7 @@ export interface GeneratedStory {
   review?: GenerationReview;
   sourceUrls?: string[];
   primarySourceUrls?: string[];
+  secondarySourceUrls?: string[];
 }
 
 export async function saveGenerations(inputs: StoryInput[], values: GeneratedStory[], settings: AppSettings): Promise<void> {
@@ -186,6 +187,7 @@ export async function saveGenerations(inputs: StoryInput[], values: GeneratedSto
       if (value.review) generationReviewSchema.parse(value.review);
       if (value.sourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.sourceUrls);
       if (value.primarySourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.primarySourceUrls);
+      if (value.secondarySourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.secondarySourceUrls);
       const stored = { ...value, contentVersion: input.story.content_version, evidenceSignature: signature };
       const updated = await client.query(`UPDATE stories SET headline = $2, summary = $3, translated_excerpt = $4,
         researched = $5, updated_at = now() WHERE id = $1 AND content_version = $6

@@ -1,11 +1,11 @@
 import { db, transaction } from '../db.js';
-import { publicationSnapshotSchema, type PublicationSource } from '../types.js';
+import { publicationSnapshotSchema, type PublicationSource, type GenerationReview } from '../types.js';
 import { publicationThreadEdges } from './generation-context.js';
 
 /** A sent post in a follow-up thread, as readers saw it. */
 export interface ThreadPost {
   storyId: string; headline: string; details: string; earlier?: string;
-  destinationId: string; messageId: string; sources: PublicationSource[];
+  destinationId: string; messageId: string; sources: PublicationSource[]; review?: GenerationReview;
 }
 
 const published = `p.message_id IS NOT NULL AND p.published_at IS NOT NULL`;
@@ -28,7 +28,8 @@ export async function publishedThread(storyId: string, query = db.query.bind(db)
     const snapshot = publicationSnapshotSchema.parse(row.content);
     return { storyId: row.story_id, headline: snapshot.headline, details: snapshot.details,
       ...(snapshot.earlier ? { earlier: snapshot.earlier } : {}),
-      destinationId: row.destination_id, messageId: row.message_id, sources: snapshot.sources };
+      destinationId: row.destination_id, messageId: row.message_id, sources: snapshot.sources,
+      ...(snapshot.review ? { review: snapshot.review } : {}) };
   }).filter((post, index, posts) => posts.findIndex(other => other.storyId === post.storyId) === index);
 }
 

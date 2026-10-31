@@ -189,7 +189,7 @@ describe('generation database boundary', () => {
     expect(await alreadyGenerated(input, defaultSettings)).toBe(true);
     expect(mocks.query.mock.calls[0]?.[0]).toContain("result->>'headline' = $5");
     expect(mocks.query.mock.calls[0]?.[0]).toContain('expires_at > now()');
-    expect(GENERATION_VERSION).toBe('generation-v14-retained-editions');
+    expect(GENERATION_VERSION).toBe('generation-v15-primary-editions');
     expect(mocks.query.mock.calls[0]?.[0]).toContain(`prompt_version = '${GENERATION_VERSION}'`);
   });
 

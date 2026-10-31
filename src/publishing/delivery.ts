@@ -1,3 +1,4 @@
+import { replacementAdmitted } from './replacements.js';
 import { settleEdit } from './edit-settlement.js';
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
@@ -5,7 +6,7 @@ import type { AppSettings } from '../settings.js';
 import { BotApi, BotError, telegramTimeouts } from './bot-api.js';
 import { render, renderPublication, PublicationRenderError, type RenderedMessage } from './render.js';
 import { readSentMessage, ReconciliationReviewError, sendMetadata } from './reconciliation.js';
-import { settleExpiredPublications, publicationEditSelect, rateLimited, type Publication } from './store.js';
+import { settleExpiredPublications, rateLimited, type Publication } from './store.js';
 import { publicationAdmission, recordAdmissionDenial, type DeliveryAuthorization } from './freshness.js';
 import { reconcileUnknownEdit } from './edit-reconciliation.js';
 import { preparePublicationMedia } from './media-plan.js';
@@ -58,23 +59,7 @@ export async function beginAttempt(publication: Publication, operation: 'send' |
       if(!settings) throw new Error('Replacement deletion requires current settings');
       const proof=z.object({canonicalPublicationId:z.uuid(),canonicalSnapshotId:z.uuid()}).parse(metadata);
       await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
-      const canonical=(await client.query<Publication>(`${publicationEditSelect} WHERE p.id=$1`,[proof.canonicalPublicationId])).rows[0];
-      if(!canonical || canonical.snapshot_id!==proof.canonicalSnapshotId || canonical.pending_snapshot_id
-        || !(await publicationAdmission(client,canonical,settings,'edit')).allowed) return null;
-      const duplicate=(await client.query<Publication & {same_story:boolean}>(`SELECT d.*,snap.content,
-        coalesce(da.canonical_story_id,dm.canonical_story_id,d.story_id)=coalesce(ca.canonical_story_id,cm.canonical_story_id,c.story_id) AS same_story
-        FROM publication_replacements r JOIN publications d ON d.id=r.duplicate_publication_id
-        JOIN publication_snapshots snap ON snap.id=d.snapshot_id JOIN publications c ON c.id=r.canonical_publication_id
-        LEFT JOIN story_publication_aliases da ON da.publication_id=d.id LEFT JOIN story_merges dm ON dm.merged_story_id=d.story_id
-        LEFT JOIN story_publication_aliases ca ON ca.publication_id=c.id LEFT JOIN story_merges cm ON cm.merged_story_id=c.story_id
-        WHERE d.id=$1 AND r.status='pending' AND r.canonical_publication_id=$2 AND r.canonical_snapshot_id=$3
-          AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key='publication_removal:'||d.id::text)
-          AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=d.id AND a.operation<>'delete' AND a.status IN('running','unknown'))
-        FOR UPDATE OF d,r`,[publication.id,proof.canonicalPublicationId,proof.canonicalSnapshotId])).rows[0];
-      if(!duplicate || !duplicate.same_story || duplicate.status!=='published' || duplicate.pending_snapshot_id
-        || duplicate.message_id!==publication.message_id || duplicate.destination_id!==publication.destination_id
-        || duplicate.snapshot_id!==publication.snapshot_id || duplicate.bot_id!==canonical.bot_id
-        || duplicate.destination_id!==canonical.destination_id) return null;
+      if (!await replacementAdmitted(client,publication,settings,proof)) return null;
     }
     const history = (await client.query<{ count: number; next:Date | null }>(`SELECT count(*)::int AS count,
       max(next_retry_at) FILTER(WHERE status='retryable') AS next FROM request_attempts

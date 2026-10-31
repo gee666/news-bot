@@ -42,13 +42,13 @@ describe('generation source selection', () => {
     if (!presentation.presentationVersion) expect(snapshot).not.toHaveProperty('presentationVersion');
     expect((await snapshotFor(client(), story)).presentationVersion).toBe(1);
   });
-  it('filters media navigation only for new presentation, retaining exact historical links and factual sources', async () => {
+  it('omits deleted-post navigation for both presentation versions without removing factual sources', async () => {
     const album = 'https://t.me/c/123/1';
     const inherited = { ...source('https://t.me/c/123/99'), previousPublication:true as const };
     const options = { posts:[post('1',[inherited])],blockedNavigation:[album,inherited.url,xorUrl] };
     const legacy = await snapshotFor(client(options),story,undefined,{ presentation:{} });
     const current = await snapshotFor(client(options),story);
-    expect(legacy.sources.filter(source => source.previousPublication).map(source => source.url)).toEqual([inherited.url,album]);
+    expect(legacy.sources.filter(source => source.previousPublication)).toEqual([]);
     expect(current.sources.filter(source => source.previousPublication)).toEqual([]);
     expect(current.sources.find(source => source.url === xorUrl)).toEqual(legacy.sources.find(source => source.url === xorUrl));
     expect(current.sources.filter(source => !source.previousPublication)).toEqual(legacy.sources.filter(source => !source.previousPublication));
@@ -63,23 +63,40 @@ describe('generation source selection', () => {
     expect(snapshot.sources.find(source => source.url === reportUrl)?.primary).toBe(true);
     expect(snapshot.sources.find(source => source.url === xorUrl)?.primary).toBe(false);
   });
-  it('includes every earlier post oldest first, inherits every source and retained previous-publication link', async () => {
+  it('cites an unfetched relevant secondary origin without rewriting the reused story text', async () => {
+    const secondary = 'https://press.example/new-report';
+    const stale = 'https://press.example/no-current-association';
+    const db = client({ receipt: { primarySourceUrls: [reportUrl], secondarySourceUrls: [secondary,stale] },
+      referenced: [secondary] });
+    const snapshot = await snapshotFor(db,story);
+    expect(snapshot).toMatchObject({ headline:story.headline,details:story.summary,detailsKind:'summary' });
+    expect(snapshot.sources).toContainEqual({ url:secondary,label:'press.example/new-report',primary:false,
+      access:'unknown',classification:'relevant' });
+    expect(snapshot.sources.find(source => source.url===reportUrl)?.primary).toBe(true);
+    expect(snapshot.sources.some(source => source.url===stale)).toBe(false);
+    const referenceQuery = db.query.mock.calls.find(([sql]) => sql.includes('SELECT DISTINCT l.url'));
+    expect(referenceQuery?.[0]).toContain("i.current_revision_id=l.revision_id");
+    expect(referenceQuery?.[0]).toContain("ml.classification='relevant'");
+    expect(referenceQuery?.[0]).toContain("sl.classification='relevant'");
+    expect(db.query).toHaveBeenCalledWith(expect.stringContaining('SELECT DISTINCT l.url'),
+      [story.id,[reportUrl,secondary,stale]]);
+    expect(render(snapshot).links.map(link => link.url)).toContain(secondary);
+    expect(snapshot).not.toHaveProperty('earlier');
+  });
+  it('inherits earlier factual sources without an earlier-summary or previous-publications section', async () => {
     const primary = source('https://author.org/first', true); const secondary = source('https://press.org/second');
     const oldLink: PublicationSource = { ...source('https://t.me/c/123/0'), previousPublication: true };
     const db = client({ receipt: { earlierSummary: 'Сводка всех прежних сообщений' },
       posts: [post('1', [primary]), post('2', [secondary, oldLink]), post(story.id, [])] });
     const snapshot = await snapshotFor(db, story);
-    expect(snapshot.earlier).toBe('Сводка всех прежних сообщений');
-    expect(snapshot.sources.filter(source => source.previousPublication)).toEqual([
-      oldLink,
-      { ...source('https://t.me/c/123/1'), label: 'Новость 1', previousPublication: true },
-      { ...source('https://t.me/c/123/2'), label: 'Новость 2', previousPublication: true },
-    ]);
+    expect(snapshot).not.toHaveProperty('earlier');
+    expect(render(snapshot).plainText).not.toContain('Сводка всех прежних сообщений');
+    expect(snapshot.sources.filter(source => source.previousPublication)).toEqual([]);
     expect(snapshot.sources).toContainEqual(primary); expect(snapshot.sources).toContainEqual(secondary);
-    expect(snapshot.sources.some(source => source.url === oldLink.url)).toBe(true);
+    expect(snapshot.sources.some(source => source.url === oldLink.url)).toBe(false);
     const call = db.query.mock.calls.find(([sql]) => sql.includes('publication_thread_edges'));
     expect(call?.[0]).toContain('p.destination_id=$2');
-    expect(render(snapshot).text).toContain('Предыдущие публикации');
+    expect(render(snapshot).text).not.toContain('Предыдущие публикации');
     expect(render(await snapshotFor(client(), story)).text).not.toContain('Предыдущие публикации');
     expect((await snapshotFor(client({ receipt: { earlierSummary: 'Не продолжение' } }), story)).earlier).toBeUndefined();
   });
@@ -97,10 +114,10 @@ describe('generation source selection', () => {
     const inherited = Array.from({ length: 100 }, (_, i) => source(`https://press.org/${i}`));
     const primary = source('https://author.org/first', true);
     const snapshot = await snapshotFor(client({ posts: [post('1', [...inherited, primary])] }), story);
-    expect(snapshot.sources).toHaveLength(105);
+    expect(snapshot.sources).toHaveLength(104);
     expect(snapshot.sources).toContainEqual(primary);
     expect(snapshot.sources.some(source => source.url === xorUrl)).toBe(true);
-    expect(snapshot.sources.at(-1)?.previousPublication).toBe(true);
+    expect(snapshot.sources.some(source => source.previousPublication)).toBe(false);
   });
   it.each([{ sourceUrls: [reportUrl] }, { sourceUrls: [xorUrl] }, { sourceUrls: [] },
     { sourceUrls: ['https://unknown.example'] }])('retains every mention when the model selects $sourceUrls', async receipt => {

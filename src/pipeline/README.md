@@ -16,8 +16,13 @@
   with the same criteria and complete input.
 - Classify primary origins. Search for missing primaries only at interest
   >=5 and at or above the configured research threshold.
-- Write Russian news from source reports, retained history and research.
-  Review it, with at most one rewrite and re-review.
+- For a first publication, research and write Russian news from source reports
+  and read documents. For later editions, a new primary triggers fresh reads of
+  all known primaries and a combined summary, without previous summaries as input.
+  Secondary-only coverage reuses the latest published headline and summary
+  verbatim and adds its sources, without research or rewriting. Failed primary
+  reads defer rebuilding rather than publishing an incomplete edition.
+  Review new drafts, with at most one rewrite and re-review.
   Review failure does not block a valid draft. Nonempty notes are shown.
 - Check completion postconditions and generation freshness once before
   a guarded update. Enqueue completed current stories for publishing.
@@ -33,8 +38,9 @@ reports, source URLs and publication times. Completed pairs survive checkpoints
 and candidate reordering. JEV context limits fail without truncation or a Pi fallback.
 Private inference requires approval or `ALLOW_PRIVATE_INFERENCE=true`.
 `NEWS_SUMMARY_MAX_CHARS` defaults to 1000. Headlines allow 180 characters.
-Links render separately. Published text stays immutable; matching reports
-create cumulative editions with verified same-event ancestry.
+Links render separately. Stored publication snapshots stay immutable. A confirmed
+replacement queues deletion of older posts with verified same-event ancestry;
+new snapshots omit previous-post links and earlier-summary sections.
 Leases serialize processing; checkpoints resume through recovery.
 See [manual runs](../../docs/run-now.md) and
 [reliability](../../docs/news-reliability.md).

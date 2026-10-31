@@ -7,6 +7,7 @@ import { recoverEdits, recoverSends } from './digest.js';
 import { guardDigestEligibility } from '../pipeline/eligibility.js';
 import { prepareUpdates, retryEdits } from './updates.js';
 import { prepareThreadUpdates } from './thread-updates.js';
+import { retryReplacements } from './repair.js';
 import { recoverPublicationMedia } from './media-plan.js';
 import { recoverDestination, reservedPublication } from './destination-order.js';
 import { settleExpiredPublications, destination, prepareDigest, publicationSelect, rateLimited, state, type Publication } from './store.js';
@@ -112,6 +113,7 @@ export async function publishRunNow(settings: AppSettings, runId: string, storyI
         AND source->>'url' IN(SELECT 'https://t.me/c/'||substring(destination_id from 5)||'/'||message_id
           FROM publications WHERE id=ANY($2::uuid[]) AND message_id IS NOT NULL)))`, [destinationId,ids])).rows.map(row => row.id);
   if (navigationIds.length && !await rateLimited()) await retryEdits(api,current,destinationId,undefined,navigationIds);
+  if (ids.length && !await rateLimited()) await retryReplacements(api,current,destinationId,ids);
   const outcomes = await db.query<{ id: string; status: string; error_code: string | null; media_status?: string }>(`SELECT id,status,error_code,media_status
     FROM publications WHERE id=ANY($1::uuid[])`, [ids]);
   for (const row of outcomes.rows) {

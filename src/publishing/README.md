@@ -24,18 +24,32 @@ Unknown outcomes are never resent. Text sends and edits can be reconciled by
 reading the channel. Unknown media batches retain diagnostic state without
 blocking canonical text; they are not guessed from captions or retried blindly.
 
-Existing posts are edited, never republished. `thread-updates.ts` stages UPD
-markers and related links inside the canonical post. Text posts use
-`editMessageText`; existing album posts use `editMessageCaption`, limited to
-1024 characters. Navigation-v2 re-stamping remains for unstamped stored posts.
-An edit that cannot fit is skipped and records
-`publication_navigation_requires_new_edition`.
+A newer confirmed post for the same verified event replaces older posts by
+deleting them, not by adding UPD edits. `replacements.ts` stages durable
+`publication_replacements` records only after the successor's canonical text
+receipt is stored. It requires the same bot and destination. Related events
+and unclassified legacy thread links do not authorize deletion.
+
+New snapshots retain inherited factual sources, but contain no `earlier`
+summary or previous-publication links. Frozen legacy snapshots remain readable
+for reconciliation. `thread-updates.ts` stages replacements before related-link
+repairs and retires old previous-post links as hidden audit. Related-link and
+source repairs still use `editMessageText`, or `editMessageCaption` for legacy
+albums with a 1024-character limit. An edit that cannot fit is skipped and
+records `publication_navigation_requires_new_edition`.
 
 `digest.ts` and `run-now.ts` resume durable work under the digest lease.
 `maintenance.ts` runs recovery without selecting new stories.
 `verifyBot` sends and edits one registered technical test while publishing is enabled.
-The production replacement retry in `repair.ts` only finishes already-recorded
-replacement deletions. There is no operator repair or approval entry point.
+`repair.ts` resumes replacement deletions and refreshes pending proofs against
+the latest confirmed survivor without resetting attempt counts or cooldowns.
+Each delete rechecks the stored proof, current publishing admission and verified
+same-event identity. Unknown edits block deletion until reconciled. Known media
+siblings are deleted before canonical text, retaining per-item progress. Unknown
+old media receipts require review. Unknown deletes, including interrupted running
+attempts after restart, are terminal and never blindly resent. Manual runs only
+delete predecessors of their selected posts. There is no operator repair or
+approval entry point.
 
 Permanent edit admission denials retire the pending snapshot. Per-snapshot settlement records prevent staging unchanged navigation or source repairs again. Unknown edits get at most `requestMaxAttempts` read-only reconciliation attempts, with backoff. Exhaustion preserves a terminal ambiguity marker, so recovery cannot blindly resend the same attempted snapshot. Different desired content can get its own edit budget. Ambiguous duplicate edit attempts stop immediately for review.
 

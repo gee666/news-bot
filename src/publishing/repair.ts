@@ -1,3 +1,4 @@
+import { prepareReplacements } from './replacements.js';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { BotApi, BotError } from './bot-api.js';
@@ -7,8 +8,19 @@ import { publicationSelect, rateLimited, type Publication } from './store.js';
 
 interface Replacement { duplicate_publication_id: string; canonical_publication_id: string; canonical_snapshot_id: string }
 
-/** Delete only durable bot-owned replacement records whose canonical full edit is still current. */
-export async function retryReplacements(api: BotApi, settings: AppSettings, destinationId: string): Promise<number> {
+/** Delete only durable bot-owned replacement records with a confirmed current survivor. */
+export async function retryReplacements(api: BotApi, settings: AppSettings, destinationId: string, latestPublicationIds?: string[]): Promise<number> {
+  await transaction(async client => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
+    // A crash after dispatch has an unknown outcome. Never repeat that delete blindly.
+    await client.query(`UPDATE request_attempts a SET status='unknown',error_code='restart_delete_unknown',finished_at=now()
+      FROM publications p WHERE p.id=a.publication_id AND p.destination_id=$1
+        AND a.operation='delete' AND a.status='running'`, [destinationId]);
+    await client.query(`UPDATE publication_replacements r SET status='failed',error_code='publication_delete_requires_review',next_retry_at=NULL
+      FROM publications p WHERE p.id=r.duplicate_publication_id AND p.destination_id=$1 AND r.status='pending'
+        AND EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='delete' AND a.status='unknown')`, [destinationId]);
+    await prepareReplacements(client,destinationId,latestPublicationIds);
+  });
   let deleted = 0;
   const botId = String((await api.identity()).id);
   const replacements = (await db.query<Replacement>(`SELECT r.* FROM publication_replacements r
@@ -17,7 +29,8 @@ export async function retryReplacements(api: BotApi, settings: AppSettings, dest
       AND c.status='published' AND c.format_version=1 AND c.pending_snapshot_id IS NULL AND c.snapshot_id=r.canonical_snapshot_id
       AND c.destination_id=$1 AND d.destination_id=$1 AND c.bot_id=$2 AND d.bot_id=$2
       AND d.status='published' AND d.message_id IS NOT NULL
-      AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key IN ('publication_removal:'||d.id::text,'publication_removal:'||c.id::text))`, [destinationId,botId])).rows;
+      AND ($3::uuid[] IS NULL OR c.id=ANY($3))
+      AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key IN ('publication_removal:'||d.id::text,'publication_removal:'||c.id::text))`, [destinationId,botId,latestPublicationIds ?? null])).rows;
   for (const replacement of replacements) {
     if (await rateLimited()) break;
     const publication = (await db.query<Publication>(`${publicationSelect} WHERE p.id=$1`, [replacement.duplicate_publication_id])).rows[0];

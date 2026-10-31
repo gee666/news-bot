@@ -77,7 +77,7 @@ try {
 JS
 ```
 
-Enable publishing only after verification succeeds. New coverage of a story creates a complete cumulative edition, not a replacement for the old post. Related but distinct stories stay separate and link to each other.
+Enable publishing only after verification succeeds. New coverage replaces older posts for the same verified event after the new post is confirmed. A new primary source triggers fresh reads of every primary and a new combined summary. Secondary-only coverage reuses the existing headline and summary with added sources. Related but distinct stories stay separate and link to each other.
 
 ## Settings and processing
 

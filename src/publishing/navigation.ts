@@ -4,10 +4,12 @@ import { publicationThreadEdges } from '../pipeline/generation-context.js';
 import { publicationSnapshotSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
 import { RELATED_PUBLICATION_LIMIT } from './sources.js';
 
-export const delivered = `p.status='published' AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
+export const confirmedDelivery = `p.status='published' AND p.message_id IS NOT NULL AND p.published_at IS NOT NULL
   AND p.media_status IN ('none','complete','failed','unknown')
   AND NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id AND b.status IN ('prepared','retryable','running'))
   AND NOT EXISTS(SELECT 1 FROM operational_state removed WHERE removed.key='publication_removal:'||p.id::text)
+`;
+export const delivered = `${confirmedDelivery}
   AND NOT EXISTS(SELECT 1 FROM publication_replacements r WHERE r.duplicate_publication_id=p.id)`;
 const postAddress = "'https://t.me/c/'||substring(p.destination_id from 5)||'/'||p.message_id";
 const validAddress = "p.destination_id ~ '^-100[0-9]+$' AND p.message_id ~ '^[1-9][0-9]*$'";
@@ -91,16 +93,11 @@ export async function desiredNavigation(client: Pick<PoolClient,'query'>,
   sent: PublicationSnapshot): Promise<PublicationSnapshot> {
   const related = publication.story_id ? await relatedPublicationSources(client,publication.story_id,
     publication.destination_id,publication.bot_id) : [];
-  const sameIds = publication.story_id ? await sameStoryIds(client,publication.story_id) : [];
-  const sameUrls = new Set((await client.query<{ url: string }>(`SELECT ${postAddress} AS url FROM publications p
-    WHERE p.story_id=ANY($1::uuid[]) AND p.destination_id=$2 AND p.bot_id=$3 AND p.delivery_kind<>'album' AND ${validAddress}`,
-  [sameIds,publication.destination_id,publication.bot_id])).rows.map(row => row.url));
   const relatedByUrl = new Map(related.map(source => [source.url,source]));
   const sources: PublicationSource[] = sent.sources.flatMap(source => {
     if (!isNavigationSource(source)) return [source];
-    if (source.previousPublication && sameUrls.has(source.url)) return [source];
     if (relatedByUrl.has(source.url)) return [];
-    // Retain historical links, but do not present unclassified links as same-event ancestry or sources.
+    // Keep old links as hidden audit, never as links to posts that replacements delete.
     const retained = { ...source };
     delete retained.previousPublication; delete retained.relatedPublication;
     return [{ ...retained,unverifiedPublication:true as const }];
@@ -110,18 +107,7 @@ export async function desiredNavigation(client: Pick<PoolClient,'query'>,
     sources.push({ ...source,...(old && (old.previousPublication || old.unverifiedPublication || old.legacyPublication)
       ? { legacyPublication:true as const } : {}) });
   }
-  const updatedTo = await latestUpdateTarget(client,publication.id);
   const result: PublicationSnapshot = { ...sent,sources,navigationVersion:2 };
   delete result.updatedTo; delete result.updatedToHeadline; delete result.navigationOverflow;
-  if (updatedTo) {
-    result.updatedTo=updatedTo;
-    if (sent.presentationVersion === 1) {
-      const target=(await client.query<{ headline:string }>(`SELECT snap.content->>'headline' AS headline
-        FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id
-        WHERE p.destination_id=$1 AND ${postAddress}=$2 AND p.delivery_kind<>'album' AND ${delivered}`,
-      [publication.destination_id,updatedTo])).rows[0];
-      if (target?.headline) result.updatedToHeadline=target.headline;
-    }
-  }
   return result;
 }

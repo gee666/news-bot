@@ -1,3 +1,4 @@
+import { prepareReplacements } from './replacements.js';
 import { transaction } from '../db.js';
 import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js';
 import { supersedeAttempts, type Publication } from './store.js';
@@ -6,11 +7,12 @@ import { renderPublication, PublicationRenderError } from './render.js';
 export { latestUpdateTarget } from './navigation.js';
 export const markerOnlyChange = navigationOnlyChange;
 
-/** Stage markers and related links together. Unknown edits retain their attempted snapshot. */
+/** Stage deletions before related-link repairs. Unknown edits retain their attempted snapshot. */
 export async function prepareThreadUpdates(destinationId: string, latestPublicationIds?: string[]): Promise<void> {
   if (latestPublicationIds?.length === 0) return;
   await transaction(async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
+    await prepareReplacements(client,destinationId,latestPublicationIds);
     const rows = await client.query<{ id: string; story_id: string | null; destination_id: string; bot_id: string | null;
       content: unknown; pending_content: unknown; pending_snapshot_id: string | null; delivery_kind: Publication['delivery_kind'] }>(`
       SELECT p.id,p.story_id,p.destination_id,p.bot_id,p.delivery_kind,sent.content,

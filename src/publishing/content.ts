@@ -25,7 +25,8 @@ const fetchedRelevanceCte = `fetched_assessments AS (
 import { publicUrl } from '../pipeline/research-fetch.js';
 import { sourceAuthorityRanks, generationReviewSchema, publicationSnapshotSchema, publicationSourceSchema, type PublicationSnapshot, type PublicationSource } from '../types.js';
 
-const generationMetadataSchema = z.object({ review: generationReviewSchema.optional(),primarySourceUrls:z.array(z.string()).optional(), earlierSummary:z.string().optional() });
+const generationMetadataSchema = z.object({ review: generationReviewSchema.optional(),
+  primarySourceUrls:z.array(z.string()).optional(), secondarySourceUrls:z.array(z.string()).optional() });
 
 export interface StoryContent {
   id: string; headline: string; summary: string | null; translated_excerpt: string | null;
@@ -139,7 +140,7 @@ export async function sourceInventory(client: Pick<PoolClient, 'query'>, storyId
 }
 
 export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: StoryContent,
-  receiptId?: string, destinationId?: string, options: SnapshotOptions = {}): Promise<Pick<PublicationSnapshot, 'sources' | 'earlier' | 'review'>> {
+  receiptId?: string, destinationId?: string, options: SnapshotOptions = {}): Promise<Pick<PublicationSnapshot, 'sources' | 'review'>> {
   const legacyNavigation = options.presentation !== undefined && options.presentation.presentationVersion === undefined;
   const inventory = await sourceInventory(client, story.id);
   const receipt = await client.query<{ result: unknown }>(`SELECT result FROM judgments WHERE story_id=$1
@@ -151,28 +152,26 @@ export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: 
   const mentions = await client.query<{ url: string }>(`SELECT DISTINCT jsonb_array_elements_text(metadata->'primary_source_urls') AS url
     FROM story_mentions WHERE story_id=$1 AND jsonb_typeof(metadata->'primary_source_urls')='array'`, [story.id]);
   const primary=new Set([...(metadata?.primarySourceUrls ?? []), ...mentions.rows.map(row => row.url)]);
-  const referenced=primary.size ? await client.query<{url:string}>(`SELECT DISTINCT l.url FROM item_links l
+  const referenceUrls = new Set([...primary,...(metadata?.secondarySourceUrls ?? [])]);
+  const referenced=referenceUrls.size ? await client.query<{url:string}>(`SELECT DISTINCT l.url FROM item_links l
     JOIN source_items i ON i.current_revision_id=l.revision_id WHERE l.url=ANY($2::text[]) AND (
       EXISTS(SELECT 1 FROM story_mentions m JOIN mention_links ml ON ml.mention_id=m.id
         WHERE m.story_id=$1 AND m.revision_id=l.revision_id AND ml.link_id=l.id AND ml.classification='relevant')
-      OR EXISTS(SELECT 1 FROM story_link_sources sl WHERE sl.story_id=$1 AND sl.link_id=l.id AND sl.classification='relevant'))`,[story.id,[...primary]]) : {rows:[]};
+      OR EXISTS(SELECT 1 FROM story_link_sources sl WHERE sl.story_id=$1 AND sl.link_id=l.id AND sl.classification='relevant'))`,[story.id,[...referenceUrls]]) : {rows:[]};
   const sources = mergeSources([...inventory.map(source=>({...source,
     primary:source.primary || primary.has(source.url)})),
     ...referenced.rows.map(({url})=>{const parsed=new URL(url);return {url,label:parsed.hostname+parsed.pathname,
-      primary:true,access:'unknown' as const,classification:'relevant' as const};})]);
+      primary:primary.has(url),access:'unknown' as const,classification:'relevant' as const};})]);
   const currentDestination = destinationId ?? (await client.query<{ id: string }>(
     "SELECT value->>'channelId' AS id FROM operational_state WHERE key='telegram_destination'")).rows[0]?.id;
   const thread = currentDestination ? (await publishedThread(story.id, client.query.bind(client), currentDestination))
     .filter(post => post.storyId !== story.id) : [];
-  const inherited = thread.flatMap(post => post.sources.filter(source => !source.relatedPublication && !source.unverifiedPublication));
-  const previous: PublicationSource[] = thread.flatMap(post => /^-100\d+$/u.test(post.destinationId) && /^\d+$/u.test(post.messageId) ? [{
-    label:post.headline,url:`https://t.me/c/${post.destinationId.slice(4)}/${post.messageId}`,
-    primary:false,previousPublication:true,access:'public' as const,classification:'relevant' as const,
-  }] : []);
+  // Retain factual evidence, not links to posts that the replacement will delete.
+  const inherited = thread.flatMap(post => post.sources.filter(source =>
+    !source.previousPublication && !source.relatedPublication && !source.unverifiedPublication));
   const related = currentDestination ? await relatedPublicationSources(client,story.id,currentDestination,undefined,{ includeLegacyAlbums:legacyNavigation }) : [];
-  const combined = mergeSources([...sources, ...inherited, ...previous, ...related]);
+  const combined = mergeSources([...sources, ...inherited, ...related]);
   return { sources: currentDestination && !legacyNavigation ? await textNavigationSources(client, combined, currentDestination) : combined,
-    ...(thread.length && metadata?.earlierSummary ? { earlier: metadata.earlierSummary } : {}),
     ...(metadata?.review ? { review: metadata.review } : {}) };
 }
 

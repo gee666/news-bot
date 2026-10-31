@@ -118,7 +118,7 @@ describe.skipIf(!url)('verified bounded navigation selection',()=>{
     expect((await database.db.query('SELECT id FROM publications WHERE pending_snapshot_id IS NOT NULL')).rows).toEqual([]);
     expect((await database.db.query('SELECT count(*)::int n FROM publication_snapshots')).rows[0]?.n).toBe(count);
   });
-  it('withholds old topical links and preserves every frozen link as hidden audit, leaving event text and previous links alone',async()=>{
+  it('withholds old topical links and preserves every frozen link as hidden audit, leaving event text intact and retiring previous links',async()=>{
     const target=await fixture('200',0); const previous=await fixture('90',-10);
     const related={url:'https://t.me/c/123/200',label:'Старая широкая связь',primary:false,access:'public' as const,
       classification:'relevant' as const,relatedPublication:true as const};
@@ -128,7 +128,8 @@ describe.skipIf(!url)('verified bounded navigation selection',()=>{
     await classify(own.story_id,previous.story_id,'same');
     const desired=await navigation.desiredNavigation(database.db,own,sent);
     expect(desired.sources).toContainEqual({...related,relatedPublication:undefined,unverifiedPublication:true});
-    expect(desired.sources).toContainEqual(prior);
+    expect(desired.sources).toContainEqual({...prior,previousPublication:undefined,unverifiedPublication:true});
+    expect(desired.sources.some(source=>source.previousPublication)).toBe(false);
     expect(desired).toMatchObject({headline:body.headline,details:body.details,score:body.score});
     expect(navigation.navigationOnlyChange(sent,desired)).toBe(true);
     expect(sent.sources).toContainEqual(related);

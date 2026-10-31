@@ -5,6 +5,8 @@ import { ModelRequestError, failureMetadata, RequestFault } from '../models/erro
 import { summaryImages } from '../media/story-media.js';
 import { researchStory } from './generation.js';
 import { publishedStory, alreadyGenerated, saveGenerations, loadPreviousEvidence } from './generation-store.js';
+import { readEditionPrimaries } from './research-edition.js';
+import { researchEvidence } from './research.js';
 import { publishedThread, rebaseFollowup } from './publication-thread.js';
 import { generationClient } from './generation-model.js';
 import { evidenceDocument, modelResult, storyId, storyInput } from './generation.test-helpers.js';
@@ -23,8 +25,11 @@ vi.mock('./generation-model.js', async original => ({
 vi.mock('../db.js', () => ({ db: { query: vi.fn().mockResolvedValue({ rows: [] }) } }));
 vi.mock('./publication-thread.js', () => ({ publishedThread: vi.fn(async () => []), rebaseFollowup: vi.fn(),
 }));
+vi.mock('./research-edition.js', async original => ({
+  ...await original<typeof import('./research-edition.js')>(), readEditionPrimaries: vi.fn(),
+}));
 vi.mock('./research.js', async original => ({
-  ...await original<typeof import('./research.js')>(), researchEvidence: async () => [evidenceDocument()],
+  ...await original<typeof import('./research.js')>(), researchEvidence: vi.fn(async () => [evidenceDocument()]),
 }));
 const draft = { headline: 'Acme выпустила версию 2.0', summary: 'Исправлена ошибка безопасности.',
   source_urls: ['https://example.org/release'] };
@@ -41,6 +46,8 @@ beforeEach(() => {
       ? Promise.resolve(modelResult({ primary_urls: [] })) : mocks.generate(request, context),
   });
   mocks.generate.mockReset();
+  vi.mocked(loadPreviousEvidence).mockResolvedValue([]);
+  vi.mocked(readEditionPrimaries).mockImplementation(async () => [evidenceDocument(), ...await loadPreviousEvidence(storyId)]);
 });
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -218,26 +225,26 @@ it('writes a self-contained event summary from full current and ancestor sources
     source_name:'Автор', original_url:'https://author.org/report', access:'public', published_at:null,collected_at:null }];
   mocks.input.mockResolvedValueOnce(input);
   const content = 'Полный прочитанный документ предшественника. '.repeat(500) + 'Старая цена 40 долларов.';
-  vi.mocked(loadPreviousEvidence).mockResolvedValueOnce([{ ...evidenceDocument(),
+  vi.mocked(loadPreviousEvidence).mockResolvedValue([{ ...evidenceDocument(),
     id:'77777777-7777-4777-8777-777777777777', url:'https://author.org/release', canonical_url:null,
     role:'primary', relevance:'relevant', content }]);
+  vi.mocked(generationClient).mockResolvedValue({ generate: (request, context) => request.responseSchema?.name === 'source_origins'
+    ? Promise.resolve(modelResult({ primary_urls: ['https://example.org/release'] })) : mocks.generate(request, context) });
   const cumulative = { ...draft, summary:'Acme выпустила версию 2.0, цена 40 долларов. Исправлена ошибка безопасности.',
     source_urls:['https://author.org/release','https://author.org/report'] };
   mocks.generate.mockResolvedValueOnce(modelResult(cumulative)).mockResolvedValueOnce(modelResult(passed));
   expect(await researchStory(storyId,defaultSettings)).toBe('ready');
   const request=mocks.generate.mock.calls[0]?.[0];
   const material=JSON.parse(request.prompt);
-  expect(material.previous_posts).toEqual([
-    {headline:previous.headline,summary:previous.details}, {headline:previous.headline,summary:'Продолжение'},
-  ]);
+  expect(material).not.toHaveProperty('previous_posts');
+  expect(readEditionPrimaries).toHaveBeenCalledWith(input, ['https://author.org/release', 'https://example.org/release'], defaultSettings, expect.anything());
   expect(material.mentions).toContainEqual(expect.objectContaining({text:original}));
   expect(material.reports).toContainEqual(expect.objectContaining({text:'Полный прежний отчёт с деталями.'}));
   expect(material.documents).toContainEqual(expect.objectContaining({content}));
-  expect(request.systemPrompt).toContain('пересказ ВСЕГО события');
   expect(request.systemPrompt).not.toContain('только новые сведения');
   expect(request.responseSchema.schema.required).toEqual(['headline','summary','source_urls']);
   expect(saveGenerations).toHaveBeenCalledWith([input], [expect.objectContaining({
-    summary:cumulative.summary,sourceUrls:cumulative.source_urls,primarySourceUrls:['https://author.org/release'],
+    summary:cumulative.summary,sourceUrls:cumulative.source_urls,primarySourceUrls:['https://author.org/release','https://example.org/release'],
   })], defaultSettings);
   expect(vi.mocked(saveGenerations).mock.calls[0]?.[1]?.[0]).not.toHaveProperty('earlierSummary');
 });
@@ -249,14 +256,15 @@ it('blocks private ancestor evidence before sending any text to the model', asyn
   expect(saveGenerations).not.toHaveBeenCalled();
 });
 
-it('regenerates a cached follow-up when a newer post rebases its thread', async () => {
+it('reuses the newest summary when a cached follow-up rebases without new primaries', async () => {
   vi.mocked(rebaseFollowup).mockResolvedValueOnce(true);
   vi.mocked(alreadyGenerated).mockResolvedValue(true);
   vi.mocked(publishedThread).mockResolvedValueOnce([previous]);
   mocks.generate.mockResolvedValueOnce(modelResult(draft))
     .mockResolvedValueOnce(modelResult(passed));
   await researchStory(storyId,defaultSettings);
-  expect(mocks.generate).toHaveBeenCalledTimes(2);
+  expect(mocks.generate).not.toHaveBeenCalled();
+  expect(saveGenerations).toHaveBeenCalledWith(expect.anything(), [expect.objectContaining({headline:previous.headline,summary:previous.details})],defaultSettings);
 });
 
 it('never regenerates a published story, even when forced', async () => {
@@ -293,18 +301,13 @@ it('retains every prior source URL even when the writer omits them or the origin
     .mockResolvedValueOnce(modelResult(passed));
   await researchStory(storyId,defaultSettings);
   expect(publishedThread).not.toHaveBeenCalled();
-  const request = mocks.generate.mock.calls[0]?.[0];
-  const material = JSON.parse(request.prompt);
-  expect(material.retained_sources.map((source: { url: string }) => source.url)).toEqual(sources.map(source => source.url));
-  expect(material.previous_posts[0].earlier).toBe(input.previous_posts[0]?.earlier);
-  expect(request.systemPrompt).toContain('не теряй их только из-за отсутствия оригинала');
-  expect(request.systemPrompt).toContain('не подменяй им основной сюжет');
-  expect(request.systemPrompt).toContain('сохраняя исходного участника и действие');
-  const review = mocks.generate.mock.calls[1]?.[0];
-  expect(review.systemPrompt).toContain('исходного участника, действие и предмет действия');
-  expect(JSON.parse(review.prompt).material).toEqual(material);
-  expect(saveGenerations).toHaveBeenCalledWith([input],[expect.objectContaining({ sourceUrls:sources.map(source => source.url) })],defaultSettings);
-  expect(mocks.generate).toHaveBeenCalledTimes(2);
+  expect(mocks.generate).not.toHaveBeenCalled();
+  expect(researchEvidence).not.toHaveBeenCalled();
+  expect(readEditionPrimaries).not.toHaveBeenCalled();
+  expect(saveGenerations).toHaveBeenCalledWith([input],[expect.objectContaining({
+    headline:previous.headline,summary:previous.details,
+    sourceUrls:expect.arrayContaining([...sources.map(source => source.url), 'https://example.org/post']),
+  })],defaultSettings);
 });
 
 it('enforces a 1000-character news body and a 180-character headline in the generation schema', async () => {
