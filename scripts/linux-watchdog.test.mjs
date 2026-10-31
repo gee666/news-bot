@@ -24,7 +24,7 @@ async function fixture(t, states = {}, recover = false) {
   const dir = await mkdtemp(root + 'tmp/linux-watchdog-test-');
   t.after(() => rm(dir, {recursive: true, force: true}));
   await writeFile(dir + '/calls', '');
-  for (const service of ['db', 'crawl4ai', 'app']) {
+  for (const service of ['db', 'app']) {
     await writeFile(dir + '/' + service, (states[service] ?? healthy) + '\n');
   }
   await writeFile(dir + '/docker', `#!/usr/bin/env bash
@@ -56,17 +56,17 @@ test('healthy containers are inspected without restart or upstream probes', {tim
   const result = await (await fixture(t)).check();
   assert.equal(result.code, 0, result.output);
   assert.deepEqual(result.restarted, []);
-  assert.equal(result.calls.trim().split('\n').length, 6);
+  assert.equal(result.calls.trim().split('\n').length, 4);
   assert.doesNotMatch(result.calls, /up|curl|Spark|8765|11434/u);
 });
 
-test('unhealthy dependencies recover in DB/crawler/app order once dependencies are healthy', {timeout: 40000}, async t => {
-  const result = await (await fixture(t, {db: unhealthy, crawl4ai: unhealthy, app: unhealthy}, true)).check();
+test('unhealthy dependencies recover in DB/app order once dependencies are healthy', {timeout: 40000}, async t => {
+  const result = await (await fixture(t, {db: unhealthy, app: unhealthy}, true)).check();
   assert.equal(result.code, 0, result.output);
-  assert.deepEqual(result.restarted, ['db', 'crawl4ai', 'app']);
+  assert.deepEqual(result.restarted, ['db', 'app']);
 });
 
-for (const dependency of ['db', 'crawl4ai']) {
+for (const dependency of ['db']) {
   test(`unhealthy app is gated while ${dependency} remains unhealthy`, {timeout: 40000}, async t => {
     const result = await (await fixture(t, {[dependency]: unhealthy, app: unhealthy})).check();
     assert.equal(result.code, 0, result.output);
@@ -88,13 +88,13 @@ test('unhealthy dependency does not restart a healthy app', {timeout: 40000}, as
 
 test('recently started unhealthy containers get five minutes of grace', {timeout: 40000}, async t => {
   const recent = `true unhealthy ${new Date().toISOString()}`;
-  const result = await (await fixture(t, {db: recent, crawl4ai: recent, app: recent})).check();
+  const result = await (await fixture(t, {db: recent, app: recent})).check();
   assert.equal(result.code, 0, result.output);
   assert.deepEqual(result.restarted, []);
 });
 
 test('stopped, missing and healthcheck-free containers are ignored', {timeout: 40000}, async t => {
-  const result = await (await fixture(t, {db: `false unhealthy ${old}`, crawl4ai: 'missing', app: `true none ${old}`})).check();
+  const result = await (await fixture(t, {db: `false unhealthy ${old}`, app: `true none ${old}`})).check();
   assert.equal(result.code, 0, result.output);
   assert.deepEqual(result.restarted, []);
 });

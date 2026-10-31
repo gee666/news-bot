@@ -6,11 +6,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      crawl4ai:
-        condition: service_healthy
-    networks:
-      - default
-      - crawler
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -51,9 +46,12 @@ services:
       RESEARCH_SEARCH_TOKEN: ${RESEARCH_SEARCH_TOKEN:-}
       RESEARCH_FETCH_TIMEOUT_MS: ${RESEARCH_FETCH_TIMEOUT_MS:-15000}
       RESEARCH_FETCH_MAX_BYTES: ${RESEARCH_FETCH_MAX_BYTES:-1000000}
-      RESEARCH_CRAWLER_URL: http://crawl4ai:11235
+      RESEARCH_CRAWLER_URL: ${RESEARCH_CRAWLER_DOCKER_URL:-http://host.docker.internal:11235}
+      RESEARCH_CRAWLER_SOCKET_PATH: /run/crawl4ai/crawl4ai.sock
       RESEARCH_CRAWLER_API_TOKEN: ${CRAWL4AI_API_TOKEN:?Set CRAWL4AI_API_TOKEN in .env}
-      RESEARCH_CRAWLER_TIMEOUT_MS: ${RESEARCH_CRAWLER_TIMEOUT_MS:-60000}
+      RESEARCH_CRAWLER_TIMEOUT_MS: ${RESEARCH_CRAWLER_TIMEOUT_MS:-90000}
+      RESEARCH_CRAWLER_PERSONAL_FALLBACK: ${RESEARCH_CRAWLER_PERSONAL_FALLBACK:-false}
+      RESEARCH_CRAWLER_HEADED_FALLBACK: ${RESEARCH_CRAWLER_HEADED_FALLBACK:-true}
       RESEARCH_CRAWLER_MAX_BYTES: ${RESEARCH_CRAWLER_MAX_BYTES:-5000000}
       RESEARCH_PREFERRED_DOMAINS: ${RESEARCH_PREFERRED_DOMAINS:-}
     ports:
@@ -61,6 +59,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      - ${CRAWL4AI_SOCKET_DIR:-../crawl4ai/tmp/api}:/run/crawl4ai:ro
       - telegram_sessions:/data/telegram
       - pi_auth:/data/pi
       - media_pair_cache:/app/tmp/media-pair-cache
@@ -74,32 +73,6 @@ services:
           const req=require('node:http').get({hostname:'127.0.0.1',port:3000,path:'/api/health',headers:{Host:host},timeout:5000},
           res=>{res.resume();res.on('end',()=>process.exit(res.statusCode===200?0:1));});
           req.on('timeout',()=>req.destroy());req.on('error',()=>process.exit(1));
-      interval: 30s
-      timeout: 6s
-      start_period: 30s
-      retries: 3
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-  crawl4ai:
-    build: ./deploy/crawl4ai
-    restart: unless-stopped
-    environment:
-      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?Set CRAWL4AI_API_TOKEN in .env}
-    networks:
-      - crawler
-    mem_limit: 1536m
-    cpus: 2.0
-    shm_size: 256m
-    pids_limit: 512
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:11235/health', timeout=5).read()"]
       interval: 30s
       timeout: 6s
       start_period: 30s
@@ -131,8 +104,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-networks:
-  crawler:
 volumes:
   postgres_data:
   telegram_sessions:

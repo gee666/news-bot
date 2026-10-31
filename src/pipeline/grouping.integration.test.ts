@@ -104,6 +104,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     vi.spyOn(BotApi.prototype,'identity').mockResolvedValue({id:123,is_bot:true});
     vi.spyOn(BotApi.prototype,'send').mockImplementation(async () => String(100 + vi.mocked(BotApi.prototype.send).mock.calls.length));
     vi.spyOn(BotApi.prototype,'edit').mockResolvedValue(undefined);
+    vi.spyOn(BotApi.prototype,'delete').mockResolvedValue(undefined);
   });
   afterAll(async () => {
     vi.restoreAllMocks(); await database?.db.end();
@@ -122,7 +123,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query("SELECT jsonb_array_length(metadata->'pipelineExtraction') AS n FROM item_revisions WHERE id=$1",[revision])).rows).toEqual([{n:1}]);
     expect(model.extractionCalls).toBe(0); expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(0);
   });
-  it('groups draft reports and publishes a linked follow-up without modifying the previous story', async () => {
+  it('groups draft reports and deletes the previous post after publishing its replacement', async () => {
     const batch=await intake(['Acme выпустила Compiler 2.', 'Состоялся выпуск Compiler 2 от Acme.', 'Beta выпустила Database 3.']);
     await processIntake(batch); await publish();
     expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
@@ -137,14 +138,16 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.']));
     await publish(); await publish();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(3);
-    expect(BotApi.prototype.edit).toHaveBeenCalled(); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2], '103'));
+    expect(BotApi.prototype.edit).not.toHaveBeenCalled();
+    expect(BotApi.prototype.delete).toHaveBeenCalledWith('-100123', await one('SELECT message_id AS id FROM publications WHERE story_id=$1', [canonical]));
+    expect((await database.db.query("SELECT status FROM publication_replacements")).rows).toEqual([{status:'deleted'}]);
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
     expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE text LIKE '%40 долларов%' ")).rows)
       .toEqual([{previous:canonical}]);
-    expect(vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text).toContain('Предыдущие публикации');
+    expect(vi.mocked(BotApi.prototype.send).mock.calls.at(-1)?.[1].text).not.toContain('Предыдущие публикации');
     expect((await database.db.query('SELECT id FROM publications')).rows).toHaveLength(3);
   });
-  it.each(['same'])('creates a new linked post for every %s match, including duplicate coverage', async relation => {
+  it.each(['same'])('replaces the previous post for every %s match, including duplicate coverage', async relation => {
     await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
     const canonical=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
     const original=(await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0];
@@ -159,7 +162,9 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE story_id=$1',[canonical])).rows)
       .toEqual([{pending_snapshot_id:null}]);
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2);
-    expect(BotApi.prototype.edit).toHaveBeenCalled(); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2], '102'));
+    expect(BotApi.prototype.edit).not.toHaveBeenCalled();
+    expect(BotApi.prototype.delete).toHaveBeenCalledWith('-100123', await one('SELECT message_id AS id FROM publications WHERE story_id=$1', [canonical]));
+    expect((await database.db.query("SELECT status FROM publication_replacements")).rows).toEqual([{status:'deleted'}]);
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
   });
   it('leaves later same candidates unrecorded rather than manufacturing related links', async () => {
@@ -258,6 +263,91 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     await associateSourceLinks(settings); await associateSourceLinks(settings);
     expect(model.linksCalls).toBe(4);
     expect((await database.db.query('SELECT story_id FROM story_link_sources WHERE link_id=$1',[link])).rows).toEqual([{story_id:compiler}]);
+  });
+  it('shortlists twenty ordinary candidates while retaining source, link and historical anchors', async () => {
+    const { applyExtraction } = await import('./extraction-store.js');
+    const { getActiveEmbeddingConfig } = await import('../settings.js');
+    const { Vectors } = await import('./vectors.js');
+    const { matchBatch } = await import('./matching.js');
+    const { mentionInput, eventInput } = await import('./consolidation-input.js');
+    const { JevClient } = await import('../models/jev.js');
+    const config = await getActiveEmbeddingConfig();
+    async function seed(reports: string[], vector: number[]) {
+      const text = reports.join('\n'); const batch = await intake([text]);
+      const revision = await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1', [batch]);
+      let start = 0;
+      await applyExtraction(batch, revision, text, reports.map(report => {
+        const span = { start, end: start + report.length }; start = span.end + 1; return span;
+      }));
+      const story = await one('INSERT INTO stories(chosen_excerpt) VALUES($1) RETURNING id', [reports[0]]);
+      await database.db.query('UPDATE story_mentions SET story_id=$2 WHERE revision_id=$1', [revision, story]);
+      await database.db.query(`INSERT INTO embeddings(config_id,mention_id,input_hash,embedding)
+        SELECT $1,id,'fixture',$3::vector FROM story_mentions WHERE revision_id=$2`,
+      [config.id, revision, JSON.stringify(vector)]);
+      return { story, revision };
+    }
+    const ordinary = [];
+    for (let i = 0; i < 24; i++) ordinary.push(await seed([`Ordinary event ${i}.`], [1, 2, 4 + i]));
+    const source = await seed(['Source anchor first report.', 'Source anchor second report.'], [-1, -2, -3]);
+    const linked = await seed(['Linked anchor.'], [-1, -2, -3]);
+    const historical = await seed(['Historical anchor.'], [-1, -2, -3]);
+    const privateCandidate = await seed(['Private nearest candidate.'], [1, 2, 3]);
+    await database.db.query(`UPDATE sources SET access='restricted' WHERE id IN(
+      SELECT i.source_id FROM source_items i JOIN item_revisions r ON r.item_id=i.id WHERE r.id=$1)`, [privateCandidate.revision]);
+    const batch = await intake(['Incoming independent event.']);
+    const revision = await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1', [batch]);
+    await applyExtraction(batch, revision, 'Incoming independent event.', [{ start: 0, end: 27 }]);
+    const mention = await one('SELECT id FROM story_mentions WHERE revision_id=$1', [revision]);
+    await database.db.query(`UPDATE source_items SET original_url=(SELECT i.original_url FROM source_items i
+      JOIN item_revisions r ON r.item_id=i.id WHERE r.id=$2)
+      WHERE id=(SELECT item_id FROM item_revisions WHERE id=$1)`, [source.revision, revision]);
+    for (const id of [revision, linked.revision]) {
+      const link = await one("INSERT INTO item_links(revision_id,url) VALUES($1,'https://example.org/shared-anchor') RETURNING id", [id]);
+      await database.db.query(`INSERT INTO mention_links(mention_id,link_id,classification,model_version)
+        SELECT id,$2,'relevant',1 FROM story_mentions WHERE revision_id=$1`, [id, link]);
+    }
+    const replacement = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
+      SELECT item_id,2,$2,'Replacement source text.','Replacement source text.' FROM item_revisions WHERE id=$1 RETURNING id`,
+    [historical.revision, randomUUID()]);
+    await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=(SELECT item_id FROM item_revisions WHERE id=$1)',
+      [historical.revision, replacement]);
+    await database.db.query(`INSERT INTO stage_state(batch_id,story_id,stage,status,output)
+      VALUES($1,$2,'extraction_affected','skipped',$3)`,
+    [batch, historical.story, JSON.stringify({ revisionId: historical.revision, previousText: 'Historical anchor.' })]);
+    const incoming = await mentionInput(mention); const sourceInput = await eventInput(source.story);
+    if (!incoming || !sourceInput) throw new Error('Missing shortlist fixture input');
+    const judge = vi.spyOn(JevClient.prototype, 'judge');
+    const vectors = new Vectors(config, settings);
+    try { await matchBatch(batch, settings, vectors, [mention]); }
+    finally { await vectors.close(); }
+    const states = judge.mock.calls.filter(([template]) => template === 'duplicate').map(([, state]) => state);
+    const ids = states.map(state => z.object({ candidate: z.object({ id: z.uuid() }) }).parse(state).candidate.id);
+    expect(ids.sort()).toEqual([...ordinary.slice(0, 20).map(candidate => candidate.story),
+      source.story, linked.story, historical.story].sort());
+    expect(model.groupingCalls).toBe(23);
+    expect(states).toContainEqual({ incoming: { id: incoming.id, reports: incoming.reports },
+      candidate: { id: sourceInput.id, reports: sourceInput.reports } });
+    expect(sourceInput.reports).toHaveLength(2);
+    expect(states).toContainEqual(expect.objectContaining({ candidate: expect.objectContaining({
+      id: historical.story, reports: [expect.objectContaining({ text: 'Historical anchor.' })],
+    }) }));
+  });
+  it('deduplicates unrelated roots without losing inherited exclusions or related results', async () => {
+    const create = () => one('INSERT INTO stories DEFAULT VALUES RETURNING id');
+    const [root, edition, excluded, excludedEdition, kept] = await Promise.all([
+      create(), create(), create(), create(), create(),
+    ]);
+    await database.db.query(`INSERT INTO story_relations(lower_story_id,upper_story_id,relation,classifier_version,provenance)
+      SELECT least(a,b),greatest(a,b),relation,'fixture','{"origin":"user"}'::jsonb
+      FROM unnest($1::uuid[],$2::uuid[],$3::text[]) AS edges(a,b,relation)`, [
+      [root, excluded, root, edition, edition, root, edition],
+      [edition, excludedEdition, excluded, excluded, excludedEdition, kept, kept],
+      ['same', 'same', 'unrelated', 'unrelated', 'related', 'related', 'related'],
+    ]);
+    const { relatedStoryIds } = await import('./story-relations.js');
+    expect(await relatedStoryIds(root)).toEqual([kept]);
+    expect(await relatedStoryIds(edition)).toEqual([kept]);
+    expect(await relatedStoryIds(kept)).toEqual([root, edition].sort());
   });
   it('does not expose an unrelated private story or let it block public grouping', async () => {
     await processIntake(await intake(['Acme выпустила Compiler 2.']));

@@ -3,6 +3,9 @@ import { readFailure, usefulSourceTitle } from './read-quality.js';
 
 it.each([
   ['Sign in to GitHub · GitHub', 'Username Password', 'https://github.com/login', 'restricted'],
+  ['Human Verification', "## Let's confirm you are human\n\nComplete the security check before continuing.", 'https://www.binance.com/en/support/announcement/detail/id', 'restricted'],
+  ['Article', "## Let's confirm you are human", 'https://publisher.org/article', 'restricted'],
+  ['Article', 'Complete the security check before continuing.', 'https://publisher.org/article', 'restricted'],
   ['Article', 'Checking your browser', 'https://publisher.org/article', 'restricted'],
   ['Article', 'Sign in to continue. Log in to view this content.', 'https://publisher.org/article', 'restricted'],
   ['This page couldn’t load', 'Reload to try again', 'https://x.com/account/status/1', 'unavailable'],

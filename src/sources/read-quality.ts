@@ -16,8 +16,8 @@ export function readFailure(title: string | null, content: string, url: string, 
     path = address.pathname;
   } catch { return 'unavailable'; }
   if (/^\/(?:login|signin|sign-in|auth\/login)(?:\/|$)/iu.test(path)
-    || /^(?:sign in(?: to [\w .-]+)?|log in|login|just a moment|attention required|access denied|security check|verify (?:you are human|your identity))(?:[.!…]*|\s*[|·].*)$/iu.test(heading)
-    || /^(?:\s*#+\s*)?(?:verify (?:that )?you (?:are|re) (?:a )?human|checking your browser|performing security verification)/iu.test(content.trim())
+    || /^(?:sign in(?: to [\w .-]+)?|log in|login|just a moment|attention required|access denied|security check|human verification|verify (?:you are human|your identity))(?:[.!…]*|\s*[|·].*)$/iu.test(heading)
+    || /^(?:\s*#+\s*)?(?:let['’]s confirm you are human|complete the security check before continuing|verify (?:that )?you (?:are|re) (?:a )?human|checking your browser|performing security verification)/iu.test(content.trim())
     || (content.length < 1500 && /^(?:\s*#+\s*)?(?:sign in|log in|login)\b[^.!?\n]{0,80}\b(?:continue|view|access)\b/iu.test(content.trim()))
     || (content.length < 1500 && /enable javascript and cookies to continue/iu.test(content))) return 'restricted';
   const error = /^(?:this (?:page|site) (?:couldn.t|cannot|could not) (?:load|be reached)|page not found|not found|404(?:\b|\s)|application error|internal server error|service unavailable|something went wrong)/iu;

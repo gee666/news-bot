@@ -21,6 +21,7 @@ export interface ResearchPage {
     status?: number; error?: string; truncated?: boolean;
     method?: 'crawl4ai' | 'http'; contentFormat?: 'markdown' | 'html' | 'text' | 'json';
     publishedAt?: string | null; updatedAt?: string | null; fetchedAt?: string;
+    browserMode?: 'headless' | 'headed' | 'personal'; headlessError?: string;
     crawlerError?: string; cleaning?: 'readability' | 'social_post' | 'arxiv_abstract' | 'arxiv_full_text'; byline?: string | null;
     followupLinks?: { url: string; title: string }[];
     paper?: { id: string; version: string | null; extent: 'abstract' | 'full_text' };

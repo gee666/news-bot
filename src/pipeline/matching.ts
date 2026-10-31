@@ -16,6 +16,7 @@ import { ProcessingYield } from './processing-slice.js';
 export interface Mention { id: string; revision_id: string; text: string; story_id: string | null }
 interface ClassifiedCandidate extends StoryRelationDecision { candidate: Candidate }
 interface Candidate { id: string; text: string; previous_revision_id: string | null; input?: EventInput; history?: HistoricalEventRef }
+// Bound serial model calls as history grows, but never discard source/link/revision anchors.
 async function candidates(mention: Mention, vector: number[], vectors: Vectors, settings: AppSettings, batchId: string): Promise<Candidate[]> {
   const result = await db.query<Candidate>(`WITH current_mentions AS MATERIALIZED (
     SELECT m.*,i.original_url,e.embedding FROM story_mentions m
@@ -52,13 +53,18 @@ async function candidates(mention: Mention, vector: number[], vectors: Vectors, 
         WHERE incoming.id=$3 AND previous.id<>incoming.id ORDER BY previous.revision_number DESC LIMIT 1)
         AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=s.id)
       GROUP BY s.id,r.id
-    ) SELECT id,text,previous_revision_id FROM (SELECT DISTINCT ON(id) * FROM available ORDER BY id,priority) candidates
+    ), permitted AS (
+    SELECT * FROM (SELECT DISTINCT ON(id) * FROM available ORDER BY id,priority) candidates
     WHERE ($9::boolean OR NOT EXISTS(SELECT 1 FROM sources private_source
       JOIN source_items private_item ON private_item.source_id=private_source.id
       JOIN item_revisions private_revision ON private_revision.item_id=private_item.id
       LEFT JOIN story_mentions private_mention ON private_mention.revision_id=private_revision.id
       WHERE private_source.access<>'public' AND (private_mention.story_id=candidates.id
         OR private_revision.id::text=candidates.previous_revision_id)))
+    ), ranked AS (
+      SELECT *,row_number() OVER(ORDER BY distance ASC NULLS LAST,lexical DESC,id) AS similarity_rank FROM permitted
+    ) SELECT id,text,previous_revision_id FROM ranked
+    WHERE priority=0 OR shared_link OR same_source OR similarity_rank<=20
     ORDER BY priority,shared_link DESC,distance ASC NULLS LAST,lexical DESC,same_source DESC,id`,
   [JSON.stringify(vector), mention.id, mention.revision_id, vectors.config.id, settings.retentionDays, batchId,
     mention.text, mention.story_id, process.env.ALLOW_PRIVATE_INFERENCE==='true']);

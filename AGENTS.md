@@ -1,5 +1,7 @@
 # Code quality bar
 
+- Commit and push every deployed change so deployment stays in sync with origin.
+
 - Remove dead code, unused imports, and unused dependencies. Wire intended functionality into the application instead of leaving disconnected code.
 - Keep module responsibilities and dependency boundaries clear. Follow existing project conventions and use TypeScript libraries and frameworks as intended.
 - Avoid duplicated logic and unnecessary abstractions. Prefer simple, consistent solutions over one-off patterns.

@@ -15,7 +15,7 @@ state() {
     '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.State.StartedAt}}' "$id"
 }
 
-for service in db crawl4ai app; do
+for service in db app; do
   snapshot=$(state "$service")
   read -r running health started <<< "$snapshot"
   [[ "$running" == true && "$health" == unhealthy ]] || continue
@@ -24,7 +24,7 @@ for service in db crawl4ai app; do
   (( $(date +%s) - started_epoch >= 300 )) || continue
   if [[ "$service" == app ]]; then
     dependencies_ready=true
-    for dependency in db crawl4ai; do
+    for dependency in db; do
       snapshot=$(state "$dependency")
       read -r dep_running dep_health _ <<< "$snapshot"
       if [[ "$dep_running" != true || "$dep_health" != healthy ]]; then

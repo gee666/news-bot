@@ -100,12 +100,14 @@ export async function relatedStoryIds(storyId: string, query = db.query.bind(db)
     ), related_component(id) AS (
       SELECT id FROM related_roots UNION SELECT CASE WHEN e.a=c.id THEN e.b ELSE e.a END
       FROM related_component c JOIN same_edges e ON e.a=c.id OR e.b=c.id
-    ), excluded_roots(id) AS (
+    -- MATERIALIZED plus DISTINCT seeds bounds recursive planner estimates and avoids costly JIT.
+    -- UNION already deduplicates semantically; keep both for the query plan.
+    ), excluded_roots(id) AS MATERIALIZED (
       SELECT CASE WHEN r.lower_story_id=c.id THEN r.upper_story_id ELSE r.lower_story_id END
       FROM same_component c JOIN story_relations r ON r.lower_story_id=c.id OR r.upper_story_id=c.id
       WHERE r.relation='unrelated' AND r.provenance->>'quarantined' IS DISTINCT FROM 'true'
     ), excluded_component(id) AS (
-      SELECT id FROM excluded_roots UNION SELECT CASE WHEN e.a=c.id THEN e.b ELSE e.a END
+      SELECT DISTINCT id FROM excluded_roots UNION SELECT CASE WHEN e.a=c.id THEN e.b ELSE e.a END
       FROM excluded_component c JOIN same_edges e ON e.a=c.id OR e.b=c.id
     ) SELECT id FROM related_component WHERE id NOT IN(SELECT id FROM same_component)
       AND id NOT IN(SELECT id FROM excluded_component)

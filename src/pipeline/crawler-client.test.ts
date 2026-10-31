@@ -46,6 +46,22 @@ describe('Crawl4AI adapter', () => {
     expect(JSON.stringify(request)).not.toMatch(/cookies|session_id|magic|proxy_config|js_code|extra_args/u);
   });
 
+  it('uses an optional Unix socket transport without changing the authenticated API contract', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_SOCKET_PATH', '/run/crawl4ai/crawl4ai.sock');
+    expect(await fetchCrawlerPage(url)).toMatchObject({ access: 'public' });
+    const [endpoint, init] = mocks.fetch.mock.calls[0] ?? [];
+    expect(String(endpoint)).toBe('http://crawl4ai:11235/crawl');
+    expect(init.dispatcher).toBeDefined();
+    expect(init.headers.Authorization).toBe('Bearer test-secret');
+    expect(zRequest(init).urls).toEqual([url]);
+  });
+
+  it.each(['relative.sock', '/' + 'a'.repeat(110)])('rejects an invalid operator socket path %s', async path => {
+    vi.stubEnv('RESEARCH_CRAWLER_SOCKET_PATH', path);
+    expect(await fetchCrawlerPage(url)).toMatchObject({ metadata: { error: 'crawler_invalid_socket' } });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
   it.each(['https://foreign.example/article', 'https://example.org/another',
     'https://example.org/article?different=true'])('rejects foreign original result identity %s', original => {
     respond({ success: true, results: [result({ url: original, redirected_url: url })] });
@@ -114,6 +130,111 @@ describe('Crawl4AI adapter', () => {
   ])('does not mistake a challenge for an article', async overrides => {
     respond({ success: true, results: [result(overrides)] });
     expect(await fetchCrawlerPage(url)).toMatchObject({ access: 'restricted', content: null, publishedAt: null });
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('recognizes Binance human verification even with a successful 202 response', async () => {
+    respond({ success: true, results: [result({ status_code: 202, redirected_status_code: 202,
+      metadata: { title: 'Human Verification' }, markdown: { raw_markdown: "## Let's confirm you are human\n\nComplete the security check before continuing." } })] });
+    expect(await fetchCrawlerPage(url)).toMatchObject({ access: 'restricted', content: null,
+      metadata: { error: 'crawler_restricted', status: 202 } });
+  });
+
+  it('optionally retries a challenge once through the headed service using the same deadline', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_HEADED_FALLBACK', 'true');
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ success: true,
+      results: [result({ metadata: { title: 'Human Verification' } })] }),
+    { headers: { 'Content-Type': 'application/json' } }));
+    expect(await fetchCrawlerPage(url)).toMatchObject({ access: 'public',
+      metadata: { browserMode: 'headed', headlessError: 'crawler_restricted' } });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(String(mocks.fetch.mock.calls[1]?.[0])).toBe('http://crawl4ai:11235/crawl/headed');
+    expect(mocks.fetch.mock.calls[1]?.[1].signal).toBe(mocks.fetch.mock.calls[0]?.[1].signal);
+    expect(zRequest(mocks.fetch.mock.calls[1]?.[1]).browser_config).toEqual({ type: 'BrowserConfig',
+      params: { headless: true, java_script_enabled: true, text_mode: false } });
+  });
+
+  it('uses the opted-in personal browser for an allowlisted Binance article instead of a fresh headed browser', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_PERSONAL_FALLBACK', 'true');
+    vi.stubEnv('RESEARCH_CRAWLER_HEADED_FALLBACK', 'true');
+    const binance = 'https://www.binance.com/en/support/announcement/detail/c5a8729a97ac486d963784d96c5642d7';
+    respond({ success: true, results: [result({ url: binance, redirected_url: binance })] });
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ success: true,
+      results: [result({ url: binance, redirected_url: binance, metadata: { title: 'Human Verification' } })] }),
+    { headers: { 'Content-Type': 'application/json' } }));
+    expect(await fetchCrawlerPage(binance)).toMatchObject({ access: 'public',
+      metadata: { browserMode: 'personal', headlessError: 'crawler_restricted' } });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(String(mocks.fetch.mock.calls[1]?.[0])).toBe('http://crawl4ai:11235/crawl/personal');
+    expect(mocks.fetch.mock.calls[1]?.[1].signal).toBe(mocks.fetch.mock.calls[0]?.[1].signal);
+  });
+
+  it.each(['https://www.binance.com/en/my/wallet', 'https://www.binance.com/en/support/announcement/detail/c5a8729a97ac486d963784d96c5642d7?private=1',
+    'https://example.org/article', 'https://www.binance.com.attacker.example/en/support/announcement/detail/c5a8729a97ac486d963784d96c5642d7'])(
+    'never sends other URLs to the personal browser: %s', async target => {
+    vi.stubEnv('RESEARCH_CRAWLER_PERSONAL_FALLBACK', 'true');
+    vi.stubEnv('RESEARCH_CRAWLER_HEADED_FALLBACK', 'true');
+    respond({ success: true, results: [result({ url: target, redirected_url: target, metadata: { title: 'Human Verification' } })] });
+    expect(await fetchCrawlerPage(target)).toMatchObject({ access: 'restricted' });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(String(mocks.fetch.mock.calls[1]?.[0])).toBe('http://crawl4ai:11235/crawl/headed');
+  });
+
+  it('does not use the personal browser without explicit opt-in', async () => {
+    const binance = 'https://www.binance.com/en/support/announcement/detail/c5a8729a97ac486d963784d96c5642d7';
+    respond({ success: true, results: [result({ url: binance, redirected_url: binance, metadata: { title: 'Human Verification' } })] });
+    expect(await fetchCrawlerPage(binance)).toMatchObject({ access: 'restricted' });
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a restricted diagnosis when personal Chrome is offline and does not start a third attempt', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_PERSONAL_FALLBACK', 'true');
+    vi.stubEnv('RESEARCH_CRAWLER_HEADED_FALLBACK', 'true');
+    const binance = 'https://www.binance.com/en/support/announcement/detail/c5a8729a97ac486d963784d96c5642d7';
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ success: true,
+      results: [result({ url: binance, redirected_url: binance, metadata: { title: 'Human Verification' } })] }),
+    { headers: { 'Content-Type': 'application/json' } }));
+    mocks.fetch.mockResolvedValueOnce(new Response('{}', { status: 503 }));
+    expect(await fetchCrawlerPage(binance)).toMatchObject({ access: 'restricted',
+      metadata: { error: 'crawler_restricted', crawlerError: 'crawler_http_503' } });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed on malformed URLs with personal opt-in enabled', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_PERSONAL_FALLBACK', 'true');
+    expect(await fetchCrawlerPage('not a URL')).toMatchObject({ access: 'unavailable', metadata: { error: 'blocked_url' } });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it('does not treat another headed challenge as an article or loop retries', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_HEADED_FALLBACK', 'true');
+    respond({ success: true, results: [result({ metadata: { title: 'Human Verification' } })] });
+    expect(await fetchCrawlerPage(url)).toMatchObject({ access: 'restricted', content: null,
+      metadata: { browserMode: 'headed', error: 'crawler_restricted' } });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains the headless access diagnosis when the headed service is unavailable', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_HEADED_FALLBACK', 'true');
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ success: true,
+      results: [result({ metadata: { title: 'Human Verification' } })] }),
+    { headers: { 'Content-Type': 'application/json' } }));
+    mocks.fetch.mockResolvedValueOnce(new Response('{}', { status: 503 }));
+    expect(await fetchCrawlerPage(url)).toMatchObject({ access: 'restricted', content: null,
+      metadata: { error: 'crawler_restricted', browserMode: 'headless', crawlerError: 'crawler_http_503' } });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not send unsafe targets, authentication failures or missing pages to headed fallback', async () => {
+    vi.stubEnv('RESEARCH_CRAWLER_HEADED_FALLBACK', 'true');
+    expect(await fetchCrawlerPage('http://localhost/')).toMatchObject({ metadata: { error: 'blocked_url' } });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    mocks.fetch.mockResolvedValueOnce(new Response('{}', { status: 401 }));
+    expect(await fetchCrawlerPage(url)).toMatchObject({ metadata: { error: 'crawler_http_401' } });
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+    mocks.fetch.mockClear();
+    respond({ success: true, results: [result({ status_code: 404, redirected_status_code: 404 })] });
+    expect(await fetchCrawlerPage(url)).toMatchObject({ access: 'unavailable' });
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
 

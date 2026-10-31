@@ -1,12 +1,25 @@
 import { cleanSourceUrl } from '../source-url.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
+import { Agent } from 'undici';
 import { envInteger, publicUrl, ResearchFetchError, resolvePublicAddress } from './research-fetch.js';
 import { cleanArticle } from '../sources/article.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
 import type { ResearchPage } from './research-page.js';
 
 export interface CrawlerPage extends ResearchPage { publishedAt: string | null }
+
+let socketTransport: { path: string; agent: Agent } | undefined;
+
+function socketDispatcher(path: string): Agent {
+  if (socketTransport?.path !== path) {
+    const previous = socketTransport;
+    socketTransport = { path, agent: new Agent({ connect: { socketPath: path } }) };
+    void previous?.agent.close().catch(() => {});
+  }
+  return socketTransport.agent;
+}
+
 
 const resultSchema = z.object({
   url: z.string().max(4096),
@@ -50,6 +63,16 @@ async function validateHost(url: URL, signal: AbortSignal): Promise<void> {
 }
 
 /** Crawl4AI 0.9.4 owns DNS-pinned egress, including redirects and subresources. */
+function personalBrowserAllowed(input: string): boolean {
+  if (process.env.RESEARCH_CRAWLER_PERSONAL_FALLBACK !== 'true') return false;
+  try {
+    const url = new URL(input);
+    return url.protocol === 'https:' && url.hostname === 'www.binance.com' && !url.port && !url.search
+      && !url.username && !url.password && !url.hash
+      && /^\/en\/support\/announcement\/detail\/[a-f\d]{32}$/u.test(url.pathname);
+  } catch { return false; }
+}
+
 export async function fetchCrawlerPage(input: string, purpose: 'index' | 'article' = 'index'): Promise<CrawlerPage> {
   const endpoint = process.env.RESEARCH_CRAWLER_URL;
   const token = process.env.RESEARCH_CRAWLER_API_TOKEN;
@@ -60,10 +83,14 @@ export async function fetchCrawlerPage(input: string, purpose: 'index' | 'articl
     if (!['http:', 'https:'].includes(service.protocol) || service.username || service.password
       || service.search || service.hash || !['', '/'].includes(service.pathname)) throw new Error('endpoint');
   } catch { return unavailable(input, 'crawler_invalid_endpoint'); }
+  const socketPath = process.env.RESEARCH_CRAWLER_SOCKET_PATH;
+  if (socketPath && (!socketPath.startsWith('/') || Buffer.byteLength(socketPath) > 100)) {
+    return unavailable(input, 'crawler_invalid_socket');
+  }
   const timeoutMs = envInteger('RESEARCH_CRAWLER_TIMEOUT_MS', 60_000, 120_000);
   const maxBytes = envInteger('RESEARCH_CRAWLER_MAX_BYTES', 5_000_000, 10_000_000);
   const signal = AbortSignal.timeout(timeoutMs);
-  const settings = { service, token, maxBytes, purpose };
+  const settings = { service, token, maxBytes, purpose, ...(socketPath ? { socketPath } : {}) };
   let first = await fetchOnce(input, settings, signal);
   const busyRetries = envInteger('RESEARCH_CRAWLER_BUSY_RETRIES', 6, 12);
   const busyDelay = envInteger('RESEARCH_CRAWLER_BUSY_DELAY_MS', 5000, 15_000);
@@ -79,10 +106,21 @@ export async function fetchCrawlerPage(input: string, purpose: 'index' | 'articl
       first = await fetchOnce(input, settings, signal);
     } catch { return unavailable(input, signal.aborted ? 'crawler_timeout' : 'crawler_failed'); }
   }
+  const mode = personalBrowserAllowed(input) ? 'personal'
+    : process.env.RESEARCH_CRAWLER_HEADED_FALLBACK === 'true' ? 'headed' : null;
+  if (mode && !signal.aborted
+    && ['crawler_restricted', 'crawler_render_failed', 'crawler_empty_content', 'crawler_article_unavailable'].includes(first.metadata.error ?? '')) {
+    const fallback = await fetchOnce(input, { ...settings, mode }, signal);
+    // Keep the original access diagnosis if the optional browser is unavailable.
+    if (fallback.access === 'public' || fallback.metadata.error === 'crawler_restricted') {
+      return { ...fallback, metadata: { ...fallback.metadata, browserMode: mode, headlessError: first.metadata.error ?? 'crawler_unreadable' } };
+    }
+    return { ...first, metadata: { ...first.metadata, browserMode: 'headless', crawlerError: fallback.metadata.error ?? `${mode}_failed` } };
+  }
   return first;
 }
 
-interface CrawlerSettings { service: URL; token: string; maxBytes: number; purpose: 'index' | 'article' }
+interface CrawlerSettings { service: URL; token: string; maxBytes: number; purpose: 'index' | 'article'; mode?: 'headed' | 'personal'; socketPath?: string }
 
 async function fetchOnce(input: string, settings: CrawlerSettings, signal: AbortSignal): Promise<CrawlerPage> {
   const { service, token, maxBytes } = settings;
@@ -91,8 +129,9 @@ async function fetchOnce(input: string, settings: CrawlerSettings, signal: Abort
     const target = publicUrl(cleanSourceUrl(input));
     // The service independently revalidates and pins at connect time.
     await validateHost(target, signal);
-    const response = await fetch(new URL('/crawl', service), {
+    const response = await fetch(new URL(settings.mode ? `/crawl/${settings.mode}` : '/crawl', service), {
       method: 'POST', redirect: 'error', signal,
+      ...(settings.socketPath ? { dispatcher: socketDispatcher(settings.socketPath) } : {}),
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       body: JSON.stringify({ urls: [target.href],
         browser_config: { type: 'BrowserConfig', params: {

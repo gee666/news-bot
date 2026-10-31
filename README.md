@@ -1,12 +1,13 @@
 # Personal news bot
 
-A single-user Telegram news collector with a Russian digest and a React settings page. Production runs on native Linux with three Compose services: the Node app, PostgreSQL 17 with pgvector, and a private Crawl4AI browser-fetch service. JEV, Ollama embeddings and Pi's OpenAI Codex provider are external inference services.
+A single-user Telegram news collector with a Russian digest and a React settings page. Production runs on native Linux with two Compose services: the Node app and PostgreSQL 17 with pgvector. A shared host Crawl4AI service handles browser reads. JEV, Ollama embeddings and Pi's OpenAI Codex provider are external inference services.
 
 ## Requirements
 
 - Docker Engine with the Compose v2 plugin and Docker access for the deployment user.
 - Node 24 or newer and npm for development.
 - A Telegram user account, Telegram API ID/hash, and an administrator bot for the destination channel.
+- The shared Crawl4AI service in `/home/oira666/Work/crawl4ai`, with a newsbot API credential.
 - Reachable JEV and embeddings services. Defaults are JEV port 8765 and Ollama port 11434 with `qwen3-embedding:latest`.
 - Codex OAuth access to `gpt-6-luna`.
 
@@ -23,7 +24,7 @@ chmod 600 .env
 
 Fill in secrets privately, including strong random values for `POSTGRES_PASSWORD` and `CRAWL4AI_API_TOKEN`. Never commit `.env`, paste tokens into command arguments, dump container environments, or run `docker compose config` without `--quiet`. Changing `.env` does not rotate an existing PostgreSQL password.
 
-Database and UI ports bind to host loopback. Defaults are 5432 and 3000; set `DB_PORT` or `WEB_PORT` if occupied. Containers always use `db:5432`. Crawl4AI has no published host port. The app uses its private Compose address automatically. See [crawler configuration and isolation](deploy/crawl4ai/README.md).
+Database and UI ports bind to host loopback. Defaults are 5432 and 3000; set `DB_PORT` or `WEB_PORT` if occupied. Containers always use `db:5432`. Crawl4AI runs outside Docker. Host apps use `http://127.0.0.1:11235`. Compose mounts its private API socket directory read-only and uses `RESEARCH_CRAWLER_SOCKET_PATH=/run/crawl4ai/crawl4ai.sock`, so no host firewall opening is needed. Set `CRAWL4AI_SOCKET_DIR` if the service is installed elsewhere. The URL in `RESEARCH_CRAWLER_DOCKER_URL` remains the HTTP request identity, default `http://host.docker.internal:11235`; the socket supplies the transport. See [crawler configuration and isolation](deploy/crawl4ai/README.md).
 
 `JEV_DOCKER_URL` and `EMBEDDING_DOCKER_URL` must be reachable from the app container, not container localhost. Linux maps `host.docker.internal` through `host-gateway`. Bind host inference services to a reachable interface and restrict access. Environment model/profile defaults seed the database only once; later changes use the settings UI.
 
@@ -32,10 +33,10 @@ Database and UI ports bind to host loopback. Defaults are 5432 and 3000; set `DB
 Back up private state and retain the previous images before upgrades. From the deployment checkout:
 
 ```sh
-docker compose build app crawl4ai
+docker compose build app
 docker compose up -d --wait db
 docker compose run --rm app npm run migrate:production
-docker compose up -d --wait app crawl4ai
+docker compose up -d --wait app
 ```
 
 Restarting resumes saved work and publication maintenance. The systemd boot service does not build or deploy new images.

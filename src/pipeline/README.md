@@ -4,7 +4,9 @@
 - Extract exact source passages in one structured model call.
   Local validation checks coordinates, overlap and complete coverage.
   Save successful extraction once, including empty results.
-- Compare each report with every retained eligible story group using JEV.
+- Shortlist the 20 nearest retained eligible story groups using existing
+  embeddings and lexical overlap. Always include shared-link, same-source and
+  prior-revision groups, even beyond that limit. Compare each candidate with JEV.
   Cached pair decisions preserve full reports and provenance.
   Attach only to the highest-ranked `same` candidate.
   Leave additional `same` matches unrecorded, never relabel them as `related`.
@@ -33,7 +35,7 @@ Stories use only the `story-failures.ts` marker, not stage retry receipts.
 Checkpoints and successful calls do not consume attempts.
 Healthy siblings continue while failed units wait or exhaust their budget.
 
-Grouping uses JEV directly, once per uncached incoming/candidate pair, with full
+Grouping uses JEV directly, once per uncached shortlisted pair, with full
 reports, source URLs and publication times. Completed pairs survive checkpoints
 and candidate reordering. JEV context limits fail without truncation or a Pi fallback.
 Private inference requires approval or `ALLOW_PRIVATE_INFERENCE=true`.
