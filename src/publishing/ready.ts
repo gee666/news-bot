@@ -7,6 +7,7 @@ import { generationIsCurrent } from '../pipeline/generation-freshness.js';
 import { guardDigestEligibility } from '../pipeline/eligibility.js';
 import { prepareDigest } from './store.js';
 import { prepareUpdates } from './updates.js';
+import { publicationInputAdmission } from './input-admission.js';
 
 /** Manual ownership also covers unselected stories. General refresh cannot release a run's cap. */
 export async function ownManualStories(client: PoolClient, ids: string[], runId: string, settings: AppSettings): Promise<void> {
@@ -97,11 +98,17 @@ export async function prepareReadyStories(settings: AppSettings, destinationId: 
       const eligible = (await db.query<{ interest_stale: boolean }>('SELECT interest_stale FROM stories WHERE id=$1', [row.story_id])).rows[0];
       if (!eligible || eligible.interest_stale) reason = 'eligibility_or_ranking_stale';
     }
-    if (!reason && row.manual_operation_id) {
+    if (!reason) {
       const existing = await db.query(`SELECT 1 FROM publications p LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id
         LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id WHERE p.destination_id=$1 AND p.status='published'
         AND coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id)=$2 LIMIT 1`, [destinationId, row.story_id]);
-      if (!existing.rows.length) reason = 'manual_scope';
+      if (!existing.rows.length) {
+        if (row.manual_operation_id) reason = 'manual_scope';
+        else {
+          const admission = await publicationInputAdmission(row.story_id, destinationId, settings);
+          if (!admission.allowed) reason = admission.reason;
+        }
+      }
     }
     if (!reason) {
       if (!row.manual_operation_id) await prepareDigest(settings, destinationId, { storyIds: [row.story_id] });

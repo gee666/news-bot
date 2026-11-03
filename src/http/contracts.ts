@@ -24,7 +24,8 @@ export const publicationAdmissionDenialSchema = z.object({
   publicationId: z.uuid(), snapshotId: z.uuid(), operation: z.enum(['send', 'edit']).nullable(),
   reason: z.enum(['settings_changed', 'publishing_paused', 'snapshot_changed', 'story_ineligible',
     'retained_provenance_unknown', 'current_generation_missing', 'source_quality_changed',
-    'delivery_outcome_unknown', 'approval_invalid', 'publication_removed', 'telegram_cooldown', 'consolidation_unresolved']),
+    'delivery_outcome_unknown', 'approval_invalid', 'publication_removed', 'telegram_cooldown', 'consolidation_unresolved',
+    'stale_source_input', 'no_new_source_input', 'publication_input_unverifiable']),
   lastSeenAt: timestamp, occurrences: count.positive(),
 });
 export const publicStatusSchema = z.object({

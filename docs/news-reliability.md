@@ -26,7 +26,11 @@ A review follows the draft, with at most one rewrite and re-review. Review failu
 
 Attachment download and decoding failures omit that attachment rather than failing text generation. Partial media selections remain eligible for another preparation attempt. Privacy checks still run before downloads and inference.
 
-Eligibility, minimum score and delivery-safety checks still apply. Published story text and factual sources stay immutable; matching reports create cumulative editions. Unknown Telegram outcomes require reconciliation rather than blind resending.
+Eligibility, minimum score and delivery-safety checks still apply. First posts require source input within `collectionWindowHours`. A later edition also requires new report text or source URLs compared with the inputs already published in its verified story thread. Model changes, refreshed summaries, metadata-only revisions and removed sources do not authorize another post. A meaningful change to an already published report can use its immutable revision time; attaching an old article cannot make it recent.
+
+Preparation saves the exact story-scoped source inputs, and delivery checks those prepared inputs again so newly attached reports cannot authorize an older snapshot. Text comparison ignores formatting and deletion-only changes. Editing another topic in the same source message does not count as an update to this story.
+
+Posts and prepared entries without a saved current-format input baseline are legacy. They are not reconstructed from source URLs, timestamps or revision numbers. Legacy published threads cannot create another edition; legacy prepared entries cannot send. Old published snapshots stay unchanged. These checks do not prevent navigation repairs to existing posts. Unknown Telegram outcomes require reconciliation rather than blind resending.
 
 Activity shows source coverage, retries and historical admission denials. A denial records a past observation, not necessarily a current block. Inspect its time alongside the current queue and publication state.
 

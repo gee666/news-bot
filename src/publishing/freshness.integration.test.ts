@@ -52,6 +52,10 @@ async function fixture(status: 'prepared' | 'published' = 'prepared', review?: G
     [storyId,JSON.stringify({ ...content,headline:'Ранее',details:'Прежнее описание' })]) : desired;
   const id = await one(`INSERT INTO publications(story_id,snapshot_id,pending_snapshot_id,destination_id,status,message_id,bot_id)
     VALUES($1,$2,$3,'-100123',$4,$5,'123') RETURNING id`,[storyId,prior,status === 'published' ? desired : null,status,status === 'published' ? '9' : null]);
+  if (status === 'prepared') {
+    const { recordPublicationInputs } = await import('./input-admission.js');
+    await database.transaction(client => recordPublicationInputs(client, id, storyId, { newPreparation: true }));
+  }
   return { id,storyId,evidence,source,item,revision,mention,receipt,desired,prior,pub:await publication(id) };
 }
 describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
@@ -78,13 +82,15 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
-  it('checks preparation in one SQL query without rendering or reading source inventories', async () => {
+  it('checks persisted preparation and immutable source inputs without rendering or reading source inventories', async () => {
     const f = await fixture();
     const query = vi.spyOn(database.db,'query');
     const { publicationAdmission } = await import('./freshness.js');
     expect(await publicationAdmission(database.db,f.pub,settings,'send')).toEqual({allowed:true});
-    expect(query).toHaveBeenCalledOnce();
-    expect(String(query.mock.calls[0]?.[0])).not.toContain('FOR SHARE NOWAIT');
+    const sql = query.mock.calls.map(([text]) => String(text));
+    expect(sql[0]).toContain('FOR UPDATE OF p');
+    expect(sql.slice(1).some(text => text.includes('identified AS') || text.includes('item_revisions'))).toBe(false);
+    expect(sql.every(text => !text.includes('FOR SHARE NOWAIT') && !text.includes('FROM story_evidence'))).toBe(true);
   });
   it.each(['pause','destination','bot','version','generation','failed','removed','quarantine'] as const)(
     'holds dispatch after %s changes', async mutation => {
@@ -106,6 +112,74 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
     await database.db.query("UPDATE evidence_documents SET title='New title' WHERE id=$1",[f.evidence]);
     await database.db.query("UPDATE judgments SET expires_at=now()-interval '1 second',prompt_version='old-prompt' WHERE id=$1",[f.receipt]);
     expect(await delivery.sendPrepared(f.pub,new BotApi(),settings)).toBe('9');
+  });
+  it.each(['text', 'media_first'] as const)('blocks an existing stale prepared %s send before any Telegram attempt', async kind => {
+    const f = await fixture();
+    await database.db.query("UPDATE source_items SET published_at=now()-interval '13 days' WHERE id=$1", [f.item]);
+    const { recordPublicationInputs } = await import('./input-admission.js');
+    await database.transaction(client => recordPublicationInputs(client, f.id, f.storyId));
+    if (kind === 'media_first') await database.db.query("UPDATE publications SET delivery_kind='media_first' WHERE id=$1", [f.id]);
+    expect(await delivery.sendPrepared(await publication(f.id), new BotApi(), settings)).toBeNull();
+    expect(BotApi.prototype.send).not.toHaveBeenCalled();
+    expect((await database.db.query('SELECT id FROM request_attempts')).rows).toHaveLength(0);
+    expect((await database.db.query('SELECT status,error_code FROM publications WHERE id=$1', [f.id])).rows)
+      .toEqual([{ status: 'failed', error_code: 'publication_admission_stale_source_input' }]);
+  });
+  it('blocks an already prepared unchanged edition with a legacy published ancestor', async () => {
+    const f = await fixture();
+    const ancestor = await one(`INSERT INTO stories(status,headline,summary,interest_score,researched)
+      VALUES('completed','Prior edition','Same report',7,true) RETURNING id`);
+    const snapshot = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id',
+      [ancestor, JSON.stringify(f.pub.content)]);
+    await database.db.query(`INSERT INTO publications(story_id,snapshot_id,destination_id,status,message_id,published_at)
+      VALUES($1,$2,'-100123','published','1322',now())`, [ancestor, snapshot]);
+    await database.db.query(`INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version)
+      VALUES($1,$2,'source-copy-v1')`, [f.storyId, ancestor]);
+    expect(await delivery.sendPrepared(f.pub, new BotApi(), settings)).toBeNull();
+    expect(BotApi.prototype.send).not.toHaveBeenCalled();
+    expect((await database.db.query('SELECT id FROM request_attempts')).rows).toHaveLength(0);
+    expect((await database.db.query('SELECT error_code FROM publications WHERE id=$1', [f.id])).rows)
+      .toEqual([{ error_code: 'publication_admission_publication_input_unverifiable' }]);
+  });
+  it('rechecks the stored collection window at dispatch rather than using old caller settings', async () => {
+    const f = await fixture();
+    await database.db.query("UPDATE source_items SET published_at=now()-interval '30 hours' WHERE id=$1", [f.item]);
+    const { recordPublicationInputs } = await import('./input-admission.js');
+    await database.transaction(client => recordPublicationInputs(client, f.id, f.storyId));
+    await (await import('../settings.js')).saveSettings({ collectionWindowHours: 24 });
+    expect(await delivery.sendPrepared(f.pub, new BotApi(), settings)).toBeNull();
+    expect(BotApi.prototype.send).not.toHaveBeenCalled();
+  });
+  it('does not let a fresh current report authorize an old frozen prepared snapshot', async () => {
+    const f = await fixture();
+    await database.db.query("UPDATE source_items SET published_at=now()-interval '13 days' WHERE id=$1", [f.item]);
+    const { recordPublicationInputs } = await import('./input-admission.js');
+    await database.transaction(client => recordPublicationInputs(client, f.id, f.storyId));
+    const fresh = await one(`INSERT INTO source_items(source_id,external_id,original_url,published_at)
+      VALUES($1,'new','https://t.me/acme/2',now()) RETURNING id`, [f.source]);
+    const revision = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
+      VALUES($1,1,'new','New report','New report') RETURNING id`, [fresh]);
+    await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [fresh, revision]);
+    await database.db.query("INSERT INTO story_mentions(story_id,revision_id,text,ordinal) VALUES($1,$2,'New report',1)", [f.storyId, revision]);
+    const { publicationAdmission } = await import('./freshness.js');
+    expect(await publicationAdmission(database.db, f.pub, settings, 'send'))
+      .toEqual({ allowed: false, reason: 'stale_source_input' });
+  });
+  it.each(['missing', 'invalid', 'v1'] as const)('holds a legacy prepared snapshot with %s durable provenance without adopting fresh attachments', async state => {
+    const f = await fixture();
+    const key = `publication_input:${f.id}`;
+    await database.db.query('DELETE FROM operational_state WHERE key=$1', [key]);
+    if (state !== 'missing') await database.db.query('INSERT INTO operational_state(key,value) VALUES($1,$2)',
+      [key, JSON.stringify(state === 'invalid' ? { corrupt: true } : { version: 'publication-input-v1', inputs: [] })]);
+    const before = (await database.db.query('SELECT * FROM publication_snapshots WHERE id=$1', [f.desired])).rows;
+    expect(await delivery.sendPrepared(f.pub, new BotApi(), settings)).toBeNull();
+    expect(BotApi.prototype.send).not.toHaveBeenCalled();
+    expect((await database.db.query('SELECT id FROM request_attempts')).rows).toEqual([]);
+    expect((await database.db.query('SELECT error_code FROM publications WHERE id=$1', [f.id])).rows)
+      .toEqual([{ error_code: 'publication_admission_publication_input_unverifiable' }]);
+    expect((await database.db.query('SELECT * FROM publication_snapshots WHERE id=$1', [f.desired])).rows).toEqual(before);
+    expect((await database.db.query('SELECT value FROM operational_state WHERE key=$1', [key])).rows).toEqual(state === 'missing'
+      ? [] : [{ value: state === 'invalid' ? { corrupt: true } : { version: 'publication-input-v1', inputs: [] } }]);
   });
   it('checks again between identity preflight and the durable attempt', async () => {
     const f = await fixture();

@@ -187,7 +187,7 @@ export async function refreshDigest(settings: AppSettings, judgments: Judgments,
       AND ($1::uuid[] IS NULL OR s.id=ANY($1)) ORDER BY o.updated_at,o.key`, [selectedIds]);
   for (const story of publishedRefreshes.rows) {
     checkProcessingSlice();
-    const draft = await forkPublishedRefresh(story.id);
+    const draft = await forkPublishedRefresh(story.id, settings);
     if (draft && selectedIds && !selectedIds.includes(draft)) selectedIds.push(draft);
   }
   await db.query(`DELETE FROM operational_state o WHERE key LIKE 'digest_refresh:%' AND NOT EXISTS(

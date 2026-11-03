@@ -29,6 +29,12 @@ describe('public processing status', () => {
       reason: 'source_quality_changed', lastSeenAt: date, occurrences: 2 }]);
     expect(JSON.stringify(parsed)).not.toContain('SECRET');
   });
+  it.each(['stale_source_input', 'no_new_source_input', 'publication_input_unverifiable'] as const)(
+    'retains %s publication denials in public status', reason => {
+      const denial = { publicationId: id, snapshotId: id, operation: 'send', reason, lastSeenAt: date, occurrences: 1 };
+      expect(publicStatusSchema.parse({ batches: [], waits: [], embeddings: [], publications: [],
+        publicationAdmissionDenials: [denial] }).publicationAdmissionDenials).toEqual([denial]);
+    });
   it('keeps the older status response valid when optional diagnostics are absent', () => {
     expect(publicStatusSchema.parse({ batches: [], waits: [], embeddings: [], publications: [] }))
       .toEqual({ batches: [], waits: [], embeddings: [], publications: [] });

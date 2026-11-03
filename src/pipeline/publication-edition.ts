@@ -2,11 +2,14 @@ import { transaction } from '../db.js';
 import { latestThreadStory } from './publication-thread.js';
 import { publicationThreadEdges } from './generation-context.js';
 import { unpublished } from './generation-store.js';
+import { getSettings, type AppSettings } from '../settings.js';
+import { publicationInputAdmission } from '../publishing/input-admission.js';
 
 /** A source-only enrichment creates a new edition, never a content edit of a sent post.
  * Move real reports rather than inventing extracted quotes. Durable thread edges keep
  * the sent edition's ancestry even when its last report moves to the draft. */
-export async function forkPublishedRefresh(storyId: string): Promise<string | null> {
+export async function forkPublishedRefresh(storyId: string, settings?: AppSettings): Promise<string | null> {
+  const currentSettings = settings ?? await getSettings();
   return transaction(async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
     const queued = await client.query('SELECT key FROM operational_state WHERE key=$1 FOR UPDATE', [`digest_refresh:${storyId}`]);
@@ -19,6 +22,30 @@ export async function forkPublishedRefresh(storyId: string): Promise<string | nu
       JOIN stories s ON s.id=t.story_id WHERE t.previous_story_id=$1 AND ${unpublished('s')}
       AND s.status<>'rejected' AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=s.id)
       ORDER BY s.created_at,s.id LIMIT 1 FOR UPDATE OF s`, [latest])).rows[0]?.id;
+    const ownedStoryIds = [...new Set([storyId, latest, ...(draft ? [draft] : [])])];
+    await client.query(`SELECT i.id FROM source_items i WHERE EXISTS(
+      SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
+      WHERE m.story_id=ANY($1::uuid[]) AND r.item_id=i.id)
+      OR EXISTS(SELECT 1 FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
+        JOIN item_revisions r ON r.id=l.revision_id WHERE sl.story_id=ANY($1::uuid[]) AND r.item_id=i.id)
+      ORDER BY i.id FOR SHARE`, [ownedStoryIds]);
+    const destinations = await client.query<{ destination_id: string }>(`SELECT DISTINCT destination_id FROM publications
+      WHERE story_id=$1 AND message_id IS NOT NULL AND published_at IS NOT NULL`, [latest]);
+    let admitted = false;
+    let unverifiable = false;
+    for (const { destination_id } of destinations.rows) {
+      const admission = await publicationInputAdmission(latest, destination_id, currentSettings, client.query.bind(client), { storyIds: ownedStoryIds });
+      if (admission.allowed) { admitted = true; break; }
+      unverifiable ||= admission.reason === 'publication_input_unverifiable';
+    }
+    if (!admitted) {
+      if (unverifiable) await client.query(`INSERT INTO operational_state(key,value) VALUES($1,$2)
+        ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`,
+      [`publication_refresh_hold:${storyId}`, JSON.stringify({ storyId, latestStoryId: latest, reason: 'publication_input_unverifiable' })]);
+      // Legacy posts stay untouched. A marker cannot authorize a fork or an automatic retry.
+      await client.query('DELETE FROM operational_state WHERE key=$1', [`digest_refresh:${storyId}`]);
+      return null;
+    }
     if (!draft) {
       const reports = await client.query(`SELECT m.id FROM story_mentions m JOIN source_items i ON i.current_revision_id=m.revision_id
         WHERE m.story_id=$1 ORDER BY m.id FOR UPDATE OF m FOR SHARE OF i`, [latest]);

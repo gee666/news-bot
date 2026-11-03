@@ -3,13 +3,14 @@ import { beforeEach, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../settings.js';
 import { prepareReadyStories } from './ready.js';
 
-const mocks = vi.hoisted(() => ({ query: vi.fn(), prepare: vi.fn(), updates: vi.fn() }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), prepare: vi.fn(), updates: vi.fn(), admission: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 vi.mock('../pipeline/failure-admission.js', () => ({ automaticFailureHeld: async () => false }));
 vi.mock('../pipeline/generation-freshness.js', () => ({ generationIsCurrent: async () => true }));
 vi.mock('../pipeline/eligibility.js', () => ({ guardDigestEligibility: async () => {} }));
 vi.mock('./store.js', () => ({ prepareDigest: mocks.prepare }));
 vi.mock('./updates.js', () => ({ prepareUpdates: mocks.updates }));
+vi.mock('./input-admission.js', () => ({ publicationInputAdmission: mocks.admission }));
 
 const settings = { ...defaultSettings, publishingEnabled: true };
 function event() {
@@ -19,6 +20,7 @@ function event() {
 
 beforeEach(() => {
   mocks.query.mockReset();
+  mocks.admission.mockReset().mockResolvedValue({ allowed: true });
   mocks.prepare.mockReset().mockResolvedValue(undefined);
   mocks.updates.mockReset().mockResolvedValue(undefined);
 });

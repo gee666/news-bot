@@ -1,15 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
 import { defaultSettings } from '../settings.js';
-import { mergeSources, prepareDigest, snapshotFor, type StoryContent } from './store.js';
+import { adoptPreparedPublications, mergeSources, prepareDigest, snapshotFor, type StoryContent } from './store.js';
+import { reportBoundary } from './input-evidence.js';
 
-const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn() }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), transaction: vi.fn(), admission: vi.fn(), record: vi.fn(), generation: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: mocks.transaction }));
+vi.mock('./input-admission.js', () => ({ publicationInputAdmission: mocks.admission, recordPublicationInputs: mocks.record }));
+vi.mock('../pipeline/generation-freshness.js', () => ({ generationIsCurrent: mocks.generation }));
 const story: StoryContent = { id: 'story', headline: 'Новость', summary: null, researched: false,
   translated_excerpt: 'Обзор', chosen_excerpt: null, interest_score: 8 };
 
 beforeEach(() => {
   mocks.query.mockReset().mockResolvedValue({ rows: [] });
+  mocks.admission.mockReset().mockResolvedValue({ allowed: true });
+  mocks.record.mockReset().mockResolvedValue(undefined);
+  mocks.generation.mockReset().mockResolvedValue(true);
   mocks.transaction.mockReset().mockImplementation(async (run: (client: Pick<PoolClient,'query'>) => Promise<unknown>) => run({ query: mocks.query }));
 });
 
@@ -85,6 +91,44 @@ describe('publication snapshots', () => {
     expect(mergeSources(merged)).toEqual(merged);
   });
 
+  it.each([undefined, { version: 'publication-input-v1', inputs: [] },
+    { version: 'publication-input-v2', inputs: [] }, { version: 'publication-input-v2', inputs: [{}] }])(
+    'does not regenerate legacy or invalid adoption inputs %j', async boundary => {
+      mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT s.*,p.id AS publication_id')
+        ? [{ ...story, publication_id: '5df47752-f683-478b-9875-7874456046bb', input_boundary: boundary }] : [] }));
+      await adoptPreparedPublications(defaultSettings, '-100123');
+      expect(mocks.admission).not.toHaveBeenCalled();
+      expect(mocks.generation).not.toHaveBeenCalled();
+      expect(mocks.record).not.toHaveBeenCalled();
+      expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO publication_snapshots'))).toBe(false);
+      const selection = String(mocks.query.mock.calls[1]?.[0]);
+      expect(selection).toContain("boundary.value->>'version'='publication-input-v2'");
+      expect(selection).toContain('NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id)');
+      expect(selection).toContain('NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id)');
+    });
+  it('captures a new publication only after its snapshot and publication are inserted', async () => {
+    const id = '5df47752-f683-478b-9875-7874456046bb';
+    const snapshot = '2ce4573a-7ba0-47c1-a803-55ac532418ae';
+    const publication = '88b2ee44-83e7-49f5-a808-e19efb1e8b7b';
+    mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT s.* FROM stories s') ? [{ ...story, id }]
+      : sql.startsWith('INSERT INTO publication_snapshots') ? [{ id: snapshot }]
+        : sql.startsWith('INSERT INTO publications(') ? [{ id: publication }] : [] }));
+    expect(await prepareDigest(defaultSettings, '-100123', { storyIds: [id] })).toEqual([publication]);
+    expect(mocks.record).toHaveBeenCalledWith(expect.anything(), publication, id, { newPreparation: true });
+    const insert = mocks.query.mock.calls.findIndex(([sql]) => String(sql).startsWith('INSERT INTO publications('));
+    expect(mocks.query.mock.invocationCallOrder[insert]).toBeLessThan(mocks.record.mock.invocationCallOrder[0] ?? 0);
+  });
+  it('only refreshes an unattempted valid modern adoption baseline', async () => {
+    const id = '5df47752-f683-478b-9875-7874456046bb';
+    const snapshot = '2ce4573a-7ba0-47c1-a803-55ac532418ae';
+    const boundary = reportBoundary([{ item_id: id, text: 'Report', content_hash: 'raw',
+      source_time: new Date(), urls: [] }]);
+    mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT s.*,p.id AS publication_id')
+      ? [{ ...story, id, publication_id: id, input_boundary: boundary }]
+      : sql.startsWith('INSERT INTO publication_snapshots') ? [{ id: snapshot }] : [] }));
+    await adoptPreparedPublications(defaultSettings, '-100123');
+    expect(mocks.record).toHaveBeenCalledWith(expect.anything(), id, id);
+  });
   it('selects complete stories with current scores and no digest limit under cleanup lock', async () => {
     await prepareDigest(defaultSettings,'-100123');
     expect(mocks.query.mock.calls[0]?.[0]).toContain('news-bot-history');

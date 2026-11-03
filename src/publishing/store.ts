@@ -7,6 +7,8 @@ import { eligible, snapshotFor, type StoryContent } from './content.js';
 import { settleEdit } from './edit-settlement.js';
 import { releaseDestination } from './destination-order.js';
 import { generationIsCurrent } from '../pipeline/generation-freshness.js';
+import { publicationInputAdmission, recordPublicationInputs } from './input-admission.js';
+import { publicationBoundarySchema } from './input-evidence.js';
 export { eligible, snapshotFor, mergeSources, type StoryContent } from './content.js';
 
 /** Oldest current relevant source date first. Unknown dates use immutable first-collection retention time. */
@@ -92,19 +94,26 @@ export async function tryLocked(name: string, run: () => Promise<void>): Promise
 export async function adoptPreparedPublications(settings: AppSettings, destinationId: string): Promise<void> {
   await transaction(async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
-    const candidates = await client.query<StoryContent & { publication_id: string }>(`SELECT s.*,p.id AS publication_id
-      FROM publications p LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id
+    const candidates = await client.query<StoryContent & { publication_id: string; input_boundary: unknown }>(`SELECT s.*,p.id AS publication_id,
+      boundary.value AS input_boundary
+      FROM publications p JOIN operational_state boundary ON boundary.key='publication_input:'||p.id::text
+      LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id
       LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id
       JOIN stories s ON s.id=coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id)
       WHERE p.destination_id=$1 AND p.status='prepared' AND p.message_id IS NULL
         AND p.story_id IS DISTINCT FROM s.id AND ${eligible}
-        AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation LIKE 'send_media:%')
+        AND boundary.value->>'version'='publication-input-v2'
+        AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id)
+        AND NOT EXISTS(SELECT 1 FROM publication_media_batches b WHERE b.publication_id=p.id)
         AND NOT EXISTS(SELECT 1 FROM publication_destination_reservations r WHERE r.publication_id=p.id)
         AND NOT EXISTS(SELECT 1 FROM request_attempts a WHERE a.publication_id=p.id AND a.operation='send'
           AND ${unsafeSendAttempt})
       ORDER BY s.id,p.created_at,p.id FOR UPDATE OF p,s`,
     [destinationId,settings.minimumPublicationScore,settings.profileVersion,settings.modelVersion]);
     for (const story of candidates.rows) {
+      const saved = publicationBoundarySchema.safeParse(story.input_boundary);
+      if (!saved.success || !saved.data.inputs.length) continue;
+      if (!(await publicationInputAdmission(story.id, destinationId, settings, client.query.bind(client))).allowed) continue;
       if (!await generationIsCurrent(story.id, settings, client.query.bind(client))) continue;
       const owner = (await client.query<{ id: string }>(`SELECT p.id FROM publications p
         LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id
@@ -125,6 +134,7 @@ export async function adoptPreparedPublications(settings: AppSettings, destinati
       if (!snapshot) throw new Error('Adopted snapshot insert failed');
       await client.query(`UPDATE publications SET story_id=$1,snapshot_id=$2,pending_snapshot_id=NULL,
         error_code=NULL,updated_at=now() WHERE id=$3`, [story.id,snapshot.id,story.publication_id]);
+      await recordPublicationInputs(client, story.publication_id, story.id);
     }
   });
 }
@@ -156,6 +166,7 @@ export async function prepareDigest(settings: AppSettings, destinationId: string
     const capacity = Math.max(0, limit - ids.length);
     for (const story of stories.rows) {
       if (ids.length >= limit) break;
+      if (!(await publicationInputAdmission(story.id, destinationId, settings, client.query.bind(client))).allowed) continue;
       if (!await generationIsCurrent(story.id, settings, client.query.bind(client))) continue;
       const content = await snapshotFor(client, story);
       const snapshot = (await client.query<{ id: string }>('INSERT INTO publication_snapshots(story_id,content) VALUES ($1,$2) RETURNING id',
@@ -163,7 +174,9 @@ export async function prepareDigest(settings: AppSettings, destinationId: string
       if (!snapshot) throw new Error('Snapshot insert failed');
       const inserted = await client.query<{ id: string }>(`INSERT INTO publications(story_id,snapshot_id,destination_id,bot_id) VALUES ($1,$2,$3,$4) RETURNING id`,
         [story.id,snapshot.id,destinationId,manual ? String(manual.botId) : null]);
-      ids.push(z.uuid().parse(inserted.rows[0]?.id));
+      const publicationId = z.uuid().parse(inserted.rows[0]?.id);
+      await recordPublicationInputs(client, publicationId, story.id, { newPreparation: true });
+      ids.push(publicationId);
     }
     if (manual) await client.query(`INSERT INTO operational_state(key,value) VALUES($1,$2) ON CONFLICT(key)
       DO UPDATE SET value=operational_state.value||EXCLUDED.value,updated_at=now()`,
