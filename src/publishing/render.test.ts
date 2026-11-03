@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { PublicationSnapshot } from '../types.js';
-import { escapeHtml, MESSAGE_LIMIT, render, SOURCE_LIMIT } from './render.js';
+import { publicationSnapshotSchema, type PublicationSnapshot } from '../types.js';
+import { escapeHtml, MESSAGE_LIMIT, render, renderPublication, SOURCE_LIMIT } from './render.js';
+import { desiredNavigation, navigationOnlyChange } from './navigation.js';
 import { mergeSources } from './store.js';
 const snapshot: PublicationSnapshot = {
   headline: 'Компания <AI> выпустила "модель" & SDK', score: 8, details: 'Подробности <b>не разметка</b>',
@@ -20,6 +21,62 @@ describe('full publication rendering', () => {
     expect(message.link_preview_options.is_disabled).toBe(true);
     expect(message.plainText).toBe('••••••••◦◦\n' + snapshot.headline + '\n\n' + snapshot.details + '\n\nВторичные источники\nКанал <1> · №23 · доступ ограничен');
     expect(message.plainText.slice(message.links[0]!.offset,message.links[0]!.offset+message.links[0]!.length)).toBe('Канал <1> · №23 · доступ ограничен');
+  });
+  it.each([undefined, 1 as const])('shows the frozen primary date under the headline with presentation %s', presentationVersion => {
+    const content = { ...snapshot, headline: `${snapshot.headline} 😀`, presentationVersion,
+      primaryPublishedAt: '2026-10-06T23:59:59.000Z' };
+    const message = render(content);
+    expect(message.text).toContain(`<b>${escapeHtml(content.headline)}</b>\nДата первоисточника: 06.10.2026\n\n`);
+    expect(message.plainText).toContain(`${content.headline}\nДата первоисточника: 06.10.2026\n\n`);
+    expect(message.text).toContain(escapeHtml(snapshot.details));
+    const baseline = render({ ...content, primaryPublishedAt: undefined });
+    expect(message.plainText.length - baseline.plainText.length).toBe('\nДата первоисточника: 06.10.2026'.length);
+    expect((message.text.match(/<b>/gu) ?? []).length).toBe((baseline.text.match(/<b>/gu) ?? []).length);
+    expect(message.links[0]?.offset).toBe((baseline.links[0]?.offset ?? 0) + '\nДата первоисточника: 06.10.2026'.length);
+    for (const link of message.links) expect(message.plainText.slice(link.offset, link.offset + link.length)).toContain('Канал');
+  });
+  it('renders date-only UTC regardless of the process timezone', () => {
+    // This is Oct 5 in Pacific time, but the displayed publication date is UTC.
+    expect(render({ ...snapshot, primaryPublishedAt: '2026-10-06T00:30:00.000Z' }).plainText)
+      .toContain('Дата первоисточника: 06.10.2026');
+  });
+  it.each(['2026-10-06', 'not-a-date', '2026-02-30T00:00:00Z', '<b>06.10.2026</b>', null])(
+    'rejects an invalid primary publication timestamp: %s', primaryPublishedAt => {
+      expect(publicationSnapshotSchema.safeParse({ ...snapshot, primaryPublishedAt }).success).toBe(false);
+      expect(() => render({ ...snapshot, primaryPublishedAt })).toThrow('publication_snapshot_invalid');
+    });
+  it('preserves a dated snapshot through navigation and treats date changes as body changes', async () => {
+    const content = publicationSnapshotSchema.parse({ ...snapshot, primaryPublishedAt: '2026-10-06T00:00:00.000Z' });
+    const publication = { id: 'publication', story_id: null, destination_id: '-100123', bot_id: '123' };
+    const query = async () => { throw new Error('No date or story lookup expected'); };
+    for (const sent of [snapshot, content]) {
+      const desired = await desiredNavigation({ query }, publication, sent);
+      expect(desired.primaryPublishedAt).toBe(sent.primaryPublishedAt);
+      expect(navigationOnlyChange(sent, desired)).toBe(true);
+      expect(render(desired)).toEqual(render(sent));
+    }
+    expect(navigationOnlyChange(snapshot, content)).toBe(false);
+    expect(navigationOnlyChange(content, { ...content, primaryPublishedAt: '2026-11-02T00:00:00.000Z' })).toBe(false);
+  });
+  it.each([1024, MESSAGE_LIMIT])('includes the date in the %s character budget, including update-link offsets', limit => {
+    const content = { ...snapshot, headline: 'Модель 😀 <AI>', primaryPublishedAt: '2026-10-06T00:00:00.000Z',
+      updatedTo: 'https://t.me/c/123/42', details: '' };
+    const budget = limit - render(content, { limit, compactSources: false }).plainText.length - 2;
+    const fitted = { ...content, details: 'x'.repeat(budget) };
+    const message = render(fitted, { limit, compactSources: false });
+    expect(message.plainText.length).toBe(limit);
+    expect(message.links).toHaveLength(2);
+    const first = message.links[0]!;
+    expect(message.plainText.slice(first.offset, first.offset + first.length)).toBe(content.updatedTo);
+    const last = message.links[1]!;
+    expect(message.plainText.slice(last.offset, last.offset + last.length)).toBe('Канал <1> · №23 · доступ ограничен');
+    expect(() => render({ ...fitted, details: fitted.details + 'x' }, { limit, compactSources: false }))
+      .toThrow('publication_message_too_long');
+    if (limit === 1024) {
+      expect(renderPublication({ content: fitted, delivery_kind: 'album' })).toEqual(message);
+      expect(() => renderPublication({ content: { ...fitted, details: fitted.details + 'x'.repeat(100) }, delivery_kind: 'album' }))
+        .toThrow('publication_message_too_long');
+    }
   });
   it('shows the previous-publication category last, with the channel link', () => {
     const message=render({...snapshot,sources:[{label:'Старая новость',url:'https://t.me/c/4376672811/644',

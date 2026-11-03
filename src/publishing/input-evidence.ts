@@ -16,7 +16,7 @@ const payloadSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('url'), url: z.url({ protocol: /^https?$/u }) }).strict(),
 ]);
 export const publicationBoundarySchema = z.object({ version: z.literal('publication-input-v2'),
-  // Optional only for comparison with already published v2 input baselines. New sends require it.
+  // Informational primary dates may be unknown or absent in saved v2 boundaries.
   primaryEventDates: z.array(primaryEventDateSchema).optional(),
   inputs: z.array(z.object({ itemId: z.uuid(), contentHash: z.string(), payload: payloadSchema,
     sourceTime: z.iso.datetime(), revisionTime: z.iso.datetime().optional(),

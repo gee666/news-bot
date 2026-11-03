@@ -9,7 +9,7 @@ export type PrimaryEventDate = z.infer<typeof primaryEventDateSchema>;
 const readSchema = z.object({ id: z.uuid(), url: z.url(), title: z.string().nullable(), content: z.string(), metadata: z.unknown() });
 const dateMetadataSchema = z.object({ publishedAt: z.iso.datetime({ offset: true }).nullish() });
 
-/** Observe dates from already-read event primaries, never discovery links or fetched/updated times.
+/** Informational only. Observe dates from already-read event primaries, never discovery links or fetched/updated times.
  * Include undated reads explicitly so a later attachment cannot replace preparation provenance. */
 export async function primaryEventDates(storyId: string, query = db.query.bind(db)): Promise<PrimaryEventDate[]> {
   const result = await query(`${generationThread} SELECT DISTINCT e.id,coalesce(e.canonical_url,e.url) AS url,e.title,e.content,e.metadata
@@ -23,12 +23,4 @@ export async function primaryEventDates(storyId: string, query = db.query.bind(d
     const date = metadata.success ? metadata.data.publishedAt : null;
     return [{ evidenceId: row.id, url: row.url, publishedAt: date ? new Date(date).toISOString() : null }];
   });
-}
-
-/** Unknown dates do not cancel known-old dates. A dated recent primary can support a new update
- * alongside old background. This does not establish event age when every primary is undated. */
-export function stalePrimaryEvent(dates: PrimaryEventDate[], windowHours: number, now: number): boolean {
-  const known = dates.flatMap(date => date.publishedAt === null ? [] : [Date.parse(date.publishedAt)]);
-  const cutoff = now - windowHours * 3_600_000;
-  return known.length > 0 && !known.some(date => date >= cutoff && date <= now);
 }

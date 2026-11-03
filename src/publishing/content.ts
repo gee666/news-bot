@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { publishedThread } from '../pipeline/publication-thread.js';
 import { relatedPublicationSources, textNavigationSources } from './navigation.js';
 import { orderSources } from './sources.js';
+import { primaryEventDates } from './event-dates.js';
 import { readFailure, usefulSourceTitle } from '../sources/read-quality.js';
 import { evidenceMetadataSchema } from '../pipeline/generation-store.js';
 /** Latest current assessment wins over archived merge judgments, per URL and story. */
@@ -176,15 +177,21 @@ export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: 
 }
 
 export interface SnapshotOptions {
-  /** Historical comparisons inherit even an absent version; new snapshots default to version 1. */
-  presentation?: Pick<PublicationSnapshot, 'presentationVersion'>;
+  /** Historical comparisons retain the frozen date and version, including their absence. */
+  presentation?: Pick<PublicationSnapshot, 'presentationVersion' | 'primaryPublishedAt'>;
 }
 
 export async function snapshotFor(client: Pick<PoolClient, 'query'>, story: StoryContent,
   receiptId?: string, options: SnapshotOptions = {}): Promise<PublicationSnapshot> {
   const presentationVersion = options.presentation ? options.presentation.presentationVersion : 1;
+  const sources = await snapshotSources(client, story, receiptId, undefined, options);
+  // Dates are already-read primary publication metadata, not report times or inferred event dates.
+  const primaryPublishedAt = options.presentation ? options.presentation.primaryPublishedAt
+    : (await primaryEventDates(story.id, client.query.bind(client)))
+      .flatMap(date => date.publishedAt === null ? [] : [date.publishedAt]).sort()[0];
   return publicationSnapshotSchema.parse({ ...(presentationVersion === undefined ? {} : { presentationVersion }),
+    ...(primaryPublishedAt === undefined ? {} : { primaryPublishedAt }),
     headline: story.headline, score: story.interest_score,
     details: story.researched ? story.summary : story.translated_excerpt, detailsKind: story.researched ? 'summary' : 'excerpt',
-    ...await snapshotSources(client, story, receiptId, undefined, options) });
+    ...sources });
 }

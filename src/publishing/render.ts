@@ -60,8 +60,13 @@ function stripTrailingCitationMarkers(text: string): string {
 function interestBar(score: number): string {
   return '•'.repeat(score) + '◦'.repeat(10 - score);
 }
+function primaryDateLine(snapshot: PublicationSnapshot): string {
+  if (!snapshot.primaryPublishedAt) return '';
+  const [year, month, day] = new Date(snapshot.primaryPublishedAt).toISOString().slice(0, 10).split('-');
+  return `\nДата первоисточника: ${day}.${month}.${year}`;
+}
 function header(snapshot: PublicationSnapshot, headline: string): string {
-  return `${interestBar(snapshot.score)}\n${headline}`;
+  return `${interestBar(snapshot.score)}\n${headline}${primaryDateLine(snapshot)}`;
 }
 function reviewNotes(snapshot: PublicationSnapshot): string {
   const reason = snapshot.review?.reason.replace(/\s+/gu, ' ').trim().slice(0, 240);
@@ -100,7 +105,7 @@ function renderValidatedSnapshot(snapshot: PublicationSnapshot, options: RenderO
 
   const plainText = body + sections.plainText;
   if (plainText.length > limit) throw new PublicationRenderError('publication_message_too_long');
-  let text = `${interestBar(snapshot.score)}\n<b>${escapeHtml(headline)}</b>`;
+  let text = `${interestBar(snapshot.score)}\n<b>${escapeHtml(headline)}</b>${escapeHtml(primaryDateLine(snapshot))}`;
   if (details) text += `\n\n${escapeHtml(details)}`;
   if (earlier) text += `\n\n${escapeHtml(earlier)}`;
   text += escapeHtml(notes) + sections.text;

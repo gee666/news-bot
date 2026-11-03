@@ -112,7 +112,7 @@ export async function adoptPreparedPublications(settings: AppSettings, destinati
     [destinationId,settings.minimumPublicationScore,settings.profileVersion,settings.modelVersion]);
     for (const story of candidates.rows) {
       const saved = publicationBoundarySchema.safeParse(story.input_boundary);
-      if (!saved.success || !saved.data.inputs.length || saved.data.primaryEventDates === undefined) continue;
+      if (!saved.success || !saved.data.inputs.length) continue;
       if (!(await publicationInputAdmission(story.id, destinationId, settings, client.query.bind(client))).allowed) continue;
       if (!await generationIsCurrent(story.id, settings, client.query.bind(client))) continue;
       const owner = (await client.query<{ id: string }>(`SELECT p.id FROM publications p

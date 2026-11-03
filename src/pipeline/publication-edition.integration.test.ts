@@ -206,7 +206,10 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
         await revise(target, 'Intermediate revision');
         await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [target.item, target.revision]);
       }
-      await supplement(target.id);
+      const precollected = await supplement(target.id);
+      await database.db.query(`UPDATE source_items SET collected_at=
+        (SELECT published_at FROM publications WHERE id=$2)-interval '1 hour' WHERE id=$1`,
+      [precollected.item, target.publication]);
       const queries = ['SELECT * FROM stories WHERE id=$1', 'SELECT * FROM publications WHERE story_id=$1',
         'SELECT * FROM publication_snapshots WHERE story_id=$1', 'SELECT * FROM story_mentions WHERE story_id=$1'];
       const before = await Promise.all(queries.map(sql => database.db.query(sql, [target.id]).then(result => result.rows)));
@@ -219,6 +222,24 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
         .toEqual([{ value: { storyId: target.id, latestStoryId: target.id, reason: 'publication_input_unverifiable' } }]);
       expect(await forkPublishedRefresh(target.id, settings)).toBeNull();
     });
+  it('forks fresh independent coverage after a legacy post without reconstructing its input history', async () => {
+    const target = await sent(undefined, 13, { legacy: true });
+    const queries = ['SELECT * FROM publications WHERE story_id=$1', 'SELECT * FROM publication_snapshots WHERE story_id=$1'];
+    const before = await Promise.all(queries.map(sql => database.db.query(sql, [target.id]).then(result => result.rows)));
+    const { link } = await supplement(target.id);
+    await queue(target.id);
+    const { forkPublishedRefresh } = await import('./publication-edition.js');
+    const draft = await forkPublishedRefresh(target.id, settings);
+    expect(draft).toBeTruthy(); expect(draft).not.toBe(target.id);
+    expect((await database.db.query('SELECT previous_story_id FROM story_publication_threads WHERE story_id=$1', [draft])).rows)
+      .toEqual([{ previous_story_id: target.id }]);
+    expect((await database.db.query('SELECT link_id FROM story_link_sources WHERE story_id=$1', [draft])).rows).toEqual([{ link_id: link }]);
+    expect(await Promise.all(queries.map(sql => database.db.query(sql, [target.id]).then(result => result.rows)))).toEqual(before);
+    expect((await database.db.query('SELECT key FROM operational_state WHERE key=ANY($1::text[])',
+      [[`publication_input:${target.publication}`, `publication_refresh_hold:${target.id}`, `digest_refresh:${target.id}`]])).rows).toEqual([]);
+    expect((await database.db.query('SELECT key FROM operational_state WHERE key=$1', [`digest_refresh:${draft}`])).rows).toHaveLength(1);
+    expect(await forkPublishedRefresh(target.id, settings)).toBeNull();
+  });
   it('does not regenerate a published unchanged story during a settings-driven digest refresh', async () => {
     const target = await sent(undefined, 13);
     await queue(target.id);

@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { generationThread } from '../pipeline/generation-context.js';
-import { stalePrimaryEvent } from './event-dates.js';
 import { novelPublicationInputs, publicationBoundarySchema, publicationInputBoundary, type PublicationBoundary } from './input-evidence.js';
 export { publicationInputBoundary } from './input-evidence.js';
 
@@ -16,7 +15,7 @@ export async function recordPublicationInputs(client: Pick<PoolClient, 'query'>,
   const key = `publication_input:${publicationId}`;
   const previous = (await client.query<{ value: unknown }>('SELECT value FROM operational_state WHERE key=$1 FOR UPDATE', [key])).rows[0];
   const saved = publicationBoundarySchema.safeParse(previous?.value);
-  if (!options.newPreparation && (!saved.success || !saved.data.inputs.length || saved.data.primaryEventDates === undefined)) return;
+  if (!options.newPreparation && (!saved.success || !saved.data.inputs.length)) return;
   const boundary = await publicationInputBoundary(storyId, client.query.bind(client));
   await client.query(`INSERT INTO operational_state(key,value) SELECT $1,$2::jsonb
     WHERE EXISTS(SELECT 1 FROM publications p WHERE p.id=$3 AND p.status='prepared'
@@ -29,24 +28,26 @@ export async function recordPublicationInputs(client: Pick<PoolClient, 'query'>,
 }
 
 export async function publishedInputBoundary(storyId: string, destinationId: string, query = db.query.bind(db)):
-Promise<{ published: boolean; boundary: PublicationBoundary; verifiable: boolean }> {
-  const publications = await query(`${generationThread} SELECT o.value AS boundary
+Promise<{ published: boolean; boundary: PublicationBoundary; verifiable: boolean; latestPublishedAt: string | null }> {
+  const publications = await query(`${generationThread} SELECT o.value AS boundary,p.published_at::text AS published_at
     FROM publications p LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id
     LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id
     LEFT JOIN operational_state o ON o.key='publication_input:'||p.id::text
     WHERE coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id) IN(SELECT id FROM generation_story_ids)
       AND p.destination_id=$2 AND p.message_id IS NOT NULL AND (p.status='published' OR p.published_at IS NOT NULL)
     ORDER BY p.published_at,p.id`, [storyId, destinationId]);
-  const parsed = z.array(z.object({ boundary: z.unknown() })).parse(publications.rows);
+  const parsed = z.array(z.object({ boundary: z.unknown(), published_at: z.string().nullable() })).parse(publications.rows);
   const boundary: PublicationBoundary = { version: 'publication-input-v2', inputs: [] };
+  let verifiable = true;
   for (const post of parsed) {
     const saved = publicationBoundarySchema.safeParse(post.boundary);
     if (!saved.success || !saved.data.inputs.length) {
-      return { published: true, boundary: { version: 'publication-input-v2', inputs: [] }, verifiable: false };
+      verifiable = false;
+      continue;
     }
     boundary.inputs.push(...saved.data.inputs);
   }
-  return { published: parsed.length > 0, boundary, verifiable: true };
+  return { published: parsed.length > 0, boundary, verifiable, latestPublishedAt: parsed.at(-1)?.published_at ?? null };
 }
 
 /** Dispatch requires the boundary saved at preparation. Never adopt today's inputs for an old queue row. */
@@ -54,7 +55,7 @@ export async function preparedPublicationInputs(publicationId: string, query = d
   const row = (await query<{ value: unknown }>('SELECT value FROM operational_state WHERE key=$1',
     [`publication_input:${publicationId}`])).rows[0];
   const saved = publicationBoundarySchema.safeParse(row?.value);
-  return saved.success && saved.data.inputs.length && saved.data.primaryEventDates !== undefined ? saved.data : null;
+  return saved.success && saved.data.inputs.length ? saved.data : null;
 }
 
 export async function publicationInputAdmission(storyId: string, destinationId: string, settings: AppSettings,
@@ -65,16 +66,30 @@ export async function publicationInputAdmission(storyId: string, destinationId: 
     inputs: boundaries.flatMap(boundary => boundary.inputs),
     primaryEventDates: boundaries.flatMap(boundary => boundary.primaryEventDates ?? []) };
   const prior = await publishedInputBoundary(storyId, destinationId, query);
+  if (prior.published && !prior.verifiable) {
+    if (!prior.latestPublishedAt) return { allowed: false, reason: 'publication_input_unverifiable' };
+    // Unknown history stays unknown. Only first-collected items after every prior post can qualify.
+    // Dispatch uses frozen item IDs and report dates, never later attachments or revision times.
+    const collected = await query<{ id: string }>(`SELECT id FROM source_items
+      WHERE id=ANY($1::uuid[]) AND collected_at>$2::timestamptz`,
+    [[...new Set(current.inputs.map(input => input.itemId))], prior.latestPublishedAt]);
+    const newItems = new Set(collected.rows.map(row => row.id));
+    const collectedInputs = current.inputs.filter(input => newItems.has(input.itemId));
+    if (!collectedInputs.length) return { allowed: false, reason: 'publication_input_unverifiable' };
+    const cutoff = Date.now() - settings.collectionWindowHours * 3_600_000;
+    const inputs = collectedInputs.filter(input => Date.parse(input.sourceTime) >= cutoff);
+    if (!inputs.length) return { allowed: false, reason: 'stale_source_input' };
+    return admitPublicationInputs({ ...current, inputs }, prior.boundary, true, true, settings.collectionWindowHours);
+  }
   return admitPublicationInputs(current, prior.boundary, prior.published, prior.verifiable, settings.collectionWindowHours);
 }
 
 export function admitPublicationInputs(current: PublicationBoundary, baseline: PublicationBoundary, published: boolean,
   verifiable: boolean, windowHours: number, now = Date.now()): InputAdmission {
-  if (current.primaryEventDates === undefined || published && !verifiable) return { allowed: false, reason: 'publication_input_unverifiable' };
+  if (published && !verifiable) return { allowed: false, reason: 'publication_input_unverifiable' };
   const novel = novelPublicationInputs(current, baseline);
   if (published && !novel.length) return { allowed: false, reason: 'no_new_source_input' };
   const cutoff = now - windowHours * 3_600_000;
-  if (stalePrimaryEvent(current.primaryEventDates, windowHours, now)) return { allowed: false, reason: 'stale_source_input' };
   const publishedItems = new Set(baseline.inputs.map(input => input.itemId));
   // V2 novelty requires added scoped payload backed by a real collected-text/URL addition.
   // Only a previously published item may use revision time; an old newly attached report cannot.

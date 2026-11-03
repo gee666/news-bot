@@ -34,6 +34,8 @@ export const publicationSnapshotSchema = z.object({
   headline: z.string().min(1),
   score: z.number().int().min(1).max(10),
   details: z.string(),
+  /** Earliest known relevant primary publication timestamp, frozen at preparation. */
+  primaryPublishedAt: z.iso.datetime().optional(),
   /** Legacy history text retained verbatim, rendered as part of the complete body. */
   earlier: z.string().min(1).optional(),
   detailsKind: z.enum(['summary', 'excerpt']),

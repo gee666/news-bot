@@ -13,10 +13,16 @@ const origin = { source_id: 'mention:xor', text: 'Сообщение XOR', name:
   access: 'public', classification: 'relevant' };
 const source = (url: string, primary = false): PublicationSource => ({ url, label: url,
   primary, access: 'public', classification: 'relevant' });
+const primaryRead = (publishedAt: string | null, id = 'f70c22db-c60d-43e9-818b-45ba6cc8feb2') => ({
+  id, url: reportUrl, title: 'Original announcement', content: 'The model is available with weights.',
+  metadata: { status: 200, publishedAt },
+});
 function client(options: { receipt?: object; primary?: string[]; referenced?: string[]; blockedNavigation?: string[];
+  reads?: ReturnType<typeof primaryRead>[];
   posts?: { story_id: string; message_id: string; content: PublicationSnapshot }[] } = {}) {
   const query = vi.fn().mockImplementation(async (sql: string) => {
     if (sql.includes("p.delivery_kind='album'")) return { rows: (options.blockedNavigation ?? []).map(url => ({ url })) };
+    if (sql.includes('SELECT DISTINCT e.id,coalesce')) return { rows: options.reads ?? [] };
     if (sql.includes('WITH source_assignments')) return { rows: [origin, { ...origin, source_id: 'mention:other',
       name: 'Другой канал', original_url: otherUrl, external_id: '1' }] };
     if (sql.includes('SELECT e.title')) return { rows: [{ id: 'evidence', title: 'Отчёт OpenAI', content: 'Actual research findings.',
@@ -33,6 +39,50 @@ function client(options: { receipt?: object; primary?: string[]; referenced?: st
 }
 const post = (id: string, sources: PublicationSource[]) => ({ story_id: id, message_id: id,
   content: { headline: `Новость ${id}`, details: `Сведения ${id}`, score: 6, detailsKind: 'summary' as const, sources } });
+
+describe('frozen primary publication dates', () => {
+  it('captures the Oct 6 date from already-read primary evidence', async () => {
+    const db = client({ reads: [primaryRead('2026-10-06T00:00:00Z')] });
+    const snapshot = await snapshotFor(db, story);
+    expect(snapshot.primaryPublishedAt).toBe('2026-10-06T00:00:00.000Z');
+    expect(render(snapshot).plainText).toContain(`${story.headline}\nДата первоисточника: 06.10.2026\n\n`);
+    const dateQuery = db.query.mock.calls.find(([sql]) => sql.includes('SELECT DISTINCT e.id,coalesce'));
+    expect(dateQuery?.[1]).toEqual([story.id]);
+    for (const gate of ["se.role='primary'", "se.relevance='relevant'", 'se.verified_at IS NOT NULL',
+      'se.superseded_at IS NULL', 'generation_story_ids']) expect(dateQuery?.[0]).toContain(gate);
+  });
+  it('chooses the earliest known primary timestamp regardless of order and ignores undated reads', async () => {
+    const reads = [primaryRead('2026-11-02T12:00:00Z'), primaryRead(null), primaryRead('2026-10-06T23:30:00-02:00')];
+    for (const ordered of [reads, [...reads].reverse()]) {
+      const snapshot = await snapshotFor(client({ reads: ordered }), story);
+      expect(snapshot.primaryPublishedAt).toBe('2026-10-07T01:30:00.000Z');
+      expect(render(snapshot).plainText).toContain('Дата первоисточника: 07.10.2026');
+    }
+  });
+  it.each([{ reads: [] }, { reads: [primaryRead(null)] }, { reads: [primaryRead('not-a-date')] }])(
+    'omits unknown primary dates: %j', async ({ reads }) => {
+      const snapshot = await snapshotFor(client({ reads }), story);
+      expect(snapshot).not.toHaveProperty('primaryPublishedAt');
+      expect(render(snapshot).plainText).not.toContain('Дата первоисточника');
+    });
+  it.each([{}, { presentationVersion: 1 as const },
+    { presentationVersion: 1 as const, primaryPublishedAt: '2026-10-06T00:00:00.000Z' }])(
+    'does not discover or replace dates in historical comparisons: %j', async presentation => {
+      const db = client({ reads: [primaryRead('2026-11-02T12:00:00Z')] });
+      const snapshot = await snapshotFor(db, story, undefined, { presentation });
+      expect(snapshot.primaryPublishedAt).toBe('primaryPublishedAt' in presentation ? presentation.primaryPublishedAt : undefined);
+      expect(db.query.mock.calls.some(([sql]) => sql.includes('SELECT DISTINCT e.id,coalesce'))).toBe(false);
+      if (!('primaryPublishedAt' in presentation)) expect(snapshot).not.toHaveProperty('primaryPublishedAt');
+    });
+  it('keeps the captured date when read metadata later changes', async () => {
+    const reads = [primaryRead('2026-10-06T00:00:00Z')];
+    const snapshot = await snapshotFor(client({ reads }), story);
+    const frozen = render(snapshot);
+    reads.splice(0, reads.length, primaryRead('2026-11-02T12:00:00Z'));
+    expect((await snapshotFor(client({ reads }), story)).primaryPublishedAt).toBe('2026-11-02T12:00:00.000Z');
+    expect(render(JSON.parse(JSON.stringify(snapshot)))).toEqual(frozen);
+  });
+});
 
 describe('generation source selection', () => {
   it.each([{}, { presentationVersion: 1 as const }])('inherits the exact presentation for historical comparisons: %j', async presentation => {

@@ -20,10 +20,10 @@ async function story() {
     VALUES('completed','A model release','The model is available.','Model released',8,true,false,$1,$2) RETURNING id`,
   [settings.profileVersion, settings.modelVersion]);
 }
-async function report(storyId: string, hours = 1, sourceOnly = false) {
+async function report(storyId: string, hours = 1, sourceOnly = false, connector = 'telegram') {
   const source = await one(`INSERT INTO sources(connector_type,external_id,name,access)
-    VALUES('telegram',$1,'Reports','public') RETURNING id`, [randomUUID()]);
-  const origin = `https://t.me/reports/${source}`;
+    VALUES($1,$2,'Reports','public') RETURNING id`, [connector, randomUUID()]);
+  const origin = connector === 'telegram' ? `https://t.me/reports/${source}` : `https://example.org/reports/${source}`;
   const item = await one(`INSERT INTO source_items(source_id,external_id,original_url,published_at)
     VALUES($1,'1',$2,now()-$3*interval '1 hour') RETURNING id`, [source, origin, hours]);
   const revision = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
@@ -74,11 +74,13 @@ describe.skipIf(!url)('publication input baselines in PostgreSQL', () => {
     admission = await import('./input-admission.js');
   });
   beforeEach(async () => {
+    vi.restoreAllMocks();
     await database.db.query('TRUNCATE sources,stories,publications,publication_snapshots,request_attempts CASCADE');
     await database.db.query('DELETE FROM operational_state');
     settings = await (await import('../settings.js')).saveSettings({ publishingEnabled: false, collectionWindowHours: 48 });
   });
   afterAll(async () => {
+    vi.restoreAllMocks();
     if (database) await database.db.end();
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
@@ -159,15 +161,84 @@ describe.skipIf(!url)('publication input baselines in PostgreSQL', () => {
     expect(await admission.publicationInputAdmission(prior, '-100123', settings))
       .toEqual({ allowed: false, reason: 'publication_input_unverifiable' });
   });
-  it('rejects a partially modern thread even when new recent coverage exists', async () => {
+  it('allows new recent coverage in a partially modern thread, then rejects unchanged reprocessing', async () => {
     const legacy = await story(); const input = await report(legacy);
     await published(legacy, [input.origin], false);
     const modern = await fork(legacy);
     await published(modern, [input.origin]);
-    await report(modern, 1, true);
-    expect(await admission.publicationInputAdmission(modern, '-100123', settings))
+    await report(modern);
+    expect(await admission.publicationInputAdmission(modern, '-100123', settings)).toEqual({ allowed: true });
+    const latest = await fork(modern);
+    await published(latest, [input.origin]);
+    expect(await admission.publicationInputAdmission(latest, '-100123', settings))
       .toEqual({ allowed: false, reason: 'publication_input_unverifiable' });
-    expect(await admission.publishedInputBoundary(modern, '-100123')).toMatchObject({ published: true, verifiable: false });
+    const baseline = await admission.publishedInputBoundary(latest, '-100123');
+    expect(baseline).toMatchObject({ published: true, verifiable: false });
+    expect(baseline.boundary.inputs.length).toBeGreaterThan(0);
+  });
+  it.each(['telegram', 'website'])('allows a fresh independent %s discussion of an Oct 6 event after an Oct 22 legacy post', async connector => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-03T08:00:00Z'));
+    const prior = await story(); const old = await report(prior);
+    await database.db.query(`UPDATE source_items SET collected_at='2026-10-21T12:00:00Z',
+      published_at='2026-10-21T12:00:00Z' WHERE id=$1`, [old.item]);
+    const sent = await published(prior, [old.origin], false);
+    await database.db.query("UPDATE publications SET published_at='2026-10-22T12:00:00Z' WHERE id=$1", [sent.id]);
+    const draft = await fork(prior);
+    const fresh = await report(draft, 1, false, connector);
+    await database.db.query(`UPDATE source_items SET collected_at='2026-11-03T07:00:00Z',
+      published_at='2026-11-02T12:00:00Z' WHERE id=$1`, [fresh.item]);
+    const evidence = await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at,metadata)
+      VALUES('https://example.org/oct-6','Oct 6 release','Model released with weights','public',now(),
+      '{"status":200,"publishedAt":"2026-10-06T00:00:00.000Z"}') RETURNING id`);
+    await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance,verified_at)
+      VALUES($1,$2,'primary','relevant',now())`, [draft, evidence]);
+    const boundary = await admission.publicationInputBoundary(draft);
+    expect(boundary.primaryEventDates?.[0]?.publishedAt).toBe('2026-10-06T00:00:00.000Z');
+    expect(await admission.publicationInputAdmission(draft, '-100123', settings, undefined, { boundary }))
+      .toEqual({ allowed: true });
+    expect(await admission.publicationInputAdmission(draft, '-100123', { ...settings, collectionWindowHours: 19 }, undefined, { boundary }))
+      .toEqual({ allowed: false, reason: 'stale_source_input' });
+    expect((await database.db.query('SELECT value FROM operational_state WHERE key=$1', [`publication_input:${sent.id}`])).rows).toEqual([]);
+    await published(draft, [old.origin, fresh.origin]);
+    expect((await admission.publicationInputAdmission(draft, '-100123', settings, undefined, { boundary })).allowed).toBe(false);
+  });
+  it('does not let metadata refreshes, real revisions or later fresh attachments revive old frozen legacy-thread inputs', async () => {
+    const prior = await story(); const old = await report(prior);
+    await database.db.query("UPDATE source_items SET collected_at=now()-interval '13 days' WHERE id=$1", [old.item]);
+    const sent = await published(prior, [old.origin], false);
+    await database.db.query("UPDATE publications SET published_at=now()-interval '12 days' WHERE id=$1", [sent.id]);
+    const draft = await fork(prior);
+    await database.db.query('UPDATE source_items SET published_at=now() WHERE id=$1', [old.item]);
+    await revise(old.item, 'Model released with new results');
+    const frozen = await admission.publicationInputBoundary(draft);
+    expect(await admission.publicationInputAdmission(draft, '-100123', settings, undefined, { boundary: frozen }))
+      .toEqual({ allowed: false, reason: 'publication_input_unverifiable' });
+    await report(draft);
+    expect(await admission.publicationInputAdmission(draft, '-100123', settings)).toEqual({ allowed: true });
+    expect(await admission.publicationInputAdmission(draft, '-100123', settings, undefined, { boundary: frozen }))
+      .toEqual({ allowed: false, reason: 'publication_input_unverifiable' });
+  });
+  it('requires first collection strictly after the latest prior publication, not just the oldest legacy post', async () => {
+    const prior = await story(); const old = await report(prior);
+    const legacy = await published(prior, [old.origin], false);
+    await database.db.query("UPDATE publications SET published_at=now()-interval '2 days' WHERE id=$1", [legacy.id]);
+    const draft = await fork(prior);
+    const modern = await published(draft, [old.origin]);
+    const fresh = await report(draft);
+    await database.db.query(`UPDATE source_items SET collected_at=(SELECT published_at FROM publications WHERE id=$2)
+      WHERE id=$1`, [fresh.item, modern.id]);
+    expect(await admission.publicationInputAdmission(draft, '-100123', settings))
+      .toEqual({ allowed: false, reason: 'publication_input_unverifiable' });
+    await database.db.query("UPDATE source_items SET collected_at=collected_at+interval '1 microsecond' WHERE id=$1", [fresh.item]);
+    expect(await admission.publicationInputAdmission(draft, '-100123', settings)).toEqual({ allowed: true });
+  });
+  it('does not infer a missing prior publication time even for a fresh independent report', async () => {
+    const prior = await story(); const old = await report(prior);
+    const legacy = await published(prior, [old.origin], false);
+    await database.db.query('UPDATE publications SET published_at=NULL WHERE id=$1', [legacy.id]);
+    const draft = await fork(prior); await report(draft);
+    expect(await admission.publicationInputAdmission(draft, '-100123', settings))
+      .toEqual({ allowed: false, reason: 'publication_input_unverifiable' });
   });
   it('returns no prepared boundary for absent, invalid or v1 legacy state without adopting current reports', async () => {
     const id = await story(); const input = await report(id);

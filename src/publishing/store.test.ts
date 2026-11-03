@@ -118,11 +118,12 @@ describe('publication snapshots', () => {
     const insert = mocks.query.mock.calls.findIndex(([sql]) => String(sql).startsWith('INSERT INTO publications('));
     expect(mocks.query.mock.invocationCallOrder[insert]).toBeLessThan(mocks.record.mock.invocationCallOrder[0] ?? 0);
   });
-  it('only refreshes an unattempted valid modern adoption baseline', async () => {
+  it.each([true, false])('refreshes an unattempted modern adoption baseline with dates present=%s', async withDates => {
     const id = '5df47752-f683-478b-9875-7874456046bb';
     const snapshot = '2ce4573a-7ba0-47c1-a803-55ac532418ae';
     const boundary = reportBoundary([{ item_id: id, text: 'Report', content_hash: 'raw',
       source_time: new Date(), urls: [] }]);
+    if (!withDates) delete boundary.primaryEventDates;
     mocks.query.mockImplementation(async (sql: string) => ({ rows: sql.includes('SELECT s.*,p.id AS publication_id')
       ? [{ ...story, id, publication_id: id, input_boundary: boundary }]
       : sql.startsWith('INSERT INTO publication_snapshots') ? [{ id: snapshot }] : [] }));

@@ -49,9 +49,9 @@ async function fixture(primaryDate: string | null = '2026-10-06T00:00:00.000Z') 
     VALUES($1,$2,'EmbeddingGemma 2 is available',0)`, [story, revision]);
   const evidence = await addEvidence(story, primaryDate);
   await acceptFixtureStories(settings, [story]);
-  return { story, evidence };
+  return { story, evidence, item };
 }
-/** Force a prepared row to exercise dispatch refusal independently of selection and missing provenance. */
+/** Capture a boundary independently of digest selection. */
 async function prepareDirect(storyId: string): Promise<Publication> {
   const story = (await database.db.query<StoryContent>('SELECT * FROM stories WHERE id=$1', [storyId])).rows[0];
   if (!story) throw new Error('Missing story');
@@ -64,7 +64,7 @@ async function prepareDirect(storyId: string): Promise<Publication> {
   if (!pub) throw new Error('Missing publication'); return pub;
 }
 
-describe.skipIf(!url)('frozen read-primary event dates at preparation and dispatch', () => {
+describe.skipIf(!url)('informational primary dates at preparation and dispatch', () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: url }); await admin.query(`CREATE SCHEMA ${schema}`);
     const scoped = new URL(url ?? ''); scoped.searchParams.set('options', `-c search_path=${schema},public`);
@@ -90,29 +90,26 @@ describe.skipIf(!url)('frozen read-primary event dates at preparation and dispat
     vi.unstubAllEnvs();
   });
   it.each(['2026-10-06', '2026-10-08', '2026-10-14', '2026-10-15', '2026-10-27'])(
-    'blocks known-old %s primary plus Nov 2 recap at preparation and send, not just missing-field admission', async date => {
+    'allows the Nov 2 recap of an old %s primary at preparation and mocked send', async date => {
       const f = await fixture(`${date}T00:00:00.000Z`);
-      expect(await admission.publicationInputAdmission(f.story, '-100123', settings))
-        .toEqual({ allowed: false, reason: 'stale_source_input' });
-      expect(await store.prepareDigest(settings, '-100123', { storyIds: [f.story] })).toEqual([]);
-      const pub = await prepareDirect(f.story);
+      expect(await admission.publicationInputAdmission(f.story, '-100123', settings)).toEqual({ allowed: true });
+      const [id] = await store.prepareDigest(settings, '-100123', { storyIds: [f.story] });
+      expect(id).toBeDefined();
+      const pub = (await database.db.query<Publication>(`${store.publicationSelect} WHERE p.id=$1`, [id])).rows[0];
+      if (!pub) throw new Error('Missing publication');
       expect((await admission.preparedPublicationInputs(pub.id))?.primaryEventDates)
         .toEqual([{ evidenceId: f.evidence, url: primaryUrl, publishedAt: `${date}T00:00:00.000Z` }]);
       const { sendPrepared } = await import('./delivery.js');
-      expect(await sendPrepared(pub, new BotApi(), settings)).toBeNull();
-      expect(BotApi.prototype.send).not.toHaveBeenCalled();
-      expect((await database.db.query('SELECT id FROM request_attempts')).rows).toEqual([]);
-      expect((await database.db.query('SELECT error_code FROM publications WHERE id=$1', [pub.id])).rows)
-        .toEqual([{ error_code: 'publication_admission_stale_source_input' }]);
+      expect(await sendPrepared(pub, new BotApi(), settings)).toBe('not-actually-sent');
+      expect(BotApi.prototype.send).toHaveBeenCalledOnce();
     });
-  it('does not let a later fresh primary attachment bless frozen old prepared event provenance', async () => {
+  it('keeps frozen primary dates unchanged when a fresh primary is attached later', async () => {
     const f = await fixture(); const pub = await prepareDirect(f.story);
     const before = await admission.preparedPublicationInputs(pub.id);
     await addEvidence(f.story, '2026-11-03T07:00:00.000Z', { evidenceUrl: 'https://example.org/new-primary' });
     expect(await admission.publicationInputAdmission(f.story, '-100123', settings)).toEqual({ allowed: true });
     const { publicationAdmission } = await import('./freshness.js');
-    expect(await publicationAdmission(database.db, pub, settings, 'send'))
-      .toEqual({ allowed: false, reason: 'stale_source_input' });
+    expect(await publicationAdmission(database.db, pub, settings, 'send')).toEqual({ allowed: true });
     expect(await admission.preparedPublicationInputs(pub.id)).toEqual(before);
   });
   it('allows a fresh relevant primary alongside old background and old primary history', async () => {
@@ -122,7 +119,7 @@ describe.skipIf(!url)('frozen read-primary event dates at preparation and dispat
     await acceptFixtureStories(settings, [f.story]);
     expect(await store.prepareDigest(settings, '-100123', { storyIds: [f.story] })).toHaveLength(1);
   });
-  it('only accepts dates from verified relevant unsuperseded successful primary reads', async () => {
+  it('only captures dates from verified relevant unsuperseded successful primary reads', async () => {
     const f = await fixture();
     await addEvidence(f.story, '2026-11-03T07:00:00.000Z', { role: 'supporting' });
     await addEvidence(f.story, '2026-11-03T07:00:00.000Z', { verified: false });
@@ -132,16 +129,16 @@ describe.skipIf(!url)('frozen read-primary event dates at preparation and dispat
     const { publicationInputBoundary } = await import('./input-evidence.js');
     expect((await publicationInputBoundary(f.story)).primaryEventDates).toHaveLength(1);
     expect(await admission.publicationInputAdmission(f.story, '-100123', settings))
-      .toEqual({ allowed: false, reason: 'stale_source_input' });
+      .toEqual({ allowed: true });
   });
-  it('does not let undated/malformed dates or fetched/updated timestamps erase a known-old primary', async () => {
+  it('captures unknown dates without using fetched/updated timestamps or rejecting the fresh report', async () => {
     const f = await fixture();
     await addEvidence(f.story, null, { dateMetadata: { fetchedAt: '2026-11-03T07:00:00Z', updatedAt: '2026-11-03T07:00:00Z' } });
     await addEvidence(f.story, null, { dateMetadata: { publishedAt: 'not-a-date' } });
     const { publicationInputBoundary } = await import('./input-evidence.js');
     expect((await publicationInputBoundary(f.story)).primaryEventDates?.filter(date => date.publishedAt === null)).toHaveLength(2);
     expect(await admission.publicationInputAdmission(f.story, '-100123', settings))
-      .toEqual({ allowed: false, reason: 'stale_source_input' });
+      .toEqual({ allowed: true });
   });
   it('includes already-read ancestor primary evidence used by generation', async () => {
     const f = await fixture();
@@ -150,16 +147,44 @@ describe.skipIf(!url)('frozen read-primary event dates at preparation and dispat
     await database.db.query(`INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version)
       VALUES($1,$2,'verified-test')`, [f.story, ancestor]);
     expect(await admission.publicationInputAdmission(f.story, '-100123', settings))
+      .toEqual({ allowed: true });
+  });
+  it('accepts a saved v2 boundary without event dates without reconstructing it at dispatch', async () => {
+    const f = await fixture(); const pub = await prepareDirect(f.story);
+    const key = `publication_input:${pub.id}`;
+    await database.db.query("UPDATE operational_state SET value=value-'primaryEventDates' WHERE key=$1", [key]);
+    const before = await admission.preparedPublicationInputs(pub.id);
+    expect(before?.inputs.length).toBeGreaterThan(0);
+    expect(before?.primaryEventDates).toBeUndefined();
+    const { publicationAdmission } = await import('./freshness.js');
+    expect(await publicationAdmission(database.db, pub, settings, 'send')).toEqual({ allowed: true });
+    expect(await admission.preparedPublicationInputs(pub.id)).toEqual(before);
+    // A safe unattempted modern refresh can still capture informational dates.
+    await database.transaction(client => admission.recordPublicationInputs(client, pub.id, f.story));
+    expect((await admission.preparedPublicationInputs(pub.id))?.primaryEventDates).toHaveLength(1);
+  });
+  it('rechecks the report date against the current window despite an old primary', async () => {
+    const f = await fixture(); const pub = await prepareDirect(f.story);
+    const { publicationAdmission } = await import('./freshness.js');
+    await (await import('../settings.js')).saveSettings({ collectionWindowHours: 20 });
+    expect(await publicationAdmission(database.db, pub, settings, 'send')).toEqual({ allowed: true });
+    await (await import('../settings.js')).saveSettings({ collectionWindowHours: 19 });
+    expect(await publicationAdmission(database.db, pub, settings, 'send'))
       .toEqual({ allowed: false, reason: 'stale_source_input' });
   });
-  it('does not reconstruct missing event-date provenance in an existing v2 prepared baseline', async () => {
+  it('rejects an old report even if a fresh primary is available', async () => {
+    const f = await fixture('2026-11-03T07:00:00.000Z');
+    await database.db.query("UPDATE source_items SET published_at='2026-10-21T12:00:00Z' WHERE id=$1", [f.item]);
+    expect(await admission.publicationInputAdmission(f.story, '-100123', settings))
+      .toEqual({ allowed: false, reason: 'stale_source_input' });
+    expect(await store.prepareDigest(settings, '-100123', { storyIds: [f.story] })).toEqual([]);
+  });
+  it('rejects unchanged reprocessing of the fresh recap after publication', async () => {
     const f = await fixture(); const pub = await prepareDirect(f.story);
+    await database.db.query(`UPDATE publications SET status='published',message_id='sent-fixture',
+      published_at='2026-11-03T07:00:00Z' WHERE id=$1`, [pub.id]);
     await database.db.query("UPDATE operational_state SET value=value-'primaryEventDates' WHERE key=$1", [`publication_input:${pub.id}`]);
-    expect(await admission.preparedPublicationInputs(pub.id)).toBeNull();
-    await database.transaction(client => admission.recordPublicationInputs(client, pub.id, f.story));
-    expect(await admission.preparedPublicationInputs(pub.id)).toBeNull();
-    const { publicationAdmission } = await import('./freshness.js');
-    expect(await publicationAdmission(database.db, pub, settings, 'send'))
-      .toEqual({ allowed: false, reason: 'publication_input_unverifiable' });
+    expect(await admission.publicationInputAdmission(f.story, '-100123', settings))
+      .toEqual({ allowed: false, reason: 'no_new_source_input' });
   });
 });
