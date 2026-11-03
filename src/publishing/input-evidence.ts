@@ -4,6 +4,7 @@ import type { Nodes } from 'mdast';
 import { db } from '../db.js';
 import { evidenceLinkSql } from '../sources/links.js';
 import { markdownTree } from '../sources/markdown.js';
+import { primaryEventDateSchema, primaryEventDates } from './event-dates.js';
 
 const reportSchema = z.object({
   item_id: z.uuid(), content_hash: z.string(), text: z.string(),
@@ -15,6 +16,8 @@ const payloadSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('url'), url: z.url({ protocol: /^https?$/u }) }).strict(),
 ]);
 export const publicationBoundarySchema = z.object({ version: z.literal('publication-input-v2'),
+  // Optional only for comparison with already published v2 input baselines. New sends require it.
+  primaryEventDates: z.array(primaryEventDateSchema).optional(),
   inputs: z.array(z.object({ itemId: z.uuid(), contentHash: z.string(), payload: payloadSchema,
     sourceTime: z.iso.datetime(), revisionTime: z.iso.datetime().optional(),
     collectedTokens: z.array(z.string().min(1)), collectedUrls: z.array(z.url()),
@@ -66,7 +69,7 @@ export function reportBoundary(rows: unknown[]): PublicationBoundary {
         collectedTokens: publicationTextTokens(collectedText), collectedUrls, collectedFingerprint });
     }
   }
-  return { version: 'publication-input-v2', inputs };
+  return { version: 'publication-input-v2', inputs, primaryEventDates: [] };
 }
 
 /** Retention is immutable; a refetch must not make an undated report recent again. */
@@ -90,7 +93,7 @@ export async function publicationInputBoundary(storyId: string, query = db.query
     WHERE length(trim(r.normalized_text))>0 AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
     ORDER BY i.id,scoped.text,scoped.urls::text`, [storyId]);
-  return reportBoundary(rows.rows);
+  return { ...reportBoundary(rows.rows), primaryEventDates: await primaryEventDates(storyId, query) };
 }
 
 function tokenCounts(sequences: string[][]): Map<string, number> {

@@ -28,7 +28,9 @@ Attachment download and decoding failures omit that attachment rather than faili
 
 Eligibility, minimum score and delivery-safety checks still apply. First posts require source input within `collectionWindowHours`. A later edition also requires new report text or source URLs compared with the inputs already published in its verified story thread. Model changes, refreshed summaries, metadata-only revisions and removed sources do not authorize another post. A meaningful change to an already published report can use its immutable revision time; attaching an old article cannot make it recent.
 
-Preparation saves the exact story-scoped source inputs, and delivery checks those prepared inputs again so newly attached reports cannot authorize an older snapshot. Text comparison ignores formatting and deletion-only changes. Editing another topic in the same source message does not count as an update to this story.
+Preparation saves the exact story-scoped source inputs and the known publication dates of already-read, verified relevant primary documents. Delivery checks that saved evidence again so newly attached reports cannot authorize an older snapshot. A recent recap cannot make an old announcement fresh: if the known primary dates are all outside `collectionWindowHours`, another recent report alone does not authorize publication. Undated primaries do not cancel known-old dates, and supporting background documents do not determine event age. Unknown primary dates remain unknown; a recent source date alone does not prove when an event happened.
+
+Text comparison ignores formatting and deletion-only changes. Editing another topic in the same source message does not count as an update to this story.
 
 Posts and prepared entries without a saved current-format input baseline are legacy. They are not reconstructed from source URLs, timestamps or revision numbers. Legacy published threads cannot create another edition; legacy prepared entries cannot send. Old published snapshots stay unchanged. These checks do not prevent navigation repairs to existing posts. Unknown Telegram outcomes require reconciliation rather than blind resending.
 

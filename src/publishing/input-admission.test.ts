@@ -8,7 +8,7 @@ vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
 const now = Date.parse('2026-11-03T08:00:00Z');
 const item = '5df47752-f683-478b-9875-7874456046bb';
 const other = '2ce4573a-7ba0-47c1-a803-55ac532418ae';
-const empty: PublicationBoundary = { version: 'publication-input-v2', inputs: [] };
+const empty: PublicationBoundary = { version: 'publication-input-v2', inputs: [], primaryEventDates: [] };
 function report(itemId = item, text = 'Original report', sourceTime = '2026-11-03T07:00:00Z',
   revisionTime = sourceTime, urls: string[] = [], contentHash = 'original',
   collected?: { text?: string; urls?: string[] }) {
@@ -18,6 +18,7 @@ function report(itemId = item, text = 'Original report', sourceTime = '2026-11-0
 }
 const combine = (...reports: PublicationBoundary[]): PublicationBoundary => ({
   version: 'publication-input-v2', inputs: reports.flatMap(report => report.inputs),
+  primaryEventDates: reports.flatMap(report => report.primaryEventDates ?? []),
 });
 const policy = (current: PublicationBoundary, baseline = empty, window = 48, verifiable = true) =>
   admitPublicationInputs(current, baseline, baseline.inputs.length > 0, verifiable, window, now);
@@ -161,13 +162,13 @@ describe('publication input policy', () => {
     expect(JSON.stringify(next)).not.toContain('contentFingerprint');
   });
   it('selects extracted mention text and only story-relevant links, never parent report payloads', async () => {
-    mocks.query.mockResolvedValueOnce({ rows: [{ item_id: item, content_hash: 'parent-revision', text: 'Alpha released',
+    mocks.query.mockResolvedValue({ rows: [] }).mockResolvedValueOnce({ rows: [{ item_id: item, content_hash: 'parent-revision', text: 'Alpha released',
       source_time: new Date(now), revision_time: new Date(now), urls: ['https://example.org/alpha'] }] });
     const boundary = await publicationInputBoundary(other);
     expect(boundary.inputs.map(input => input.payload)).toEqual([
       { kind: 'text', tokens: ['alpha', 'released'] }, { kind: 'url', url: 'https://example.org/alpha' },
     ]);
-    const sql = String(mocks.query.mock.calls.at(-1)?.[0]);
+    const sql = String(mocks.query.mock.calls.at(-2)?.[0]);
     expect(sql).toContain('SELECT m.revision_id,m.text');
     expect(sql).toContain("ml.classification='relevant'");
     expect(sql).toContain("sl.story_id=$1 AND sl.classification='relevant'");

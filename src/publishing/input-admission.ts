@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { generationThread } from '../pipeline/generation-context.js';
+import { stalePrimaryEvent } from './event-dates.js';
 import { novelPublicationInputs, publicationBoundarySchema, publicationInputBoundary, type PublicationBoundary } from './input-evidence.js';
 export { publicationInputBoundary } from './input-evidence.js';
 
@@ -15,7 +16,7 @@ export async function recordPublicationInputs(client: Pick<PoolClient, 'query'>,
   const key = `publication_input:${publicationId}`;
   const previous = (await client.query<{ value: unknown }>('SELECT value FROM operational_state WHERE key=$1 FOR UPDATE', [key])).rows[0];
   const saved = publicationBoundarySchema.safeParse(previous?.value);
-  if (!options.newPreparation && (!saved.success || !saved.data.inputs.length)) return;
+  if (!options.newPreparation && (!saved.success || !saved.data.inputs.length || saved.data.primaryEventDates === undefined)) return;
   const boundary = await publicationInputBoundary(storyId, client.query.bind(client));
   await client.query(`INSERT INTO operational_state(key,value) SELECT $1,$2::jsonb
     WHERE EXISTS(SELECT 1 FROM publications p WHERE p.id=$3 AND p.status='prepared'
@@ -53,24 +54,27 @@ export async function preparedPublicationInputs(publicationId: string, query = d
   const row = (await query<{ value: unknown }>('SELECT value FROM operational_state WHERE key=$1',
     [`publication_input:${publicationId}`])).rows[0];
   const saved = publicationBoundarySchema.safeParse(row?.value);
-  return saved.success && saved.data.inputs.length ? saved.data : null;
+  return saved.success && saved.data.inputs.length && saved.data.primaryEventDates !== undefined ? saved.data : null;
 }
 
 export async function publicationInputAdmission(storyId: string, destinationId: string, settings: AppSettings,
   query = db.query.bind(db), options: { storyIds?: string[]; boundary?: PublicationBoundary } = {}): Promise<InputAdmission> {
-  const current = options.boundary ?? { version: 'publication-input-v2' as const, inputs: (await Promise.all(
-    [...new Set([storyId, ...(options.storyIds ?? [])])].map(id => publicationInputBoundary(id, query)),
-  )).flatMap(boundary => boundary.inputs) };
+  const boundaries = options.boundary ? [options.boundary] : await Promise.all(
+    [...new Set([storyId, ...(options.storyIds ?? [])])].map(id => publicationInputBoundary(id, query)));
+  const current = options.boundary ?? { version: 'publication-input-v2' as const,
+    inputs: boundaries.flatMap(boundary => boundary.inputs),
+    primaryEventDates: boundaries.flatMap(boundary => boundary.primaryEventDates ?? []) };
   const prior = await publishedInputBoundary(storyId, destinationId, query);
   return admitPublicationInputs(current, prior.boundary, prior.published, prior.verifiable, settings.collectionWindowHours);
 }
 
 export function admitPublicationInputs(current: PublicationBoundary, baseline: PublicationBoundary, published: boolean,
   verifiable: boolean, windowHours: number, now = Date.now()): InputAdmission {
-  if (published && !verifiable) return { allowed: false, reason: 'publication_input_unverifiable' };
+  if (current.primaryEventDates === undefined || published && !verifiable) return { allowed: false, reason: 'publication_input_unverifiable' };
   const novel = novelPublicationInputs(current, baseline);
   if (published && !novel.length) return { allowed: false, reason: 'no_new_source_input' };
   const cutoff = now - windowHours * 3_600_000;
+  if (stalePrimaryEvent(current.primaryEventDates, windowHours, now)) return { allowed: false, reason: 'stale_source_input' };
   const publishedItems = new Set(baseline.inputs.map(input => input.itemId));
   // V2 novelty requires added scoped payload backed by a real collected-text/URL addition.
   // Only a previously published item may use revision time; an old newly attached report cannot.
