@@ -54,3 +54,22 @@ it('keeps provisional attachments without treating unresolved comparisons as a f
   expect(expiresAt).toBe(100 + MEDIA_TTL_MS);
   expect(await cache.load(id, 'selection', 400)).toEqual([expect.objectContaining(candidate)]);
 });
+
+it('removes deleted stories before TTL expiry, including incomplete directories, but keeps live media', async () => {
+  const cache = await setup();
+  const deleted = randomUUID(); const live = randomUUID(); const incomplete = randomUUID();
+  await cache.save(deleted, 'v1', [candidate], 100);
+  await cache.save(live, 'v1', [candidate], 100);
+  await mkdir(join(cache.root, incomplete));
+  await cache.sweep(200, async id => id === live);
+  expect(await readdir(cache.root)).toEqual([live]);
+  expect(await cache.load(live, 'v1', 200)).toEqual([expect.objectContaining(candidate)]);
+});
+
+it('does not delete media when checking story ownership fails', async () => {
+  const cache = await setup(); const id = randomUUID();
+  await cache.save(id, 'v1', [candidate], 100);
+  await expect(cache.sweep(200, async () => { throw new Error('database unavailable'); }))
+    .rejects.toThrow('database unavailable');
+  expect(await cache.load(id, 'v1', 200)).toEqual([expect.objectContaining(candidate)]);
+});

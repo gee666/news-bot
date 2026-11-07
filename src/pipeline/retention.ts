@@ -1,4 +1,5 @@
 import { transaction } from '../db.js';
+import { cleanupMedia } from '../media/story-media.js';
 import type { AppSettings } from '../settings.js';
 import { blockedStoriesCte } from './item-failures.js';
 
@@ -67,4 +68,7 @@ export async function cleanup(settings: AppSettings): Promise<void> {
     await client.query(`INSERT INTO operational_state(key,value) VALUES('pipeline_cleanup',jsonb_build_object('completedAt',now()))
       ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`);
   });
+  // Files cannot be rolled back. Remove them only after history deletion commits.
+  // The sweep also retries orphan cleanup left behind by a previous failed run.
+  await cleanupMedia();
 }

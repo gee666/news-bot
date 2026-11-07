@@ -56,10 +56,13 @@ export class MediaCache {
 
   async release(storyId: string): Promise<void> { await rm(this.directory(storyId), { recursive: true, force: true }); }
 
-  async sweep(now = Date.now()): Promise<void> {
+  async sweep(now = Date.now(), storyExists?: (storyId: string) => Promise<boolean>): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     for (const name of await readdir(this.root)) {
       if (!z.uuid().safeParse(name).success) continue;
+      // Check ownership before the TTL, including directories with broken manifests.
+      // Database failures must leave the files intact so a later sweep can retry.
+      if (storyExists && !await storyExists(name)) { await this.release(name); continue; }
       const directory = this.directory(name);
       let expired: boolean;
       try { expired = manifestSchema.parse(JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))).expiresAt <= now; }

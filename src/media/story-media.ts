@@ -138,4 +138,11 @@ export async function releaseStoryMedia(storyId: string): Promise<void> {
   await cache.release(storyId);
 }
 
-export async function cleanupMedia(): Promise<void> { await cache.sweep(); await new MediaPairCache('').sweep(); await sweepComparisonTemps(); }
+export async function cleanupMedia(): Promise<void> {
+  await cache.sweep(Date.now(), async storyId => {
+    const result = await db.query('SELECT id FROM stories WHERE id=$1', [storyId]);
+    return result.rows.length > 0;
+  });
+  await new MediaPairCache('').sweep();
+  await sweepComparisonTemps();
+}

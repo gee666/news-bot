@@ -31,3 +31,8 @@ Privacy checks still apply before downloads and inference.
 Existing album posts can receive caption edits, but new posts never use captions.
 An edit exceeding 1024 characters is skipped with
 `publication_navigation_requires_new_edition`. Text edits have a 4096-character limit.
+
+History cleanup removes cached pictures and videos belonging to deleted stories
+after the database transaction commits. Startup and hourly sweeps retry orphaned
+file cleanup, without waiting for the seven-day cache deadline. Published Telegram
+posts and their publication history are not deleted.

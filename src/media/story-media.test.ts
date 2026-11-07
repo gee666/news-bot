@@ -3,18 +3,19 @@ import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { defaultSettings, type AppSettings } from '../settings.js';
 const mocks = vi.hoisted(() => ({ query: vi.fn(), load: vi.fn(), save: vi.fn(), release: vi.fn(),
   download: vi.fn(), dedup: vi.fn(), normalize: vi.fn(), privacy: vi.fn(), judge: vi.fn(),
-  context: vi.fn(), relevance: vi.fn(), publishable: vi.fn() }));
+  context: vi.fn(), relevance: vi.fn(), publishable: vi.fn(), sweep: vi.fn(), pairSweep: vi.fn(), tempSweep: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
-vi.mock('./cache.js', () => ({ MEDIA_TTL_MS: 604800000, MediaCache: class { load = mocks.load; save = mocks.save; release = mocks.release; } }));
+vi.mock('./cache.js', () => ({ MEDIA_TTL_MS: 604800000, MediaCache: class { load = mocks.load; save = mocks.save; release = mocks.release; sweep = mocks.sweep; } }));
 vi.mock('./download.js', async original => ({ ...await original<typeof import('./download.js')>(), downloadMedia: mocks.download }));
-vi.mock('./comparison.js', () => ({ deduplicateMedia: mocks.dedup, compressModelImage: mocks.normalize }));
+vi.mock('./comparison.js', () => ({ deduplicateMedia: mocks.dedup, compressModelImage: mocks.normalize, sweepComparisonTemps: mocks.tempSweep }));
+vi.mock('./pair-cache.js', () => ({ MediaPairCache: class { sweep = mocks.pairSweep; } }));
 vi.mock('./codec.js', () => ({ isPublishableImage: mocks.publishable }));
 vi.mock('./judgment.js', () => ({ judgeMedia: mocks.judge,
   mediaJudgmentVersion: (settings: AppSettings) => JSON.stringify(settings) }));
 vi.mock('../pipeline/generation-model.js', () => ({ requireInferenceApproval: mocks.privacy }));
 vi.mock('./relevance.js', () => ({ loadMediaStoryContext: mocks.context, filterRelevantMedia: mocks.relevance,
   mediaRelevanceVersion: (settings: AppSettings) => `relevance-v1:${settings.piProvider}:${settings.piModel}:${settings.modelVersion}` }));
-import { publicationMedia, summaryImages, releaseStoryMedia } from './story-media.js';
+import { publicationMedia, summaryImages, releaseStoryMedia, cleanupMedia } from './story-media.js';
 
 const image = { type: 'image' as const, data: Buffer.from('image'), mimeType: 'image/jpeg' };
 const video = { type: 'video' as const, data: Buffer.from('video'), mimeType: 'video/mp4' };
@@ -231,4 +232,18 @@ it('omits an image that cannot be encoded for summarization', async () => {
   expect(await summaryImages(randomUUID(), defaultSettings)).toEqual([
     { data: Buffer.from('good').toString('base64'), mimeType: 'image/webp' },
   ]);
+});
+
+it('checks database ownership during the startup and periodic media sweep', async () => {
+  const live = randomUUID(); const deleted = randomUUID();
+  mocks.query.mockImplementation(async (_sql, [id]) => ({ rows: id === live ? [{ id }] : [] }));
+  mocks.sweep.mockImplementation(async (_now, storyExists) => {
+    expect(await storyExists(live)).toBe(true);
+    expect(await storyExists(deleted)).toBe(false);
+  });
+  await cleanupMedia();
+  expect(mocks.sweep).toHaveBeenCalledExactlyOnceWith(expect.any(Number), expect.any(Function));
+  expect(mocks.query).toHaveBeenCalledWith('SELECT id FROM stories WHERE id=$1', [deleted]);
+  expect(mocks.pairSweep).toHaveBeenCalledOnce();
+  expect(mocks.tempSweep).toHaveBeenCalledOnce();
 });
