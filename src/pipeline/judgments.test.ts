@@ -83,3 +83,23 @@ it('retains a reply that finishes past the deadline, reuses it, then yields befo
   })).rejects.toBeInstanceOf(ProcessingYield);
   expect(mocks.judge).toHaveBeenCalledOnce(); expect(cache.size).toBe(1); expect(mocks.failure).not.toHaveBeenCalled();
 });
+it('partitions saved JEV answers by prefix layout without changing the provider identity', async () => {
+  const cache = new Map<string, unknown>();
+  const key = (args: unknown[]) => JSON.stringify(args.slice(0, 3));
+  mocks.query.mockImplementation(async (sql: string, args: unknown[] = []) => {
+    if (sql.startsWith('SELECT value')) {
+      const value = cache.get(key(args)); return { rows: value ? [{ value }] : [] };
+    }
+    if (sql.startsWith('INSERT INTO model_cache')) cache.set(key(args), JSON.parse(String(args[3])));
+    return { rows: [] };
+  });
+  mocks.judge.mockResolvedValue({ answers: { answer }, metrics: {}, model: 'offline' });
+  const state = { left: 'A', right: 'B' };
+  const enabled = new Judgments({ ...defaultSettings, prefixCacheEnabled: true });
+  const disabled = new Judgments({ ...defaultSettings, prefixCacheEnabled: false });
+  await enabled.judge('representative', state, context);
+  await disabled.judge('representative', state, context);
+  await disabled.judge('representative', state, context);
+  expect(mocks.judge).toHaveBeenCalledTimes(2);
+  expect(cache.size).toBe(2);
+});

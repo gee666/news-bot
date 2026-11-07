@@ -167,14 +167,14 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query("SELECT status FROM publication_replacements")).rows).toEqual([{status:'deleted'}]);
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[canonical])).rows[0]).toEqual(original);
   });
-  it('leaves later same candidates unrecorded rather than manufacturing related links', async () => {
+  it('compares a new report only with the current same-event representative', async () => {
     await processIntake(await intake(['Acme выпустила Compiler 2.'])); await publish();
     const first=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%выпустила Compiler 2%'");
     await processIntake(await intake(['Compiler 2 теперь стоит 40 долларов в месяц.'])); await publish();
     const calls=model.groupingCalls;
     await processIntake(await intake(['Compiler 2 получила поддержку Linux.'])); await publish();
     const next=await one("SELECT story_id AS id FROM story_mentions WHERE text LIKE '%поддержку Linux%'");
-    expect(model.groupingCalls-calls).toBe(2);
+    expect(model.groupingCalls-calls).toBe(1);
     expect((await database.db.query(`SELECT relation FROM story_relations
       WHERE lower_story_id=$1 OR upper_story_id=$1 ORDER BY relation`,[next])).rows)
       .toEqual([{relation:'same'}]);

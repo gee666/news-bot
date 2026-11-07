@@ -12,13 +12,14 @@ import { publishedStory, unpublished } from './generation-store.js';
 import { latestThreadStory } from './publication-thread.js';
 import { recordStoryRelations, type StoryRelationDecision } from './story-relations.js';
 import { ProcessingYield } from './processing-slice.js';
+import { matchingRepresentatives } from './matching-representatives.js';
 
 export interface Mention { id: string; revision_id: string; text: string; story_id: string | null }
 interface ClassifiedCandidate extends StoryRelationDecision { candidate: Candidate }
 interface Candidate { id: string; text: string; previous_revision_id: string | null; input?: EventInput; history?: HistoricalEventRef }
 // Bound serial model calls as history grows, but never discard source/link/revision anchors.
 async function candidates(mention: Mention, vector: number[], vectors: Vectors, settings: AppSettings, batchId: string): Promise<Candidate[]> {
-  const result = await db.query<Candidate>(`WITH current_mentions AS MATERIALIZED (
+  const result = await db.query<Candidate>(`WITH RECURSIVE current_mentions AS MATERIALIZED (
     SELECT m.*,i.original_url,e.embedding FROM story_mentions m
     JOIN item_revisions r ON r.id=m.revision_id JOIN source_items i ON i.current_revision_id=r.id
     LEFT JOIN embeddings e ON e.mention_id=m.id AND e.config_id=$4
@@ -53,8 +54,18 @@ async function candidates(mention: Mention, vector: number[], vectors: Vectors, 
         WHERE incoming.id=$3 AND previous.id<>incoming.id ORDER BY previous.revision_number DESC LIMIT 1)
         AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=s.id)
       GROUP BY s.id,r.id
+    ), matching_roots AS (SELECT DISTINCT id FROM available), matching_eligible AS (SELECT id FROM matching_roots),
+    ${matchingRepresentatives}, canonical AS (
+      SELECT representative.id,own.text,own.previous_revision_id,
+        min(a.distance) AS distance,max(a.lexical) AS lexical,bool_or(a.shared_link) AS shared_link,
+        bool_or(a.same_source) AS same_source,min(a.priority) AS priority
+      FROM available a JOIN matching_representatives representative ON representative.root=a.id
+      -- Historical evidence belongs to its original owner, never to a newer representative.
+      JOIN LATERAL (SELECT text,previous_revision_id FROM available evidence WHERE evidence.id=representative.id
+        ORDER BY priority,previous_revision_id NULLS LAST LIMIT 1) own ON true
+      GROUP BY representative.id,own.text,own.previous_revision_id
     ), permitted AS (
-    SELECT * FROM (SELECT DISTINCT ON(id) * FROM available ORDER BY id,priority) candidates
+    SELECT * FROM canonical candidates
     WHERE ($9::boolean OR NOT EXISTS(SELECT 1 FROM sources private_source
       JOIN source_items private_item ON private_item.source_id=private_source.id
       JOIN item_revisions private_revision ON private_revision.item_id=private_item.id
@@ -84,10 +95,13 @@ async function candidates(mention: Mention, vector: number[], vectors: Vectors, 
 
 /** Full retained aggregates; Pi has room for more than a vector shortlist. */
 export async function retainedStories(settings: AppSettings): Promise<EventInput[]> {
-  const rows = await db.query<{ id: string }>(`SELECT s.id FROM stories s WHERE s.status<>'rejected'
+  const rows = await db.query<{ id: string }>(`WITH RECURSIVE matching_roots AS (
+    SELECT s.id FROM stories s WHERE s.status<>'rejected'
     AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=s.id)
     AND EXISTS(SELECT 1 FROM story_mentions m JOIN source_items i ON i.current_revision_id=m.revision_id
       WHERE m.story_id=s.id AND i.retention_at>=now()-$1*interval '1 day')
+    ), matching_eligible AS (SELECT id FROM matching_roots), ${matchingRepresentatives}
+    SELECT s.id FROM stories s WHERE s.id IN(SELECT id FROM matching_representatives)
     AND ($2::boolean OR NOT EXISTS(SELECT 1 FROM story_mentions private_mention
       JOIN item_revisions private_revision ON private_revision.id=private_mention.revision_id
       JOIN source_items private_item ON private_item.id=private_revision.item_id

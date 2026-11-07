@@ -84,7 +84,7 @@ export const defaultSettings: AppSettings = validateSettings({
   embeddingTimeoutMs: 600_000,
   piTimeoutMs: 300_000,
   connectionTimeoutMs: 10_000,
-  prefixCacheEnabled: true,
+  prefixCacheEnabled: false,
   collectionWindowHours: 48,
   researchMaxPages: 5,
   researchMaxSearches: 2,

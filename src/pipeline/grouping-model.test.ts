@@ -136,3 +136,13 @@ it('compares every retained group, preserving all reports rather than a shortlis
   const seen = mocks.judge.mock.calls.map(([, state]) => state);
   expect(seen).toEqual(candidates.map(candidate => groupingState(incoming, candidate)));
 });
+it('keeps prefix-first and state-first judgments in separate cache entries', async () => {
+  const incoming = report('New'); const candidate = report('Old');
+  mocks.judge.mockResolvedValueOnce(result('same')).mockResolvedValueOnce(result('related'));
+  expect(await groupReport(incoming, [candidate], { ...defaultSettings, prefixCacheEnabled: true }, context))
+    .toEqual([{ storyId: candidate.id, relation: 'same' }]);
+  expect(await groupReport(incoming, [candidate], { ...defaultSettings, prefixCacheEnabled: false }, context))
+    .toEqual([{ storyId: candidate.id, relation: 'related', relatedPromptVersion: jevTemplates.duplicate.version }]);
+  await groupReport(incoming, [candidate], { ...defaultSettings, prefixCacheEnabled: false }, context);
+  expect(mocks.judge).toHaveBeenCalledTimes(2);
+});

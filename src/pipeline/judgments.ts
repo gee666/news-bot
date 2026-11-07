@@ -26,7 +26,7 @@ export class Judgments {
     const inputHash=hash(state);
     let modelKey=`${this.settings.jevUrl}/${this.settings.jevModel}`;
     const version=jevTemplates[template].version;
-    let cacheVersion=version+':lossless-context-v1';
+    let cacheVersion=version+`:lossless-context-v1:prefix-${Number(this.settings.prefixCacheEnabled)}`;
     const piKey=`${this.settings.piProvider}/${this.settings.piModel}`;
     const piVersion=version+':pi-context-v1';
     const cached=await db.query<{value:unknown;model_key?:string}>(`SELECT value,model_key FROM model_cache WHERE kind='judgment'

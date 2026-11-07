@@ -12,7 +12,7 @@ export function mediaJudgmentVersion(settings: AppSettings): string {
   return JSON.stringify({ preparation: 'media-pair-v1-full-rgba-webp90-third-frame',
     evidence: MEDIA_IDENTITY_EVIDENCE_VERSION, judgment: jevTemplates.media_identity,
     provider: settings.piProvider, vision: settings.piModel, modelVersion: settings.modelVersion,
-    jevUrl: settings.jevUrl, jevModel: settings.jevModel,
+    jevUrl: settings.jevUrl, jevModel: settings.jevModel, prefixCache: settings.prefixCacheEnabled,
     durationToleranceRatio: Number(process.env.MEDIA_VIDEO_DURATION_TOLERANCE ?? 0.2) });
 }
 

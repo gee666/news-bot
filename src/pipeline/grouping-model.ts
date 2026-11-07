@@ -20,12 +20,13 @@ export async function groupReport(incoming: EventInput, candidates: readonly Eve
   context: StageContext, classifier?: Classifier): Promise<StoryRelationDecision[]> {
   if (!candidates.length) return [];
   const modelKey = `${settings.jevUrl}/${settings.jevModel}/${settings.modelVersion}`;
+  const cacheVersion = `${CACHE_VERSION}:prefix-${Number(settings.prefixCacheEnabled)}`;
   const incomingHash = hash({ id: incoming.id, reports: incoming.reports });
   const pairs = candidates.map(candidate => ({ candidate, inputHash: hash({ incoming: incomingHash,
     candidate: hash({ id: candidate.id, reports: candidate.reports }) }) }));
   const cached = await db.query<{ input_hash: string; value: unknown }>(`SELECT input_hash,value FROM model_cache
     WHERE kind='judgment' AND input_hash=ANY($1::text[]) AND model_key=$2 AND prompt_version=$3 AND expires_at>now()`,
-  [pairs.map(pair => pair.inputHash), modelKey, CACHE_VERSION]);
+  [pairs.map(pair => pair.inputHash), modelKey, cacheVersion]);
   const byHash = new Map(cached.rows.map(row => [row.input_hash, row.value]));
   const decisions: StoryRelationDecision[] = [];
   let ownedClient: JevClient | undefined;
@@ -53,7 +54,7 @@ export async function groupReport(incoming: EventInput, candidates: readonly Eve
         await db.query(`INSERT INTO model_cache(kind,input_hash,model_key,prompt_version,value,expires_at)
           VALUES('judgment',$1,$2,$3,$4,now()+$5*interval '1 day')
           ON CONFLICT(kind,input_hash,model_key,prompt_version) DO UPDATE SET value=EXCLUDED.value,expires_at=EXCLUDED.expires_at`,
-        [inputHash, modelKey, CACHE_VERSION, JSON.stringify(relation), settings.retentionDays]);
+        [inputHash, modelKey, cacheVersion, JSON.stringify(relation), settings.retentionDays]);
       }
       if (relation === 'same') {
         if (firstSame) continue;
