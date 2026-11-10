@@ -3,7 +3,7 @@ import { db } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import type { StoryWorkReport } from './story-failures.js';
 import { recordProcessingDiagnostic } from './processing-diagnostics.js';
-import { retryDecision } from './state.js';
+import { modelOutage, retryDecision } from './state.js';
 
 export async function saveOperational(key: string, value: unknown): Promise<void> {
   await db.query(`INSERT INTO operational_state(key,value) VALUES($1,$2) ON CONFLICT(key)
@@ -39,7 +39,7 @@ export async function operationalWork(key: string, settings: AppSettings, newRun
     }
     await recordProcessingDiagnostic(error, { scope: 'operation', operation: key });
     const decision = retryDecision(error, attempt, settings);
-    await saveOperational(key, { attempt, phase: decision.next ? 'waiting' : 'failed', next: decision.next,
+    await saveOperational(key, { attempt: modelOutage(error) ? state.attempt : attempt, phase: decision.next ? 'waiting' : 'failed', next: decision.next,
       code: decision.code, reason: decision.reason });
     throw error;
   }

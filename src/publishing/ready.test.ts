@@ -21,7 +21,7 @@ function event() {
 beforeEach(() => {
   mocks.query.mockReset();
   mocks.admission.mockReset().mockResolvedValue({ allowed: true });
-  mocks.prepare.mockReset().mockResolvedValue(undefined);
+  mocks.prepare.mockReset().mockResolvedValue(['publication']);
   mocks.updates.mockReset().mockResolvedValue(undefined);
 });
 
@@ -36,7 +36,7 @@ it('processes the entire invocation snapshot without a cap or a continuous drain
     if (sql.startsWith('SELECT interest_stale')) return { rows: [{ interest_stale: false }] };
     return { rows: [] };
   });
-  mocks.prepare.mockImplementation(async () => { arrived = true; });
+  mocks.prepare.mockImplementation(async () => { arrived = true; return ['publication']; });
   await prepareReadyStories(settings, '-100123');
   const snapshots = mocks.query.mock.calls.filter(([sql]) => String(sql).includes('FROM story_publication_ready q'));
   expect(snapshots).toHaveLength(1);

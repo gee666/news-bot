@@ -56,7 +56,8 @@ export class EmbeddingClient {
         durationMs: response.durationMs, inputVersion: "plain-text-ctx2048-v1",
         ...(parsed.data.prompt_eval_count === undefined ? {} : { promptTokens: parsed.data.prompt_eval_count }) };
     }, this.config.requestMaxAttempts, { provider: 'ollama', model: this.config.model ?? 'qwen3-embedding:latest',
-      recordUsage: this.config.recordUsage });
+      recordUsage: this.config.recordUsage,
+      availabilityKey: JSON.stringify(['embedding', this.config.baseUrl, this.config.model ?? 'default']) });
   }
 
   test(context: RequestContext): Promise<EmbeddingResult> {

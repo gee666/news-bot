@@ -16,6 +16,7 @@ import { blockedStoriesCte } from './item-failures.js';
 import { eventInput } from './consolidation-input.js';
 import { StoryIntegrityError } from './event-integrity-error.js';
 import { checkProcessingSlice } from './processing-slice.js';
+import { expireStaleStoryWork } from './story-expiry.js';
 import { countStoryOutcome, prepareStoryFailureUpdates, storyWork, type StoryWorkReport } from './story-failures.js';
 
 interface StoryWork { id: string; content_version: number }
@@ -120,6 +121,7 @@ export async function finishBatchStories(batchId: string, settings: AppSettings,
   const visited: string[] = [];
   try {
     for (const story of candidates) {
+      if (await expireStaleStoryWork(story.id, settings, batchId)) { report.skippedStories++; continue; }
       // A newer completed display supersedes this batch's shared-story work, not its input snapshot.
       if (story.status==='completed' && !story.interest_stale
         && (story.profile_version ?? 0)>=settings.profileVersion && (story.model_version ?? 0)>=settings.modelVersion
@@ -220,6 +222,7 @@ export async function refreshDigest(settings: AppSettings, judgments: Judgments,
   try {
     for (const story of result.rows) {
       checkProcessingSlice();
+      if (await expireStaleStoryWork(story.id, settings, null)) { report.skippedStories++; continue; }
       visited.push(story.id);
       countStoryOutcome(report, await storyWork(story.id, settings, null, async () => {
         if (!await needsRefresh(story, settings)) return true;

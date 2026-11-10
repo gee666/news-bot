@@ -131,7 +131,7 @@ describe("model HTTP adapters", () => {
       .toBeGreaterThan(3_500_000);
   });
 
-  it.each(["jev", "embedding"] as const)("applies the configured retry cap to %s calls and tests", async (service) => {
+  it.each(["jev", "embedding"] as const)("defers %s calls during a shared outage without exhausting attempts", async (service) => {
     let calls = 0;
     const failures: ModelFailure[] = [];
     const baseUrl = await serve((_, res) => {
@@ -146,14 +146,15 @@ describe("model HTTP adapters", () => {
     cleanups.push(() => client.close());
     for (const attempt of [5, 9, 10]) {
       await expect(client.test({ operationId: "retry-" + service, attempt }))
-        .rejects.toMatchObject({ metadata: { kind: "transient", retryable: attempt < 10 } });
+        .rejects.toMatchObject({ metadata: { kind: "transient", retryable: true } });
     }
-    expect(calls).toBe(3);
-    expect(recordUsage).toHaveBeenCalledTimes(3);
+    expect(calls).toBe(1);
+    expect(recordUsage).toHaveBeenCalledTimes(1);
     expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', usageKnown: false,
       inputTokens: null, actualBilledCost: null, estimatedCost: null }));
-    expect(failures.map((failure) => failure.retryable)).toEqual([true, true, false]);
-    expect(failures[2]?.nextRetryAt).toBeNull();
+    expect(failures.map((failure) => failure.retryable)).toEqual([true, true, true]);
+    expect(failures[2]?.nextRetryAt).not.toBeNull();
+    expect(failures[2]?.outcome).toBe("not_submitted");
   });
 
   it('does not count HTTP 200 headers as completion when the body is invalid', async () => {

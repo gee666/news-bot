@@ -60,7 +60,7 @@ describe("inference reliability", () => {
     expect(await second).toBe(7);
   });
 
-  it("respects provider retry time and stops repeated transport failures", () => {
+  it("respects provider retry time and keeps local model outages retryable", () => {
     const now = Date.now();
     expect(retryTime(new Headers({ "Retry-After": "120" }), now)).toBe(now + 120_000);
     expect(providerRetryTime("You have hit your ChatGPT usage limit. Try again in ~120 min.", now))
@@ -69,7 +69,7 @@ describe("inference reliability", () => {
     const fault = new RequestFault("throttled", { status: 429, retryAt: now + 3_600_000 });
     expect(failureMetadata(fault, "stage", "pi", 1, 10, now).nextRetryAt)
       .toBe(new Date(now + 3_600_000).toISOString());
-    expect(failureMetadata(new RequestFault("transient"), "stage", "jev", 5, 10).retryable).toBe(false);
+    expect(failureMetadata(new RequestFault("transient"), "stage", "jev", 5, 10).retryable).toBe(true);
     expect(failureMetadata(new RequestFault("authentication"), "stage", "pi", 1, 10).nextRetryAt).toBeNull();
   });
 
@@ -84,9 +84,9 @@ describe("inference reliability", () => {
       expect(Date.parse(fifth.nextRetryAt ?? "")).toBeGreaterThanOrEqual(now + 300_000);
     }
     expect(failureMetadata(fault, "stage", "jev", 9, 10, now, 10).retryable).toBe(true);
-    expect(failureMetadata(fault, "stage", "jev", 10, 10, now, 10))
+    expect(failureMetadata(fault, "stage", "pi", 10, 10, now, 10))
       .toMatchObject({ retryable: false, nextRetryAt: null });
-    expect(failureMetadata(fault, "stage", "jev", 5, 10, now))
+    expect(failureMetadata(fault, "stage", "pi", 5, 10, now))
       .toMatchObject({ retryable: false, nextRetryAt: null });
   });
 

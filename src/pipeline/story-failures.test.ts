@@ -22,7 +22,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => vi.useRealTimers());
-it.each(['pi','jev','embedding'] as const)('isolates %s failures, retries automatically and skips after N attempts', async service => {
+it.each(['pi','jev','embedding'] as const)('isolates %s failures and only exhausts the Pi retry budget', async service => {
   const error = new ModelRequestError(failureMetadata(new RequestFault('transient'), id, service, 1, 0));
   const run = vi.fn().mockRejectedValue(error);
   const settings = { ...defaultSettings, requestMaxAttempts: 2 };
@@ -32,9 +32,10 @@ it.each(['pi','jev','embedding'] as const)('isolates %s failures, retries automa
   await vi.advanceTimersByTimeAsync(settings.retryBaseMs+1);
   expect(await storyWork(id, settings, null, run)).toBe('failed');
   await vi.advanceTimersByTimeAsync(settings.retryMaxMs+1);
-  expect(await storyWork(id, settings, null, run)).toBe('skipped');
-  expect(run).toHaveBeenCalledTimes(2);
-  expect(recordProcessingDiagnostic).toHaveBeenCalledTimes(2);
+  expect(await storyWork(id, settings, null, run)).toBe(service === 'pi' ? 'skipped' : 'failed');
+  expect(run).toHaveBeenCalledTimes(service === 'pi' ? 2 : 3);
+  expect(recordProcessingDiagnostic).toHaveBeenCalledTimes(service === 'pi' ? 2 : 3);
+  if (service !== 'pi') expect(mocks.markers.get(`pipeline_failed_story:${id}`)).toMatchObject({ attempts: 0 });
   expect(JSON.stringify(mocks.query.mock.calls)).not.toContain('stage_state');
 });
 it('changed collected input gets a fresh budget; success clears the failure marker', async () => {

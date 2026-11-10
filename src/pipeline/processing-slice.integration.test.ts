@@ -103,6 +103,23 @@ describe.skipIf(!url)('cooperative batch checkpoints with PostgreSQL', () => {
     expect((await database.db.query('SELECT revision_id FROM batch_items WHERE batch_id=$1', [batchId])).rows).toEqual(members);
     expect((await database.db.query('SELECT * FROM batch_sources WHERE batch_id=$1', [batchId])).rows).toEqual(cursors);
   });
+  it('persists repeated local outages across recovery passes and completes when the model returns', async () => {
+    const { stage } = await import('./state.js');
+    const revision = (await database.db.query<{ revision_id: string }>('SELECT revision_id FROM batch_items WHERE batch_id=$1', [batchId])).rows[0];
+    if (!revision) throw new Error('Missing revision');
+    const run = vi.fn().mockRejectedValue(new ModelRequestError(failureMetadata(
+      new RequestFault('model_unavailable'), batchId, 'embedding', 1, 0)));
+    for (let attempt = 0; attempt < settings.requestMaxAttempts + 2; attempt++) {
+      await expect(stage(batchId, { revisionId: revision.revision_id }, 'outage', settings, z.boolean(), run)).rejects.toBeInstanceOf(ModelRequestError);
+      expect((await database.db.query("SELECT status,attempts FROM stage_state WHERE stage='outage'")).rows)
+        .toEqual([{ status: 'waiting', attempts: 0 }]);
+      await database.db.query("UPDATE stage_state SET next_retry_at=now()-interval '1 second' WHERE stage='outage'");
+    }
+    run.mockResolvedValue(true);
+    expect(await stage(batchId, { revisionId: revision.revision_id }, 'outage', settings, z.boolean(), run)).toBe(true);
+    expect((await database.db.query("SELECT status,attempts,next_retry_at FROM stage_state WHERE stage='outage'")).rows)
+      .toEqual([{ status: 'completed', attempts: 0, next_retry_at: null }]);
+  });
   it('keeps provider cooldown/error history when an overrun stage fails instead of checkpointing it', async () => {
     mocks.providerFailure = true;
     await expect(runBatch()).rejects.toMatchObject({ metadata: { kind: 'throttled' } });
@@ -112,7 +129,7 @@ describe.skipIf(!url)('cooperative batch checkpoints with PostgreSQL', () => {
     expect(parked.next_retry_at.getTime()).toBeGreaterThan(Date.now() + 3_590_000);
     await runBatch(); expect(mocks.firstCalls).toBe(1);
     expect((await database.db.query('SELECT status,attempts,error_code FROM stage_state WHERE batch_id=$1', [batchId])).rows)
-      .toEqual([{ status: 'waiting', attempts: 1, error_code: 'throttled' }]);
+      .toEqual([{ status: 'waiting', attempts: 0, error_code: 'throttled' }]);
     expect((await database.db.query('SELECT error_code FROM request_attempts')).rows).toEqual([{ error_code: 'throttled' }]);
   });
 });

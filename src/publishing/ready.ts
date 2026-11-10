@@ -111,8 +111,19 @@ export async function prepareReadyStories(settings: AppSettings, destinationId: 
       }
     }
     if (!reason) {
-      if (!row.manual_operation_id) await prepareDigest(settings, destinationId, { storyIds: [row.story_id] });
-      await prepareUpdates(settings, destinationId, [row.story_id]);
+      if (!row.manual_operation_id) {
+        const prepared = await prepareDigest(settings, destinationId, { storyIds: [row.story_id] });
+        if (!prepared.length) {
+          const delivery = (await db.query(`SELECT 1 FROM publications p
+            LEFT JOIN story_publication_aliases pa ON pa.publication_id=p.id
+            LEFT JOIN story_merges sm ON sm.merged_story_id=p.story_id
+            WHERE coalesce(pa.canonical_story_id,sm.canonical_story_id,p.story_id)=$1
+              AND p.destination_id=$2 AND p.status IN ('prepared','sending','uncertain','published') LIMIT 1`,
+          [row.story_id, destinationId])).rows[0];
+          if (!delivery) reason = 'publication_not_prepared';
+        }
+      }
+      if (!reason) await prepareUpdates(settings, destinationId, [row.story_id]);
     }
     // A crash before acknowledgment safely repeats selection. Existing publication uniqueness and
     // immutable edit snapshots make that replay idempotent. Never acknowledge a newer ready event.

@@ -31,8 +31,11 @@
 
 Revision stages share saved results and a retry budget across batches.
 Stories use only the `story-failures.ts` marker, not stage retry receipts.
-`requestMaxAttempts`, `retryBaseMs` and `retryMaxMs` bound failures.
-Checkpoints and successful calls do not consume attempts.
+`requestMaxAttempts`, `retryBaseMs` and `retryMaxMs` bound ordinary failures.
+JEV and embedding outages wait for recovery without consuming failure attempts.
+Missing models, transport/server errors, timeouts and throttling use saved retry
+deadlines and a shared endpoint/model cooldown. Authentication and malformed
+requests still need correction. Checkpoints and successful calls do not consume attempts.
 Healthy siblings continue while failed units wait or exhaust their budget.
 
 Grouping uses JEV directly, once per uncached shortlisted pair, with full
@@ -50,8 +53,20 @@ See [manual runs](../../docs/run-now.md) and
 Automatic work prefers the newest due collection cutoff. `last_served_at` only
 breaks equal-cutoff ties; recovery does not rotate through stale whole batches.
 Automatic unextracted revisions and unassigned reports outside
-`collectionWindowHours` retire with `outside_collection_window`. Active manual
-pins and committed extraction receipts stay intact.
+`collectionWindowHours` retire with `outside_collection_window`. Age follows source
+publication time, or the earlier of collection and immutable retention time for
+undated input. A new revision or refetch cannot renew unpublished news. Expired
+orphan comparison stages are skipped even when sibling reports remain attached.
+Active manual pins and committed extraction receipts stay intact.
+
+Attached unpublished drafts also stop before eligibility, ranking or generation
+when all publication inputs are stale. Expiry skips their automatic story stages
+and removes refresh/outage retry markers, but keeps the story, reports and saved
+display. Fresh attached input makes them eligible for processing again. Published
+stories, explicit manual work and active manual pins are exempt. Meaningful edits
+to already published input use the existing publication-admission policy, which
+can accept their immutable revision time. Unverifiable publication history stays
+available for repair rather than expiring on an assumed age.
 
 A source connector's saved cooldown does not delay already collected inputs.
 Ready revisions or mentions run before another unit's future retry deadline.

@@ -48,3 +48,16 @@ it('backs off and stops after the configured failures, but an explicit new run c
   run.mockResolvedValue(undefined);
   expect(await operationalWork('pipeline_digest',defaultSettings,true,run)).toBe(true);
 });
+
+it('does not exhaust background recovery while local models are offline', async () => {
+  const { ModelRequestError, failureMetadata, RequestFault } = await import('../models/errors.js');
+  const error = new ModelRequestError(failureMetadata(new RequestFault('model_unavailable'), 'reembed', 'embedding', 1, 0));
+  const run = vi.fn().mockRejectedValue(error);
+  for (let attempt = 0; attempt < defaultSettings.requestMaxAttempts + 2; attempt++) {
+    await expect(operationalWork('pipeline_reembedding', defaultSettings, false, run)).rejects.toBe(error);
+    expect(mocks.state).toMatchObject({ phase: 'waiting', attempt: 0 });
+    await vi.advanceTimersByTimeAsync(defaultSettings.retryMaxMs + 1);
+  }
+  run.mockResolvedValue(undefined);
+  expect(await operationalWork('pipeline_reembedding', defaultSettings, false, run)).toBe(true);
+});

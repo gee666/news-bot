@@ -3,7 +3,7 @@ import { failureInputBoundary, failureBoundaryFingerprint } from './failure-admi
 import { db } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { prepareUpdates } from '../publishing/updates.js';
-import { hash, retryDecision, Waiting } from './state.js';
+import { hash, modelOutage, retryDecision, Waiting } from './state.js';
 import { ProcessingYield } from './processing-slice.js';
 import { recordProcessingDiagnostic } from './processing-diagnostics.js';
 
@@ -38,7 +38,7 @@ export async function storyWork(id: string, settings: AppSettings, batchId: stri
     if (error instanceof ProcessingYield) throw error;
     if (error instanceof Waiting) return 'skipped';
     await recordProcessingDiagnostic(error, { scope: 'story', storyId: id, batchId });
-    const attempts = (previous?.attempts ?? 0)+1;
+    const attempts = (previous?.attempts ?? 0) + (modelOutage(error) ? 0 : 1);
     const decision = retryDecision(error, attempts, settings);
     await db.query(`INSERT INTO operational_state(key,value) VALUES($1,$2) ON CONFLICT(key)
       DO UPDATE SET value=EXCLUDED.value,updated_at=now()`, [key(id), JSON.stringify({ storyId: id, fingerprint,

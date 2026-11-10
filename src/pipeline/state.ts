@@ -2,12 +2,18 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { db } from '../db.js';
 import { ModelRequestError, type ModelFailure } from '../models/index.js';
-import { failureResponseMetadata } from '../models/errors.js';
+import { failureResponseMetadata, isLocalModelOutage } from '../models/errors.js';
+
 import type { AppSettings } from '../settings.js';
 import { recordProcessingDiagnostic } from './processing-diagnostics.js';
 import { checkProcessingSlice, processingSliceMs, ProcessingYield } from './processing-slice.js';
 import { StoryIntegrityError } from './event-integrity-error.js';
 import { StageOutputError, validateStageOutput } from './stage-output-error.js';
+
+
+export function modelOutage(error: unknown): boolean {
+  return error instanceof ModelRequestError && isLocalModelOutage(error.metadata.service, error.metadata.kind);
+}
 
 export const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export interface StageContext { id: string; attempt: number; batchId: string | null; revisionId: string | null; storyId: string | null }
@@ -39,12 +45,12 @@ export async function recordFailure(failure: ModelFailure): Promise<void> {
 }
 
 export function retryDecision(error: unknown, attempt: number, settings: AppSettings): { next: Date | null; code: string; unknown: boolean; reason: string } {
-  const delay = Math.min(settings.retryMaxMs, settings.retryBaseMs * 2 ** Math.max(0, attempt - 1));
+  const delay = Math.min(settings.retryMaxMs, settings.retryBaseMs * 2 ** Math.min(30, Math.max(0, attempt - 1)));
   const model = error instanceof ModelRequestError ? error.metadata : null;
   const known = error instanceof StageOutputError || error instanceof StoryCompletionError || error instanceof StoryIntegrityError;
   const permanent = model && ['authentication','model_unavailable','invalid_request','context_limit','cancelled','unknown'].includes(model.kind);
   return {
-    next: !permanent && attempt < settings.requestMaxAttempts && !(error instanceof FailedStageError)
+    next: modelOutage(error) || (!permanent && attempt < settings.requestMaxAttempts && !(error instanceof FailedStageError))
       ? new Date(Math.max(Date.now() + delay, Date.parse(model?.nextRetryAt ?? '') || 0)) : null,
     code: model?.kind ?? (known || error instanceof FailedStageError ? error.code : 'pipeline_failed'),
     unknown: model?.outcome === 'unknown',
@@ -111,7 +117,7 @@ async function saveStageFailure(error: unknown, stageId: string, attempt: number
   owner: { batchId: string; storyId: string | null; revisionId: string | null; task: string }, settings: AppSettings): Promise<void> {
   await recordProcessingDiagnostic(error instanceof StageOutputError ? error.cause : error, { scope: 'stage', ...owner, stageId });
   const failure = retryDecision(error, attempt, settings);
-  await db.query(`UPDATE stage_state SET attempts=attempts+1,status=$2,next_retry_at=$3,error_code=$4,outcome_unknown=$5,
+  await db.query(`UPDATE stage_state SET attempts=attempts+$7,status=$2,next_retry_at=$3,error_code=$4,outcome_unknown=$5,
     waiting_reason=$6,updated_at=now() WHERE id=$1`,
-  [stageId, failure.next ? 'waiting' : 'failed', failure.next, failure.code, failure.unknown, failure.reason]);
+  [stageId, failure.next ? 'waiting' : 'failed', failure.next, failure.code, failure.unknown, failure.reason, modelOutage(error) ? 0 : 1]);
 }

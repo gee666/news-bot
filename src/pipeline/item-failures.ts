@@ -28,6 +28,9 @@ export function dueBatchItems(batchIdSql:string):string {
               AND (s.status='failed' OR (s.status IN ('running','waiting') AND s.next_retry_at>now()))))))`;
 }
 
+// Match publication input freshness: refetches/revisions cannot renew unpublished news.
+const outsideCollectionWindow = `coalesce(i.published_at,least(i.collected_at,i.retention_at))<now()-$1*interval '1 hour'`;
+
 /** Retain the original extraction and text, but give obsolete orphan reports an explicit terminal disposition. */
 export async function expireUnassignedMentions(settings:AppSettings):Promise<void> {
   await transaction(async client => {
@@ -35,11 +38,15 @@ export async function expireUnassignedMentions(settings:AppSettings):Promise<voi
       FROM item_revisions r JOIN source_items i ON i.current_revision_id=r.id
       WHERE m.revision_id=r.id AND m.story_id IS NULL
         AND m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window'
-        AND greatest(i.collected_at,r.created_at)<now()-$1*interval '1 hour'
+        AND ${outsideCollectionWindow}
         AND NOT EXISTS(SELECT 1 FROM batch_items b JOIN processing_batches p ON p.id=b.batch_id
           WHERE b.revision_id=r.id AND p.manual_operation_id IS NOT NULL AND p.completed_at IS NULL)`,[settings.collectionWindowHours]);
     await client.query(`UPDATE batch_items b SET status='rejected',disposition_reason='outside_collection_window'
-      WHERE status IN ('pending','processing') AND EXISTS(SELECT 1 FROM story_mentions m
+      WHERE status IN ('pending','processing')
+      AND EXISTS(SELECT 1 FROM processing_batches p WHERE p.id=b.batch_id AND p.manual_operation_id IS NULL)
+      AND NOT EXISTS(SELECT 1 FROM batch_items pin JOIN processing_batches manual ON manual.id=pin.batch_id
+        WHERE pin.revision_id=b.revision_id AND manual.manual_operation_id IS NOT NULL AND manual.completed_at IS NULL)
+      AND EXISTS(SELECT 1 FROM story_mentions m
         WHERE m.revision_id=b.revision_id AND m.metadata->>'disposition'='outside_collection_window')
       AND NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=b.revision_id
         AND (m.story_id IS NOT NULL OR m.metadata->>'disposition' IS DISTINCT FROM 'outside_collection_window'))`);
@@ -47,7 +54,7 @@ export async function expireUnassignedMentions(settings:AppSettings):Promise<voi
       FROM item_revisions r JOIN source_items i ON i.current_revision_id=r.id
       CROSS JOIN processing_batches p
       WHERE p.id=b.batch_id AND b.revision_id=r.id AND b.status IN ('pending','processing') AND p.manual_operation_id IS NULL
-        AND greatest(i.collected_at,r.created_at)<now()-$1*interval '1 hour'
+        AND ${outsideCollectionWindow}
         AND NOT coalesce(jsonb_typeof(r.metadata->'pipelineExtraction')='array',false)
         AND NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=r.id)
         AND NOT EXISTS(SELECT 1 FROM stage_state done WHERE done.revision_id=r.id AND done.stage LIKE 'extract:%'
@@ -55,8 +62,15 @@ export async function expireUnassignedMentions(settings:AppSettings):Promise<voi
         AND NOT EXISTS(SELECT 1 FROM batch_items pin JOIN processing_batches manual ON manual.id=pin.batch_id
           WHERE pin.revision_id=r.id AND manual.manual_operation_id IS NOT NULL AND manual.completed_at IS NULL)`,[settings.collectionWindowHours]);
     await client.query(`UPDATE stage_state s SET status='skipped',next_retry_at=NULL,updated_at=now()
-      WHERE status IN ('pending','running','waiting','failed') AND EXISTS(SELECT 1 FROM batch_items b
-        WHERE b.batch_id=s.batch_id AND b.revision_id=s.revision_id AND b.disposition_reason='outside_collection_window')`);
+      WHERE s.status IN ('pending','running','waiting','failed')
+        AND EXISTS(SELECT 1 FROM processing_batches p WHERE p.id=s.batch_id AND p.manual_operation_id IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM batch_items pin JOIN processing_batches manual ON manual.id=pin.batch_id
+          WHERE pin.revision_id=s.revision_id AND manual.manual_operation_id IS NOT NULL AND manual.completed_at IS NULL)
+        AND (EXISTS(SELECT 1 FROM batch_items b WHERE b.batch_id=s.batch_id AND b.revision_id=s.revision_id
+          AND b.disposition_reason='outside_collection_window')
+        OR EXISTS(SELECT 1 FROM story_mentions m WHERE m.revision_id=s.revision_id AND m.story_id IS NULL
+          AND m.metadata->>'disposition'='outside_collection_window'
+          AND (s.stage LIKE 'match:%:'||m.id::text OR s.stage LIKE 'embed:%:'||m.id::text)))`);
   });
 }
 

@@ -133,7 +133,8 @@ export class JevClient {
       this.config.onMetrics?.(metrics);
       return { ...parsed.data, template, promptVersion: jevTemplates[template].version, metrics };
     }, this.config.requestMaxAttempts, { provider: 'jev', model: this.config.model ?? 'jev-latest',
-      recordUsage: this.config.recordUsage });
+      recordUsage: this.config.recordUsage,
+      availabilityKey: JSON.stringify(['jev', this.config.baseUrl, this.config.model ?? 'default']) });
   }
 
   test(context: RequestContext): Promise<JevResult> {

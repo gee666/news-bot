@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { modelAvailability } from './availability.js';
 import { callUsageSchema, operationStage, type CallUsage, type UsageRecorder } from './usage.js';
 import { deliverUsage, reportUsageStorageFailure, type UsageFailureReporter } from './usage-delivery.js';
 import { faultFromError, failureMetadata, ModelRequestError, RequestFault,
-  type ModelFailure } from "./errors.js";
+  isLocalModelOutage, type ModelFailure } from "./errors.js";
 
 export interface RequestContext {
   /** Stable database stage/test identifier. Never put source text or secrets here. */
@@ -68,6 +69,8 @@ export interface Dispatch {
   reportedUsage(usage: CallUsage, model?: string): void;
 }
 export interface UsageAccounting {
+  /** Endpoint and model identity only. Never persisted in diagnostics. */
+  availabilityKey?: string;
   provider: string;
   model: string;
   recordUsage?: UsageRecorder | undefined;
@@ -101,14 +104,17 @@ export async function infer<T>(
   try {
     if (context.signal?.aborted) throw new RequestFault("cancelled", { outcome: "not_submitted" });
     release = await inferenceLimiter.acquire(context.signal);
+    if (accounting?.availabilityKey) modelAvailability.check(accounting.availabilityKey);
     startedAt = Date.now();
     timer = setTimeout(() => controller.abort(), timeoutMs);
-    return await execute({ signal, startedAt,
+    const result = await execute({ signal, startedAt,
       submitted: () => { submitted = true; },
       completed: (value, model) => { completed = true; usage = callUsageSchema.safeParse(value).data; responseModel = model ?? responseModel;
         finishedAt = Date.now(); },
       reportedUsage: (value, model) => { usage = callUsageSchema.safeParse(value).data; responseModel = model ?? responseModel; },
     });
+    if (accounting?.availabilityKey) modelAvailability.succeeded(accounting.availabilityKey);
+    return result;
   } catch (error) {
     finishedAt ??= Date.now();
     const original = faultFromError(error);
@@ -118,6 +124,9 @@ export async function infer<T>(
         ...original.detail, transportKind: "local_cancelled",
         outcome: startedAt === undefined ? "not_submitted" : "unknown" })
       : original;
+    if (startedAt !== undefined && accounting?.availabilityKey && isLocalModelOutage(service, fault.kind)) {
+      fault.detail.retryAt = modelAvailability.failed(accounting.availabilityKey, fault.kind, fault.detail.retryAt);
+    }
     const metadata = failureMetadata(fault, context.operationId, service, context.attempt ?? 1,
       startedAt === undefined ? 0 : Date.now() - startedAt, Date.now(), requestMaxAttempts);
     // Keep provider retry metadata even if the host cannot persist its failure record.

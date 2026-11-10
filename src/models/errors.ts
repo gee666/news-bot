@@ -138,6 +138,11 @@ export function faultFromError(error: unknown): RequestFault {
       ...(retryAt === undefined ? {} : { retryAt }) });
 }
 
+/** Local model downtime is recoverable for as long as its queued news remains relevant. */
+export function isLocalModelOutage(service: ModelFailure['service'], kind: FailureKind): boolean {
+  return service !== 'pi' && ['model_unavailable', 'transient', 'timeout', 'throttled'].includes(kind);
+}
+
 export function canRetryFailure(kind: FailureKind, attempt: number, requestMaxAttempts = 3): boolean {
   return attempt < requestMaxAttempts && ["throttled", "transient", "timeout"].includes(kind);
 }
@@ -147,7 +152,7 @@ export function failureMetadata(
   attempt: number, durationMs: number, now = Date.now(), requestMaxAttempts = 3,
 ): ModelFailure {
   const kind = fault.kind;
-  const retryable = canRetryFailure(kind, attempt, requestMaxAttempts);
+  const retryable = isLocalModelOutage(service, kind) || canRetryFailure(kind, attempt, requestMaxAttempts);
   // An interrupted accepted stream can still be running remotely. Never immediately resubmit it.
   const uncertainStream = service === "pi" && fault.detail.outcome !== "not_submitted"
     && ((fault.detail.status !== undefined && fault.detail.status >= 200 && fault.detail.status < 300)

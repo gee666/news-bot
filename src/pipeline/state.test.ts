@@ -46,10 +46,10 @@ it.each(['pi','jev','embedding'] as const)('automatically backs off %s failures 
   const second = retryDecision(error, 2, defaultSettings);
   expect(first.next?.getTime()).toBeGreaterThanOrEqual(Date.now()+defaultSettings.retryBaseMs-10);
   expect(second.next?.getTime()).toBeGreaterThanOrEqual(Date.now()+2*defaultSettings.retryBaseMs-10);
-  expect(retryDecision(error, defaultSettings.requestMaxAttempts, defaultSettings).next).toBeNull();
+  expect(Boolean(retryDecision(error, defaultSettings.requestMaxAttempts, defaultSettings).next)).toBe(service !== 'pi');
   mocks.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [saved()] });
   await expect(stage(id, { revisionId: id }, 'extract', defaultSettings, z.boolean(), async () => { throw error; })).rejects.toBe(error);
-  expect(mocks.query.mock.calls.at(-1)?.[0]).toContain('attempts=attempts+1');
+  expect(mocks.query.mock.calls.at(-1)?.[1]?.at(-1)).toBe(service === 'pi' ? 1 : 0);
   expect(mocks.query.mock.calls.some(([sql]) => String(sql).includes('UPDATE processing_batches'))).toBe(false);
 });
 it.each(['waiting','failed'])('does not redispatch a %s stage', async status => {
@@ -68,7 +68,14 @@ it('validation and throttling use the same bounded budget as transport failures'
   }
 });
 
-it.each(['authentication','invalid_request','model_unavailable','context_limit','cancelled','unknown'] as const)('does not retry permanent %s failures', kind => {
+it.each(['authentication','invalid_request','context_limit','cancelled','unknown'] as const)('does not retry permanent %s failures', kind => {
   const error=new ModelRequestError(failureMetadata(new RequestFault(kind),id,'jev',1,0));
   expect(retryDecision(error,1,defaultSettings).next).toBeNull();
+});
+
+it.each(['jev','embedding'] as const)('keeps %s downtime waiting beyond the retry cap', service => {
+  for (const kind of ['transient','timeout','throttled','model_unavailable'] as const) {
+    const error = new ModelRequestError(failureMetadata(new RequestFault(kind),id,service,1000,0));
+    expect(retryDecision(error,1000,defaultSettings).next).not.toBeNull();
+  }
 });

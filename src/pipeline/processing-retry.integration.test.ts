@@ -178,7 +178,7 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[pin,pinned]);
     await (await import('./extraction-store.js')).applyExtraction(id,extracted,'Saved empty receipt.',[]);
     await database.db.query("UPDATE item_revisions SET created_at=now()-interval '49 hours' WHERE id=ANY($1::uuid[])",[[stale,pinned,extracted]]);
-    await database.db.query("UPDATE source_items SET collected_at=now()-interval '49 hours' WHERE current_revision_id=ANY($1::uuid[])",[[stale,pinned,extracted]]);
+    await database.db.query("UPDATE source_items SET published_at=now()-interval '49 hours',collected_at=now()-interval '49 hours' WHERE current_revision_id=ANY($1::uuid[])",[[stale,pinned,extracted]]);
     await (await import('./item-failures.js')).expireUnassignedMentions(settings);
     expect((await database.db.query('SELECT status,disposition_reason FROM batch_items WHERE batch_id=$1 AND revision_id=$2',[id,stale])).rows)
       .toEqual([{status:'rejected',disposition_reason:'outside_collection_window'}]);

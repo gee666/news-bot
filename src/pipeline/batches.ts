@@ -8,7 +8,7 @@ import { matchBatch } from './matching.js';
 import { finishBatchStories } from './stories.js';
 import { Vectors } from './vectors.js';
 import { recordProcessingDiagnostic } from './processing-diagnostics.js';
-import { retryDecision, Waiting } from './state.js';
+import { modelOutage, retryDecision, Waiting } from './state.js';
 import { reconcileEdits } from './revisions.js';
 import { consolidateStories } from './consolidation.js';
 import { completeBatchItems, dueBatchItems, expireUnassignedMentions } from './item-failures.js';
@@ -86,8 +86,8 @@ async function processBatchSlice(recoverOnly: boolean, batchId?: string,
     if (outcome?.status === 'failed') throw error;
     // Infrastructure failures do not claim any item and cannot take priority over later intake.
     const decision = retryDecision(error, batch.retry_attempts+1, settings);
-    await db.query(`UPDATE processing_batches SET status=$5,retry_attempts=retry_attempts+1,next_retry_at=$2,error_code=$3,waiting_reason=$4,last_served_at=now() WHERE id=$1`,
-      [batch.id, decision.next, decision.code, decision.reason, decision.next ? 'waiting' : 'failed']);
+    await db.query(`UPDATE processing_batches SET status=$5,retry_attempts=retry_attempts+$6,next_retry_at=$2,error_code=$3,waiting_reason=$4,last_served_at=now() WHERE id=$1`,
+      [batch.id, decision.next, decision.code, decision.reason, decision.next ? 'waiting' : 'failed', modelOutage(error) ? 0 : 1]);
     throw error;
   }
 }
