@@ -1,6 +1,6 @@
 import { db, transaction } from '../db.js';
 import { publicationSnapshotSchema, type PublicationSource, type GenerationReview } from '../types.js';
-import { publicationThreadEdges } from './generation-context.js';
+import { generationThread, publicationThreadEdges } from './generation-context.js';
 
 /** A sent post in a follow-up thread, as readers saw it. */
 export interface ThreadPost {
@@ -11,18 +11,15 @@ export interface ThreadPost {
 const published = `p.message_id IS NOT NULL AND p.published_at IS NOT NULL`;
 
 /**
- * The story and its published ancestors through `previous_story_id` links, oldest first.
- * An unpublished draft contributes nothing itself. Visited IDs stop corrupt cycles without truncating long threads.
+ * Published material from the complete accepted event group, oldest first.
+ * Newly joined branches contribute their sources before replacement removes their posts.
+ * An unpublished draft contributes no publication itself.
  */
 export async function publishedThread(storyId: string, query = db.query.bind(db), destinationId?: string): Promise<ThreadPost[]> {
   const result = await query<{ story_id: string; content: unknown; destination_id: string; message_id: string }>(`
-    WITH RECURSIVE ${publicationThreadEdges}, thread(id,path) AS (
-      SELECT $1::uuid,ARRAY[$1::uuid]
-      UNION ALL SELECT e.previous_story_id,t.path||e.previous_story_id FROM thread t
-        JOIN publication_thread_edges e ON e.story_id=t.id WHERE NOT e.previous_story_id=ANY(t.path)
-    ) SELECT p.story_id,snap.content,p.destination_id,p.message_id
+    ${generationThread} SELECT p.story_id,snap.content,p.destination_id,p.message_id
     FROM publications p JOIN publication_snapshots snap ON snap.id=p.snapshot_id
-    WHERE p.story_id IN(SELECT id FROM thread) AND ${published} AND ($2::text IS NULL OR p.destination_id=$2)
+    WHERE p.story_id IN(SELECT id FROM generation_story_ids) AND ${published} AND ($2::text IS NULL OR p.destination_id=$2)
     ORDER BY p.published_at,p.id`, [storyId, destinationId ?? null]);
   return result.rows.map(row => {
     const snapshot = publicationSnapshotSchema.parse(row.content);
@@ -33,13 +30,10 @@ export async function publishedThread(storyId: string, query = db.query.bind(db)
   }).filter((post, index, posts) => posts.findIndex(other => other.storyId === post.storyId) === index);
 }
 
-/** The newest published post that continues the given published story. */
+/** The newest published post in the accepted event group, including joined branches. */
 export async function latestThreadStory(storyId: string, query = db.query.bind(db)): Promise<string> {
-  const result = await query<{ story_id: string }>(`WITH RECURSIVE ${publicationThreadEdges}, down(id,path) AS (
-      SELECT $1::uuid,ARRAY[$1::uuid]
-      UNION ALL SELECT e.story_id,d.path||e.story_id FROM down d
-        JOIN publication_thread_edges e ON e.previous_story_id=d.id WHERE NOT e.story_id=ANY(d.path)
-    ) SELECT p.story_id FROM down JOIN publications p ON p.story_id=down.id WHERE ${published}
+  const result = await query<{ story_id: string }>(`${generationThread}
+    SELECT p.story_id FROM generation_story_ids component JOIN publications p ON p.story_id=component.id WHERE ${published}
     ORDER BY p.published_at DESC,p.id DESC LIMIT 1`, [storyId]);
   return result.rows[0]?.story_id ?? storyId;
 }

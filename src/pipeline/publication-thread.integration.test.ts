@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AppSettings } from '../settings.js';
-import type { PublicationSnapshot } from '../types.js';
+import type { PublicationSnapshot, PublicationSource } from '../types.js';
 
 const url = process.env.TEST_DATABASE_URL;
 const schema = `thread_${randomUUID().replaceAll('-', '')}`;
@@ -30,9 +30,9 @@ async function story(previous?: string) {
     VALUES($1,$2,'fixture-verified')`, [id, previous]);
   return { id, revision, mention };
 }
-async function publish(id: string, message: string, earlier?: string, destination = '-100123') {
+async function publish(id: string, message: string, earlier?: string, destination = '-100123', sources: PublicationSource[] = []) {
   const content: PublicationSnapshot = { headline: `Тема ${message}`, details: `Сведения ${message}`, score: 7,
-    detailsKind: 'summary', sources: [], ...(earlier ? { earlier } : {}) };
+    detailsKind: 'summary', sources, ...(earlier ? { earlier } : {}) };
   const snapshot = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id', [id, JSON.stringify(content)]);
   await database.db.query(`INSERT INTO publications(story_id,snapshot_id,destination_id,status,message_id,published_at)
     VALUES($1,$2,$3,'published',$4::text,now()+$4::text::integer*interval '1 second')`, [id, snapshot, destination, message]);
@@ -91,6 +91,46 @@ describe.skipIf(!url)('published thread storage', () => {
     const before = await evidenceSnapshotHash(draft.id);
     await database.db.query("UPDATE evidence_documents SET content='Corrected announcement details.' WHERE id=$1", [evidence]);
     expect(await evidenceSnapshotHash(draft.id)).not.toBe(before);
+  });
+  it('retains reports, published sources and evidence from every joined branch before replacing old posts', async () => {
+    const pricing = await story(), benchmarks = await story(), unrelated = await story(), draft = await story();
+    const source = (url: string): PublicationSource => ({ url, label: url, access: 'public', primary: true, classification: 'relevant' });
+    const priceSource = source('https://vendor.example/pricing'), benchmarkSource = source('https://vendor.example/benchmarks');
+    await publish(pricing.id, '240', undefined, '-100123', [priceSource]);
+    await publish(benchmarks.id, '241', undefined, '-100123', [benchmarkSource]);
+    const { recordStoryRelations } = await import('./story-relations.js');
+    await recordStoryRelations(draft.id, [{ storyId: pricing.id, relation: 'same' },
+      { storyId: benchmarks.id, relation: 'same' }, { storyId: unrelated.id, relation: 'unrelated' }], 'fixture', { origin: 'model' });
+    const evidenceIds: string[] = [];
+    for (const [owner, url] of [[pricing.id, priceSource.url], [benchmarks.id, benchmarkSource.url]]) {
+      const evidence = await one(`INSERT INTO evidence_documents(url,title,content,access,expires_at)
+        VALUES($1,'Release details',$1,'public',now()+interval '1 day') RETURNING id`, [url]);
+      evidenceIds.push(evidence);
+      await database.db.query(`INSERT INTO story_evidence(story_id,evidence_id,role,relevance)
+        VALUES($1,$2,'primary','relevant')`, [owner, evidence]);
+    }
+    const { loadStory, loadPreviousEvidence, saveGenerations } = await import('./generation-store.js');
+    const input = await loadStory(draft.id);
+    expect(input.mentions.map(mention => mention.id).sort()).toEqual([pricing.mention, benchmarks.mention, draft.mention].sort());
+    expect(input.previous_posts?.map(post => post.storyId)).toEqual([pricing.id, benchmarks.id]);
+    expect(input.previous_posts?.flatMap(post => post.sources.map(item => item.url))).toEqual([priceSource.url, benchmarkSource.url]);
+    expect((await loadPreviousEvidence(draft.id)).map(doc => doc.id).sort()).toEqual(evidenceIds.sort());
+    await saveGenerations([input], [{ id: draft.id, headline: 'Тема 242', summary: 'Сведения 242',
+      translatedExcerpt: null, coveredPublishedStoryIds: [pricing.id, benchmarks.id] }], settings);
+    await publish(draft.id, '242', undefined, '-100123', [priceSource, benchmarkSource]);
+    await database.db.query(`UPDATE publication_snapshots SET generation_id=(
+      SELECT id FROM judgments WHERE story_id=$1 AND stage='generation_research' ORDER BY created_at DESC,id DESC LIMIT 1)
+      WHERE id=(SELECT snapshot_id FROM publications WHERE story_id=$1)`, [draft.id]);
+    await database.db.query(`UPDATE publications SET bot_id='fixture',format_version=1
+      WHERE story_id=ANY($1::uuid[])`, [[pricing.id, benchmarks.id, draft.id]]);
+    const { prepareReplacements } = await import('../publishing/replacements.js');
+    await database.transaction(client => prepareReplacements(client, '-100123'));
+    const replacements = await database.db.query<{ message_id: string }>(`SELECT old.message_id
+      FROM publication_replacements r JOIN publications old ON old.id=r.duplicate_publication_id
+      JOIN publications latest ON latest.id=r.canonical_publication_id
+      WHERE latest.story_id=$1 ORDER BY old.message_id`, [draft.id]);
+    expect(replacements.rows.map(row => row.message_id)).toEqual(['240', '241']);
+    expect((await loadStory(draft.id)).mentions.map(mention => mention.id)).not.toContain(unrelated.mention);
   });
   it('cancels failed-story edits without touching unrelated pending edits', async () => {
     const target = await story(); await publish(target.id, '130');

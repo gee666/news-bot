@@ -158,7 +158,8 @@ describe('generation database boundary', () => {
   it('saves generated content and generation signature without changing completion or rank', async () => {
     const input = storyInput();
     mocks.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ id: storyId }] });
-    const value = { id: storyId, headline: 'Acme выпустила 2.0.', summary: 'Исправлена ошибка безопасности.', translatedExcerpt: null };
+    const value = { id: storyId, headline: 'Acme выпустила 2.0.', summary: 'Исправлена ошибка безопасности.',
+      translatedExcerpt: null, coveredPublishedStoryIds: [secondId] };
     await saveGenerations([input], [value], defaultSettings);
     expect(mocks.query.mock.calls[0]?.[0]).toMatch(/^WITH RECURSIVE /u);
     expect(mocks.query.mock.calls[1]?.[1]).toEqual([storyId, value.headline, value.summary, null, true, 1,
@@ -167,6 +168,7 @@ describe('generation database boundary', () => {
     expect(mocks.query.mock.calls[2]?.[0]).toContain(`'${GENERATION_VERSION}'`);
     expect(mocks.query.mock.calls[2]?.[1]).toContain('generation_research');
     expect(mocks.query.mock.calls[2]?.[1]).toContain(generationHash(input, defaultSettings));
+    expect(JSON.parse(String(mocks.query.mock.calls[2]?.[1]?.[5]))).toMatchObject({ coveredPublishedStoryIds: [secondId] });
   });
 
   it('rejects obsolete results rather than overwriting a story changed during inference', async () => {
@@ -191,6 +193,31 @@ describe('generation database boundary', () => {
     expect(mocks.query.mock.calls[0]?.[0]).toContain('expires_at > now()');
     expect(GENERATION_VERSION).toBe('generation-v15-primary-editions');
     expect(mocks.query.mock.calls[0]?.[0]).toContain(`prompt_version = '${GENERATION_VERSION}'`);
+  });
+
+  it.each([
+    { ids: [secondId, evidenceId], coverage: undefined, reusable: false },
+    { ids: [secondId, evidenceId], coverage: [], reusable: false },
+    { ids: [secondId, evidenceId], coverage: [secondId], reusable: false },
+    { ids: [secondId, evidenceId], coverage: [secondId, 'not-a-uuid'], reusable: false },
+    { ids: [secondId, evidenceId], coverage: [secondId, evidenceId], reusable: true },
+    { ids: [secondId], coverage: undefined, reusable: true },
+  ])('requires complete published-branch coverage before a cached draft can skip generation: %j', async ({ ids, coverage, reusable }) => {
+    const input = storyInput();
+    input.story.headline = 'Новость.'; input.story.summary = 'Подробности.'; input.story.researched = true;
+    input.previous_posts = ids.map((id, index) => ({ storyId: id, headline: 'Новость.', details: 'Те же ссылки, разные факты.',
+      destinationId: '-100123', messageId: String(index + 1), sources: [] }));
+    const evidenceSignature = await evidenceSnapshotHash(storyId);
+    mocks.query.mockClear().mockResolvedValueOnce({ rows: [{ result: { evidenceSignature, coveredPublishedStoryIds: coverage } }] });
+    expect(await alreadyGenerated(input, defaultSettings)).toBe(reusable);
+    expect(mocks.query).toHaveBeenCalledTimes(reusable ? 2 : 1);
+  });
+
+  it('rejects malformed coverage before writing a generation receipt', async () => {
+    await expect(saveGenerations([storyInput()], [{ id: storyId, headline: 'Новость.', summary: 'Текст.',
+      translatedExcerpt: null, coveredPublishedStoryIds: ['not-a-uuid'] }], defaultSettings)).rejects.toThrow();
+    expect(mocks.query).toHaveBeenCalledOnce();
+    expect(mocks.query.mock.calls[0]?.[0]).not.toContain('UPDATE stories');
   });
 
   it('changes generation signature for meaningful evidence, model or selected excerpt changes', () => {

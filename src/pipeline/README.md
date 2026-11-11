@@ -4,13 +4,17 @@
 - Extract exact source passages in one structured model call.
   Local validation checks coordinates, overlap and complete coverage.
   Save successful extraction once, including empty results.
-- Shortlist the 20 nearest retained eligible story groups using existing
+- Shortlist the 20 nearest retained eligible event groups using existing
   embeddings and lexical overlap. Always include shared-link, same-source and
-  prior-revision groups, even beyond that limit. Compare each candidate with JEV.
-  Cached pair decisions preserve full reports and provenance.
-  Attach only to the highest-ranked `same` candidate.
-  Leave additional `same` matches unrecorded, never relabel them as `related`.
+  prior-revision groups, even beyond that limit. Compare the incoming report once
+  with each group's combined current source reports, never separately with its members.
+  Generated summaries are not matching evidence. Cached decisions preserve full reports
+  and provenance. Record every accepted `same` match so duplicate branches can join.
+  Accepted event identity stays intact. A later negative comparison cannot split a
+  group or invalidate its links. A fresh whole-group positive can supersede older
+  model negatives, but cannot override an explicit user-defined event boundary.
   Related stories stay separate and never contribute generation material.
+  Previously quarantined or unclassified legacy links are not restored automatically.
 - Classify item links together, then read and assess relevant documents.
   Link relevance and primary origin do not prove factual verification.
 - Check story coherence, select a representative, assess eligibility,
@@ -22,8 +26,11 @@
   and read documents. For later editions, a new primary triggers fresh reads of
   all known primaries and a combined summary, without previous summaries as input.
   Secondary-only coverage reuses the latest published headline and summary
-  verbatim and adds its sources, without research or rewriting. Failed primary
-  reads defer rebuilding rather than publishing an incomplete edition.
+  verbatim and adds its sources only when that edition already covers the group's
+  published branches. Joining branches rebuilds from their combined original
+  reports and evidence before replacement removes their old posts. Generation
+  receipts record which published stories they cover. Failed primary reads defer
+  rebuilding rather than publishing an incomplete edition.
   Review new drafts, with at most one rewrite and re-review.
   Review failure does not block a valid draft. Nonempty notes are shown.
 - Check completion postconditions and generation freshness once before
@@ -39,7 +46,8 @@ requests still need correction. Checkpoints and successful calls do not consume 
 Healthy siblings continue while failed units wait or exhaust their budget.
 
 Grouping uses JEV directly, once per uncached shortlisted pair, with full
-reports, source URLs and publication times. Completed pairs survive checkpoints
+reports, source URLs and publication times. Cached decisions retain the selected
+relation, probabilities, confidence, model and prompt version. Completed pairs survive checkpoints
 and candidate reordering. JEV context limits fail without truncation or a Pi fallback.
 Private inference requires approval or `ALLOW_PRIVATE_INFERENCE=true`.
 `NEWS_SUMMARY_MAX_CHARS` defaults to 1000. Headlines allow 180 characters.

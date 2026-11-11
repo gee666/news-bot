@@ -5,7 +5,7 @@ import { generateStructured } from '../models/index.js';
 import { jevTemplates } from '../models/templates.js';
 import type { AppSettings } from '../settings.js';
 import { generationClient, recordGenerationFailure, requireInferenceApproval } from './generation-model.js';
-import { eventInput } from './consolidation-input.js';
+import { currentMatchingInput, matchingInputStoryIds } from './matching-group-input.js';
 import { retainedStories } from './matching.js';
 import { approveRemoteInput } from './privacy.js';
 import { hash, stage, type StageContext } from './state.js';
@@ -80,7 +80,9 @@ export async function classifyItemLinks(revisionId: string, settings: AppSetting
   const mentions = await db.query<{ id: string; text: string }>('SELECT id,text FROM story_mentions WHERE revision_id=$1 ORDER BY ordinal', [revisionId]);
   const sourceOnly = !mentions.rows.length;
   const stories = sourceOnly ? await retainedStories(settings) : [];
-  for (const story of stories) await approveRemoteInput('https://api.openai.com', context.id, { storyId: story.id });
+  for (const storyId of new Set(stories.flatMap(matchingInputStoryIds))) {
+    await approveRemoteInput('https://api.openai.com', context.id, { storyId });
+  }
   const targets = sourceOnly ? stories.map(story => ({ id: story.id, reports: story.reports })) : mentions.rows;
   const targetIds = new Set(targets.map(target => target.id));
   const linkIds = new Set(links.map(link => link.id));
@@ -96,10 +98,15 @@ export async function classifyItemLinks(revisionId: string, settings: AppSetting
     responseSchema: { name: 'item_source_links', schema: z.toJSONSchema(decisionSchema) },
   }, { operationId: context.id, attempt: context.attempt }, recordGenerationFailure) : { value:{associations:[]} };
   await transaction(async client => {
-    await client.query('SELECT id FROM source_items WHERE current_revision_id=$1 FOR SHARE', [revisionId]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
+    // Keep group membership and every compared source revision stable through commit.
+    const storyIds = [...new Set(stories.flatMap(matchingInputStoryIds))];
+    await client.query(`SELECT i.id FROM source_items i WHERE i.current_revision_id=$1
+      OR EXISTS(SELECT 1 FROM item_revisions r JOIN story_mentions m ON m.revision_id=r.id
+        WHERE r.item_id=i.id AND m.story_id=ANY($2::uuid[])) ORDER BY i.id FOR SHARE`, [revisionId, storyIds]);
     if (!(await client.query('SELECT 1 FROM source_items WHERE current_revision_id=$1', [revisionId])).rows.length) throw new Error('Link source changed');
     for (const story of stories) {
-      if ((await eventInput(story.id,client))?.fingerprint !== story.fingerprint) throw new Error('Link target changed');
+      if ((await currentMatchingInput(story,client))?.fingerprint !== story.fingerprint) throw new Error('Link target changed');
     }
     if (sourceOnly) {
       await client.query(`INSERT INTO source_link_processing(revision_id,processing_key,role)

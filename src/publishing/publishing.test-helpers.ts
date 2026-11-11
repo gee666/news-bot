@@ -13,6 +13,7 @@ export async function acceptFixtureStories(settings: AppSettings, storyIds?: str
     if (!input.story.headline || !input.story.summary) throw new Error('Incomplete fixture output');
     await saveGenerations([input], [{ id, headline: input.story.headline, summary: input.story.summary,
       translatedExcerpt: input.story.translated_excerpt,
+      coveredPublishedStoryIds: [...new Set((input.previous_posts ?? []).map(post => post.storyId))],
       review: { supported: true, reason: 'Существенных ошибок не найдено' },
     }], settings);
   }

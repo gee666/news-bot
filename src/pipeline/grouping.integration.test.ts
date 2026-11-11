@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppSettings } from '../settings.js';
 import { BotApi } from '../publishing/bot-api.js';
+import { jevTemplates } from '../models/templates.js';
 import { expectFollowupMarker } from './grouping.test-helpers.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 
@@ -41,8 +42,8 @@ vi.mock('../models/jev.js', async original => ({ ...await original<typeof import
         (candidate.text.includes('PHP') && input.incoming.text.includes('PHP')
           ? (candidate.text.includes('Alderon') === input.incoming.text.includes('Alderon') ? 'same' : 'related')
           : candidate.text.includes('Compiler 2') && input.incoming.text.includes('Compiler 2') ? 'same' : 'unrelated');
-      return { answers: { relation: { type: 'choice', choice: relation, probabilities: {}, confidence: 1 } },
-        metrics: {}, model: 'fixture' };
+      return { answers: { relation: { type: 'choice', choice: relation, probabilities: { [relation]: 1 }, confidence: 1 } },
+        metrics: {}, model: 'fixture', promptVersion: jevTemplates.duplicate.version };
     }
     const answer = template==='interest' ? { type: 'score', score: 7, probabilities: {}, confidence: 1, legend: {} }
       : { type: 'choice', choice: template==='event_group_integrity' ? 'coherent' : template==='representative' ? 'left' : 'eligible', probabilities: {}, confidence: 1 };
@@ -58,7 +59,8 @@ vi.mock('./generation.js', () => ({ researchStory: async (id: string, settings: 
   const { loadStory, saveGenerations } = await import('./generation-store.js');
   const input = await loadStory(id);
   await saveGenerations([input],[{ id, headline: 'Новости разработки',
-    summary: [...new Set(input.mentions.map(mention=>mention.text))].join('\n'), translatedExcerpt: null }],settings);
+    summary: [...new Set(input.mentions.map(mention=>mention.text))].join('\n'), translatedExcerpt: null,
+    coveredPublishedStoryIds: (input.previous_posts ?? []).map(post => post.storyId) }],settings);
 } }));
 const url = process.env.TEST_DATABASE_URL;
 const schema = `grouping_${randomUUID().replaceAll('-','')}`;
@@ -97,7 +99,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
   });
   beforeEach(async () => {
     vi.restoreAllMocks(); model.groupingCalls=0; model.extractionCalls=0; model.linksCalls=0; model.relation='';
-    await database.db.query('TRUNCATE processing_batches,sources,stories,publications,model_cache,operational_state CASCADE');
+    await database.db.query('TRUNCATE processing_batches,sources,stories,story_merges,publications,model_cache,operational_state CASCADE');
     const { saveState }=await import('../publishing/store.js');
     await saveState('telegram_destination',{channelId:'-100123'});
     await saveState('bot_verified',{verified:true,destinationId:'-100123',botId:123});
@@ -180,7 +182,11 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
       .toEqual([{relation:'same'}]);
     expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
     expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(3);
-    expect(BotApi.prototype.send).toHaveBeenCalledTimes(3);
+    const delivery = await database.db.query(`SELECT s.id,s.status,s.interest_stale,s.researched,
+      ready.status AS ready_status,ready.reason,p.status AS publication_status
+      FROM stories s LEFT JOIN story_publication_ready ready ON ready.story_id=s.id
+      LEFT JOIN publications p ON p.story_id=s.id ORDER BY s.created_at,s.id`);
+    expect(BotApi.prototype.send, JSON.stringify(delivery.rows)).toHaveBeenCalledTimes(3);
     expect(next).not.toBe(first);
   });
   it('keeps PHP discovery and a consequent Alderon shutdown separate, without same-event ancestry or UPD', async () => {
@@ -195,7 +201,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     const { relatedStoryIds }=await import('./story-relations.js');
     expect(await relatedStoryIds(discovery)).toEqual([shutdown]); expect(await relatedStoryIds(shutdown)).toEqual([discovery]);
     expect((await database.db.query("SELECT classifier_version FROM story_relations WHERE relation='related'")).rows)
-      .toEqual([{ classifier_version: 'grouping-jev-v1' }]);
+      .toEqual([{ classifier_version: 'grouping-jev-v2' }]);
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1',[discovery])).rows[0]).toEqual(original);
     expect((await database.db.query('SELECT text FROM story_mentions WHERE story_id=$1',[shutdown])).rows)
       .toEqual([{text:'Alderon shut down its game because of the PHP vulnerability.'}]);
@@ -398,7 +404,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows).toEqual([{story_id:canonical}]);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
   });
-  it('keeps a historical published owner unchanged and leaves a lower-ranked same draft unrecorded', async () => {
+  it('reuses a matching draft and links it to the historical published group without changing that owner', async () => {
     const first=await intake(['Acme выпустила Compiler 2.']); await processIntake(first); await publish();
     const original=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[first]);
     const item=await one('SELECT item_id AS id FROM item_revisions WHERE id=$1',[original]);
@@ -417,14 +423,14 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[update,edited]);
     await processIntake(update); await publish();
     const attached=(await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[edited])).rows[0]?.story_id;
-    expect(attached).not.toBe(duplicate);
+    expect(attached).toBe(duplicate);
     expect(attached).not.toBe(canonical);
-    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:canonical}]);
+    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:null}]);
     expect((await database.db.query(`SELECT relation FROM story_relations
-      WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`,[attached,duplicate])).rows)
-      .toEqual([]);
+      WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`,[attached,canonical])).rows)
+      .toEqual([{relation:'same'}]);
     expect((await database.db.query("SELECT id FROM judgments WHERE stage='published_update'")).rows).toEqual([]);
-    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(3);
+    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
     expect((await database.db.query('SELECT headline FROM stories WHERE id=$1',[canonical])).rows[0]?.headline).not.toBeNull();
     expect(BotApi.prototype.send).toHaveBeenCalledTimes(2); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2]));
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[update])).rows).toEqual([{status:'completed'}]);

@@ -11,7 +11,7 @@ import { processingSliceMs } from './processing-slice.js';
 import { publishedStory } from './generation-store.js';
 import { publishedThread, rebaseFollowup } from './publication-thread.js';
 import { generationHistory } from './generation-history.js';
-import { editionPrimaries, readEditionPrimaries } from './research-edition.js';
+import { editionPrimaries, latestPublishedEditionCovers, readEditionPrimaries } from './research-edition.js';
 import { MAX_HEADLINE_CHARS, summaryMaxChars } from './generation-limits.js';
 
 const editorialSchema = z.object({
@@ -87,14 +87,15 @@ export async function researchStory(storyId: string, settings: AppSettings, forc
   const origins=await classifySourceOrigins(input,cached,generator);
   const edition = editionPrimaries(thread, previousEvidence, origins);
   const latest = thread.at(-1);
-  if (latest && !edition.added.length) {
-    // Secondary coverage changes attribution only. Never summarize a summary again.
+  const coveredPublishedStoryIds = [...new Set(thread.map(post => post.storyId))];
+  if (latest && !edition.added.length && await latestPublishedEditionCovers(thread)) {
+    // Only an edition that covered every joined branch can reuse its event text.
     const sourceUrls = [...new Set([...retainedUrls,
       ...input.mentions.flatMap(mention => mention.original_url ? [mention.original_url] : []),
       ...(input.supplementary_reports ?? []).flatMap(report => report.original_url ? [report.original_url] : []),
       ...input.links.filter(link => link.classification === 'relevant').map(link => link.url)])];
     await saveGenerations([input], [{ id: storyId, headline: latest.headline, summary: latest.details,
-      translatedExcerpt: null, evidenceSignature: await evidenceSnapshotHash(storyId),
+      translatedExcerpt: null, evidenceSignature: await evidenceSnapshotHash(storyId), coveredPublishedStoryIds,
       ...(latest.review ? { review: latest.review } : {}), primarySourceUrls: edition.urls, sourceUrls,
       secondarySourceUrls: input.links.filter(link => link.classification === 'relevant'
         && !edition.urls.includes(link.url)).map(link => link.url) }], settings);
@@ -143,7 +144,8 @@ export async function researchStory(storyId: string, settings: AppSettings, forc
     ...(input.supplementary_reports ?? []).flatMap(report => report.original_url ? [report.original_url] : []),
     ...input.links.map(link => link.url), ...documents.flatMap(document => [document.url, ...(document.canonical_url ? [document.canonical_url] : [])])]);
   const value: GeneratedStory = { id: storyId, headline: draft.headline, summary: draft.summary,
-    translatedExcerpt: null, evidenceSignature, review: { ...review, reason: review.reason.replace(/\s+/gu, ' ').slice(0, 240) },
+    translatedExcerpt: null, evidenceSignature, coveredPublishedStoryIds,
+    review: { ...review, reason: review.reason.replace(/\s+/gu, ' ').slice(0, 240) },
     primarySourceUrls,sourceUrls: [...new Set([...retainedUrls, ...draft.source_urls.filter(url => knownUrls.has(url))])] };
   await saveGenerations([input], [value], settings);
   return 'ready';

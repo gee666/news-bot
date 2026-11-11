@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   startBot: vi.fn(), stopBot: vi.fn(async () => {}), status: vi.fn(),
 }));
 vi.mock('./db.js', () => ({ db: { end: mocks.end }, migrate: mocks.migrate }));
+vi.mock('./media/story-media.js', () => ({ cleanupMedia: vi.fn(async () => {}) }));
 vi.mock('./settings.js', () => ({ getSettings: mocks.settings }));
 vi.mock('./models/index.js', () => ({ openPiRuntime: mocks.runtime }));
 vi.mock('./models/usage-delivery.js', () => ({ initializeUsageOutbox: mocks.initializeOutbox,

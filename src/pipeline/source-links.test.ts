@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { defaultSettings } from '../settings.js';
-const mocks = vi.hoisted(() => ({ query: vi.fn(), retained: vi.fn(), generate: vi.fn(), eventInput: vi.fn() }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), retained: vi.fn(), generate: vi.fn(), currentInput: vi.fn() }));
 vi.mock('../db.js', () => ({ db: { query: mocks.query },
   transaction: (run: (client: { query: typeof mocks.query }) => Promise<void>) => run({ query: mocks.query }),
 }));
@@ -9,8 +9,8 @@ vi.mock('./matching.js', () => ({ retainedStories: mocks.retained }));
 vi.mock('../models/index.js', () => ({ generateStructured: mocks.generate }));
 vi.mock('./generation-model.js', () => ({ generationClient: vi.fn(), recordGenerationFailure: vi.fn(), requireInferenceApproval: vi.fn() }));
 vi.mock('./privacy.js', () => ({ approveRemoteInput: vi.fn() }));
-vi.mock('./consolidation-input.js', async original => ({
-  ...await original<typeof import('./consolidation-input.js')>(), eventInput: mocks.eventInput,
+vi.mock('./matching-group-input.js', async original => ({
+  ...await original<typeof import('./matching-group-input.js')>(), currentMatchingInput: mocks.currentInput,
 }));
 import { associateSourceLinks, classifyItemLinks } from './source-links.js';
 beforeEach(() => {
@@ -53,11 +53,12 @@ it.each([
   const storyId = randomUUID();
   const story = { id: storyId, text: 'Existing story', fingerprint: 'unchanged', reports: [] };
   mocks.retained.mockResolvedValue([story]);
-  mocks.eventInput.mockResolvedValue(story);
+  mocks.currentInput.mockResolvedValue(story);
   mocks.generate.mockResolvedValue({ value: { associations: next ? [{ linkId, targetId: storyId, classification: next }] : [] } });
   mocks.query
     .mockResolvedValueOnce({ rows: [{ original_text: 'Source-only post', access: 'public' }] })
     .mockResolvedValueOnce({ rows: [{ id: linkId, url: 'https://example.org/source', anchor_text: null }] })
+    .mockResolvedValueOnce({ rows: [] })
     .mockResolvedValueOnce({ rows: [] })
     .mockResolvedValueOnce({ rows: [{ id: randomUUID() }] })
     .mockResolvedValueOnce({ rows: [{ exists: true }] })
@@ -75,4 +76,41 @@ it.each([
   const inserts = mocks.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO story_link_sources'));
   expect(inserts).toHaveLength(next ? 1 : 0);
   if (next) expect(inserts[0]?.[1]).toEqual(expect.arrayContaining([linkId, storyId, next]));
+});
+
+it.each([false, true])('revalidates the complete source-only group before writes, changed: %s', async changed => {
+  const revisionId = randomUUID(), linkId = randomUUID(), storyId = randomUUID(), siblingId = randomUUID();
+  const story = { id: storyId, storyIds: [siblingId, storyId], retentionDays: 7,
+    text: 'Release pricing\n\nRelease benchmarks', fingerprint: 'full-group-fingerprint',
+    reports: ['Release pricing', 'Release benchmarks'].map(text => ({ text, sourceUrl: null, links: [] })) };
+  mocks.retained.mockResolvedValue([story]);
+  mocks.currentInput.mockResolvedValue({ ...story, fingerprint: changed ? 'changed-member' : story.fingerprint });
+  mocks.generate.mockResolvedValue({ value: { associations: [{ linkId, targetId: storyId, classification: 'relevant' }] } });
+  mocks.query.mockImplementation(async (sql: string) => {
+    if (sql.includes('SELECT r.original_text')) return { rows: [{ original_text: 'Source-only recap', access: 'public' }] };
+    if (sql.includes('SELECT id,url,anchor_text')) return { rows: [{ id: linkId, url: 'https://example.org/source', anchor_text: null }] };
+    if (sql.includes('SELECT 1 FROM source_items')) return { rows: [{ exists: true }] };
+    return { rows: [] };
+  });
+  const { approveRemoteInput } = await import('./privacy.js');
+  const run = classifyItemLinks(revisionId, defaultSettings, {
+    id: randomUUID(), attempt: 1, batchId: null, revisionId, storyId: null,
+  });
+  if (changed) await expect(run).rejects.toThrow('Link target changed');
+  else await run;
+
+  expect(mocks.currentInput).toHaveBeenCalledExactlyOnceWith(story, { query: mocks.query });
+  for (const id of story.storyIds) expect(approveRemoteInput).toHaveBeenCalledWith(
+    'https://api.openai.com', expect.any(String), { storyId: id });
+  const prompt = JSON.parse(mocks.generate.mock.calls[0]?.[1].prompt);
+  expect(prompt.targets).toEqual([{ id: storyId, reports: story.reports }]);
+  const calls = mocks.query.mock.calls;
+  const membershipLock = calls.findIndex(([sql]) => sql.includes('pg_advisory_xact_lock'));
+  const sourceLock = calls.findIndex(([sql]) => sql.includes('ORDER BY i.id FOR SHARE'));
+  expect(membershipLock).toBeGreaterThanOrEqual(0);
+  expect(sourceLock).toBeGreaterThan(membershipLock);
+  expect(calls[sourceLock]?.[1]).toEqual([revisionId, [siblingId, storyId]]);
+  expect(mocks.query.mock.invocationCallOrder[sourceLock]).toBeLessThan(mocks.currentInput.mock.invocationCallOrder[0]!);
+  expect(calls.filter(([sql]) => /INSERT INTO (story_link_sources|source_link_processing)/u.test(sql)))
+    .toHaveLength(changed ? 0 : 2);
 });

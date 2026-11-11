@@ -33,9 +33,16 @@ async function fixture(status: Publication['status'] = 'published', destination 
 async function classify(a: string, b: string, relation: 'same' | 'related' = 'same') {
   await (await import('../pipeline/story-relations.js')).recordStoryRelations(a,[{storyId:b,relation}],'fixture',{origin:'user'});
 }
+async function cover(publication: { snapshot: string }, storyIds: string[]) {
+  const result = await database.db.query(`UPDATE judgments SET result=result||jsonb_build_object('coveredPublishedStoryIds',$2::jsonb)
+    WHERE id=(SELECT generation_id FROM publication_snapshots WHERE id=$1)`, [publication.snapshot, JSON.stringify(storyIds)]);
+  if (result.rowCount !== 1) throw new Error('Missing pinned generation receipt');
+}
 async function pair(status: Publication['status'] = 'published') {
   const old = await fixture(); const latest = await fixture(status);
-  await classify(old.story,latest.story); return { old,latest };
+  await classify(old.story,latest.story);
+  await cover(latest, [old.story]);
+  return { old,latest };
 }
 async function replacements() {
   return (await database.db.query<{ duplicate_publication_id: string; canonical_publication_id: string; status: string; error_code: string | null }>(
@@ -68,6 +75,64 @@ describe.skipIf(!url)('same-event replacement deletion outbox', () => {
     vi.unstubAllEnvs();
   });
 
+  it('keeps joined A/B posts until combined C has a confirmed snapshot with pinned coverage', async () => {
+    const a = await fixture(), b = await fixture(), combined = await fixture('prepared');
+    await classify(a.story, combined.story); await classify(b.story, combined.story);
+    await cover(combined, [a.story, b.story]);
+    await thread.prepareThreadUpdates('-100123');
+    expect(await replacements()).toEqual([]);
+    expect(await repair.retryReplacements(api(), settings, '-100123')).toBe(0);
+    expect(BotApi.prototype.delete).not.toHaveBeenCalled();
+
+    await database.db.query(`UPDATE publications SET status='published',message_id=$2,
+      published_at=now()+interval '10 seconds' WHERE id=$1`, [combined.id, combined.message]);
+    await thread.prepareThreadUpdates('-100123');
+    expect(await replacements()).toHaveLength(2);
+    expect((await replacements()).every(row => row.canonical_publication_id === combined.id)).toBe(true);
+    expect(await repair.retryReplacements(api(), settings, '-100123')).toBe(2);
+    expect(BotApi.prototype.delete).toHaveBeenCalledWith('-100123', a.message);
+    expect(BotApi.prototype.delete).toHaveBeenCalledWith('-100123', b.message);
+    expect(BotApi.prototype.delete).not.toHaveBeenCalledWith('-100123', combined.message);
+  });
+  it('does not borrow coverage from a later unposted receipt with identical text', async () => {
+    const old = await fixture(), latest = await fixture();
+    await classify(old.story, latest.story);
+    await acceptFixtureStories(settings, [latest.story]);
+    await thread.prepareThreadUpdates('-100123');
+    expect(await replacements()).toEqual([]);
+    expect(await repair.retryReplacements(api(), settings, '-100123')).toBe(0);
+    expect(BotApi.prototype.delete).not.toHaveBeenCalled();
+  });
+  it('allows a valid legacy directed successor without branch coverage metadata', async () => {
+    const old = await fixture(), latest = await fixture();
+    await database.db.query(`INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version)
+      VALUES($1,$2,'fixture-verified')`, [latest.story, old.story]);
+    await acceptFixtureStories(settings, [latest.story]);
+    latest.snapshot = await one(`INSERT INTO publication_snapshots(story_id,content)
+      SELECT story_id,content FROM publication_snapshots WHERE id=$1 RETURNING id`, [latest.snapshot]);
+    await database.db.query('UPDATE publications SET snapshot_id=$2 WHERE id=$1', [latest.id, latest.snapshot]);
+    await database.db.query(`UPDATE judgments SET result=result-'coveredPublishedStoryIds'
+      WHERE id=(SELECT generation_id FROM publication_snapshots WHERE id=$1)`, [latest.snapshot]);
+    expect(await repair.retryReplacements(api(), settings, '-100123')).toBe(1);
+    expect(BotApi.prototype.delete).toHaveBeenCalledExactlyOnceWith('-100123', old.message);
+  });
+  it('does not delete from a staged proof after a new uncovered published branch joins', async () => {
+    const { old, latest } = await pair();
+    await thread.prepareThreadUpdates('-100123');
+    expect(await replacements()).toHaveLength(1);
+    const branch = await fixture(); await classify(latest.story, branch.story);
+    expect(await repair.retryReplacements(api(), settings, '-100123')).toBe(0);
+    expect(BotApi.prototype.delete).not.toHaveBeenCalled();
+    expect((await replacements()).find(row => row.duplicate_publication_id === old.id)?.status).toBe('pending');
+  });
+  it('checks the proposed survivor in its bot/destination rather than a newer global branch', async () => {
+    const { old, latest } = await pair();
+    const otherBot = await fixture('published', '-100123', '999');
+    const elsewhere = await fixture('published', '-100999');
+    await classify(latest.story, otherBot.story); await classify(latest.story, elsewhere.story);
+    expect(await repair.retryReplacements(api(), settings, '-100123')).toBe(1);
+    expect(BotApi.prototype.delete).toHaveBeenCalledExactlyOnceWith('-100123', old.message);
+  });
   it('stages durable deletion instead of an UPD edit, deletes once, and retains the receipt as audit', async () => {
     const {old,latest} = await pair();
     await thread.prepareThreadUpdates('-100123');
@@ -100,7 +165,7 @@ describe.skipIf(!url)('same-event replacement deletion outbox', () => {
   });
   it('rechecks classification and current publishing permission at the attempt boundary', async () => {
     const {old,latest}=await pair(); await thread.prepareThreadUpdates('-100123');
-    await classify(old.story,latest.story,'related');
+    await database.db.query("UPDATE story_relations SET relation='related' WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)", [old.story,latest.story]);
     expect(await repair.retryReplacements(api(),settings,'-100123')).toBe(0);
     await classify(old.story,latest.story);
     await (await import('../settings.js')).saveSettings({publishingEnabled:false});
@@ -144,6 +209,7 @@ describe.skipIf(!url)('same-event replacement deletion outbox', () => {
     }
     const calls=vi.mocked(BotApi.prototype.delete).mock.calls.length;
     const newest=await fixture(); await classify(latest.story,newest.story);
+    await cover(newest, [old.story, latest.story]);
     for (let tick=0;tick<2;tick++) await repair.retryReplacements(api(),settings,'-100123');
     expect(vi.mocked(BotApi.prototype.delete).mock.calls.filter(([,message])=>message===old.message)).toHaveLength(calls);
     expect((await replacements()).find(row=>row.duplicate_publication_id===old.id)?.status).toBe('failed');
@@ -155,6 +221,7 @@ describe.skipIf(!url)('same-event replacement deletion outbox', () => {
     await database.db.query("UPDATE request_attempts SET next_retry_at=now()-interval '1 second'");
     await database.db.query("UPDATE publication_replacements SET next_retry_at=now()-interval '1 second'");
     const newest=await fixture(); await classify(latest.story,newest.story);
+    await cover(newest, [old.story, latest.story]);
     expect(await repair.retryReplacements(api(),settings,'-100123')).toBe(2);
     expect((await database.db.query("SELECT count(*)::int n FROM request_attempts WHERE publication_id=$1 AND operation='delete'",[old.id])).rows[0]?.n).toBe(2);
     expect((await replacements()).filter(row=>row.canonical_publication_id===newest.id)).toHaveLength(2);

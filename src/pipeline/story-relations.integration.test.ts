@@ -114,16 +114,32 @@ describe.skipIf(!url)('verified same and related relationship storage', () => {
     expect(await ancestors(shutdown)).toEqual([shutdown]);
     expect(await relations.relatedStoryIds(shutdown)).toEqual([discovery]);
   });
-  it('quarantines a contradictory transitive component and rejects attempts to stitch it back together', async () => {
+  it.each(['related', 'unrelated'] as const)('never splits an accepted group after a later %s comparison', async relation => {
     const [a, b, c] = await Promise.all([story(), story(), story()]);
     await classify(a, b, 'same'); await classify(b, c, 'same'); await edge(b, a); await edge(c, b);
-    await classify(a, c, 'related', 'user');
-    expect(await ancestors(c)).toEqual([c]);
-    expect(await relations.relatedStoryIds(a)).toEqual([c]);
-    expect((await database.db.query("SELECT count(*)::int AS n FROM story_relations WHERE provenance->>'quarantined'='true'")).rows).toEqual([{ n: 2 }]);
-    await classify(a, b, 'same');
+    expect(await classify(a, c, relation)).toEqual([]);
+    expect(await classify(a, b, relation)).toEqual([]);
+    expect(await ancestors(c)).toEqual([a, b, c].sort());
+    expect(await relations.relatedStoryIds(a)).toEqual([]);
+    expect((await database.db.query("SELECT count(*)::int AS n FROM story_relations WHERE provenance->>'quarantined'='true'")).rows).toEqual([{ n: 0 }]);
+    expect((await database.db.query('SELECT classification_version FROM story_publication_threads')).rows)
+      .toEqual([{ classification_version: 'fixture-verified' }, { classification_version: 'fixture-verified' }]);
+  });
+  it('joins accepted groups without retaining older model negatives inside the combined group', async () => {
+    const [a, b, c, d] = await Promise.all([story(), story(), story(), story()]);
+    await classify(a, b, 'same'); await classify(c, d, 'same');
+    await classify(a, c, 'unrelated'); await classify(b, d, 'related');
+    expect(await classify(b, c, 'same')).toEqual([{ storyId: c, relation: 'same' }]);
+    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation<>'same'")).rows).toEqual([]);
+    expect(await classify(a, d, 'unrelated')).toEqual([]);
+    expect(await relations.relatedStoryIds(a)).toEqual([]);
+  });
+  it('does not join groups across a user-defined distinct-event boundary', async () => {
+    const [a, b, c] = await Promise.all([story(), story(), story()]);
+    await classify(a, b, 'same'); await classify(a, c, 'unrelated', 'user');
     expect(await classify(b, c, 'same')).toEqual([]);
-    expect(await relations.relatedStoryIds(b)).toEqual([c]);
+    expect((await database.db.query("SELECT relation FROM story_relations WHERE provenance->>'origin'='user'")).rows)
+      .toEqual([{ relation: 'unrelated' }]);
   });
   it('withholds legacy model positives without deleting them and admits decisions from the corrected original prompt',async()=>{
     const [a,b]=await Promise.all([story(),story()]);
@@ -146,9 +162,7 @@ describe.skipIf(!url)('verified same and related relationship storage', () => {
     const [a, b, c] = await Promise.all([story(), story(), story()]);
     await classify(a, b, 'same', 'user'); await classify(b, c, 'same', 'user');
     expect(await classify(a, c, 'related')).toEqual([]);
-    await classify(a, c, 'related', 'user');
-    expect(await classify(a, c, 'same')).toEqual([]);
-    expect((await database.db.query("SELECT relation,provenance FROM story_relations WHERE relation='related'")).rows)
-      .toEqual([{ relation: 'related', provenance: { origin: 'user' } }]);
+    expect(await classify(a, c, 'related', 'user')).toEqual([]);
+    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation='related'")).rows).toEqual([]);
   });
 });

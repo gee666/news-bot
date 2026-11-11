@@ -102,7 +102,8 @@ describe.skipIf(!url)('supplementary report database boundary', () => {
       expect.objectContaining({id:evidence,content:'Полный исходный механизм и ограничения.'}),
     ]));
     expect(generationHash(input,settings)).not.toBe(generationHash({...input,previous_posts:[]},settings));
-    await saveGenerations([input],[{id:storyId,headline:'OpenAI обнаружила метод для PHP',summary:'Полный пересказ.',translatedExcerpt:null}],settings);
+    await saveGenerations([input],[{id:storyId,headline:'OpenAI обнаружила метод для PHP',summary:'Полный пересказ.',
+      translatedExcerpt:null,coveredPublishedStoryIds:[oldest,middle]}],settings);
     expect(await alreadyGenerated(await loadStory(storyId),settings)).toBe(true);
     await database.db.query("UPDATE judgments SET prompt_version='generation-v13-cumulative' WHERE story_id=$1 AND stage='generation_research'", [storyId]);
     expect(await alreadyGenerated(await loadStory(storyId),settings)).toBe(false);

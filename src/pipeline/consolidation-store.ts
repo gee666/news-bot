@@ -1,33 +1,37 @@
+import type { PoolClient } from 'pg';
 import { db, transaction } from '../db.js';
 import { eventInput, type EventInput, type HistoricalEventRef } from './consolidation-input.js';
 import { hash } from './state.js';
 import { recordStoryRelations } from './story-relations.js';
 import { GROUPING_VERSION } from './grouping-model.js';
 import { historicalEventInput } from './historical-input.js';
+import { currentMatchingInput, matchingInputStoryIds } from './matching-group-input.js';
 
 export type EventRelation = 'same';
 export interface MergeResult { canonicalId: string; mergedId: string }
 
 /** Preserve canonical publications while merging unchanged classifier inputs. */
 export async function mergeStories(left: EventInput, right: EventInput, relation: EventRelation,
-  history: { left?:HistoricalEventRef; right?:HistoricalEventRef } = {}): Promise<MergeResult | null> {
+  history: { left?:HistoricalEventRef; right?:HistoricalEventRef } = {},
+  options: { client?: PoolClient; unpublishedOnly?: boolean } = {}): Promise<MergeResult | null> {
   if (left.id === right.id) return null;
-  return transaction(async client => {
+  const run = async (client: PoolClient): Promise<MergeResult | null> => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
     // Collector edits must not change current_revision_id between fingerprint check and commit.
     await client.query(`SELECT i.id FROM source_items i WHERE EXISTS(SELECT 1 FROM item_revisions r
       JOIN story_mentions m ON m.revision_id=r.id WHERE r.item_id=i.id AND m.story_id=ANY($1::uuid[]))
       OR i.id IN(SELECT item_id FROM item_revisions WHERE id=ANY($2::uuid[]))
-      ORDER BY i.id FOR SHARE`, [[left.id, right.id], [history.left?.revisionId,history.right?.revisionId].filter(id=>id!==undefined)]);
+      ORDER BY i.id FOR SHARE`, [[...new Set([left, right].flatMap(matchingInputStoryIds))],
+      [history.left?.revisionId,history.right?.revisionId].filter(id=>id!==undefined)]);
     const locked = await client.query<{ id: string }>(`SELECT id FROM stories WHERE id=ANY($1::uuid[])
       AND (status<>'rejected' OR id=ANY($2::uuid[])) AND NOT EXISTS(SELECT 1 FROM story_merges sm WHERE sm.merged_story_id=stories.id)
       ORDER BY id FOR UPDATE`, [[left.id, right.id], [...(history.left ? [left.id] : []),...(history.right ? [right.id] : [])]]);
     if (locked.rows.length !== 2) return null;
-    // An explicit distinct-event classification cannot be bypassed by consolidation.
-    if ((await client.query(`SELECT 1 FROM story_relations WHERE lower_story_id=least($1::uuid,$2::uuid)
-      AND upper_story_id=greatest($1::uuid,$2::uuid) AND relation<>'same'`, [left.id, right.id])).rows.length) return null;
-    const currentLeft = history.left ? await historicalEventInput(left.id,history.left,client) : await eventInput(left.id, client);
-    const currentRight = history.right ? await historicalEventInput(right.id,history.right,client) : await eventInput(right.id, client);
+    if (options.unpublishedOnly && (await client.query(`SELECT 1 FROM publications
+      WHERE story_id=ANY($1::uuid[]) AND message_id IS NOT NULL AND published_at IS NOT NULL LIMIT 1`,
+    [[left.id, right.id]])).rows.length) return null;
+    const currentLeft = history.left ? await historicalEventInput(left.id,history.left,client) : await currentMatchingInput(left, client);
+    const currentRight = history.right ? await historicalEventInput(right.id,history.right,client) : await currentMatchingInput(right, client);
     if (currentLeft?.fingerprint !== left.fingerprint || currentRight?.fingerprint !== right.fingerprint) return null;
     const accepted = await recordStoryRelations(left.id, [{ storyId: right.id, relation }], GROUPING_VERSION,
       { origin: 'model', leftFingerprint: left.fingerprint, rightFingerprint: right.fingerprint }, client);
@@ -76,7 +80,8 @@ export async function mergeStories(left: EventInput, right: EventInput, relation
       ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`,
     [`digest_refresh:${canonicalId}`, JSON.stringify({ storyId: canonicalId })]);
     return { canonicalId, mergedId };
-  });
+  };
+  return options.client ? run(options.client) : transaction(run);
 }
 
 export async function canonicalStoryId(id: string): Promise<string> {

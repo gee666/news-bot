@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { db, transaction } from '../db.js';
 import type { AppSettings } from '../settings.js';
-import { eventInput } from './consolidation-input.js';
+import { currentMatchingInput, groupEventInput, matchingInputStoryIds } from './matching-group-input.js';
 import { mergeStories } from './consolidation-store.js';
 import { retainedStories } from './matching.js';
 import { groupReport, GROUPING_VERSION } from './grouping-model.js';
@@ -27,9 +27,9 @@ export async function consolidateStories(settings: AppSettings, batchId: string)
       const owned = await db.query<{ story_id: string }>('SELECT DISTINCT story_id FROM story_mentions WHERE revision_id=$1 AND story_id IS NOT NULL', [revision.revision_id]);
       for (const owner of owned.rows) {
         if (await publishedStory(owner.story_id)) continue;
-        let incoming = await eventInput(owner.story_id);
+        let incoming = await groupEventInput(owner.story_id, settings);
         if (!incoming) continue;
-        const candidates = (await retainedStories(settings)).filter(story => story.id!==incoming?.id);
+        const candidates = await retainedStories(settings, owner.story_id);
         const draftRows = await db.query<{ id: string }>(`SELECT id FROM stories WHERE id=ANY($1::uuid[]) AND ${unpublished('stories')}`,
           [candidates.map(candidate => candidate.id)]);
         const draftIds = new Set(draftRows.rows.map(row => row.id));
@@ -39,23 +39,24 @@ export async function consolidateStories(settings: AppSettings, batchId: string)
         // Persist explicit non-same classifications only after rechecking their complete inputs.
         await transaction(async client => {
           await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
-          const ids = [classifiedInput.id, ...drafts.map(story => story.id)];
+          const ids = [...new Set([classifiedInput, ...drafts].flatMap(matchingInputStoryIds))];
           await client.query(`SELECT i.id FROM source_items i WHERE EXISTS(SELECT 1 FROM story_mentions m
             JOIN item_revisions r ON r.id=m.revision_id WHERE r.item_id=i.id AND m.story_id=ANY($1::uuid[]))
             ORDER BY i.id FOR SHARE`, [ids]);
           for (const expected of [classifiedInput, ...drafts]) {
-            if ((await eventInput(expected.id, client))?.fingerprint !== expected.fingerprint) throw new Error('Grouping target changed');
+            if ((await currentMatchingInput(expected, client))?.fingerprint !== expected.fingerprint) throw new Error('Grouping target changed');
           }
           await recordStoryRelations(classifiedInput.id, matches.filter(match => match.relation !== 'same'), GROUPING_VERSION,
             { origin: 'model', operationId: context.id, incomingFingerprint: classifiedInput.fingerprint,
               candidates: drafts.map(story => ({ storyId: story.id, fingerprint: story.fingerprint })) }, client);
         });
         for (const match of matches.filter(match => match.relation === 'same')) {
-          const right = drafts.find(story => story.id===match.storyId);
-          if (!right) throw new Error('Grouping target changed');
-          const merged = await mergeStories(incoming,right,'same');
+          const expectedRight = drafts.find(story => story.id===match.storyId);
+          if (!expectedRight) throw new Error('Grouping target changed');
+          if (incoming.storyIds.includes(expectedRight.id)) continue;
+          const merged = await mergeStories(incoming,expectedRight,'same');
           if (!merged) throw new Error('Grouping target changed');
-          const current = await eventInput(merged.canonicalId);
+          const current = await groupEventInput(merged.canonicalId, settings);
           if (!current) throw new Error('Merged story has no reports');
           incoming = current;
         }

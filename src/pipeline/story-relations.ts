@@ -15,11 +15,10 @@ const sameEdges = `same_edges(a,b) AS (
   UNION SELECT story_id,previous_story_id FROM publication_thread_edges
 )`;
 
-async function sameComponent(storyId: string, client: Pick<PoolClient, 'query'>, userOnly = false): Promise<string[]> {
+async function sameComponent(storyId: string, client: Pick<PoolClient, 'query'>): Promise<string[]> {
   const result = await client.query<{ id: string }>(`WITH RECURSIVE ${publicationThreadEdges}, ${sameEdges}, component(id) AS (
     SELECT $1::uuid UNION SELECT CASE WHEN e.a=c.id THEN e.b ELSE e.a END FROM component c
-    JOIN ${userOnly ? `(SELECT lower_story_id AS a,upper_story_id AS b FROM story_relations WHERE relation='same'
-      AND provenance->>'origin'='user' AND provenance->>'quarantined' IS DISTINCT FROM 'true')` : 'same_edges'} e
+    JOIN same_edges e
       ON e.a=c.id OR e.b=c.id
   ) SELECT id FROM component`, [storyId]);
   return result.rows.map(row => row.id);
@@ -49,22 +48,22 @@ export async function recordStoryRelations(storyId: string, decisions: readonly 
     const left = await sameComponent(storyId, client);
     if (decision.relation === 'same') {
       const component = [...new Set([...left, ...await sameComponent(decision.storyId, client)])];
+      // Whole-group matching may supersede older model negatives. Explicit user
+      // boundaries still require a deliberate correction, never an automatic merge.
       const conflicts = await client.query(`SELECT 1 FROM story_relations
         WHERE lower_story_id=ANY($1::uuid[]) AND upper_story_id=ANY($1::uuid[]) AND relation<>'same'
-          AND NOT (lower_story_id=least($2::uuid,$3::uuid) AND upper_story_id=greatest($2::uuid,$3::uuid)) LIMIT 1`,
-      [component, storyId, decision.storyId]);
+          AND provenance->>'origin'='user'
+          AND NOT ($2::boolean AND lower_story_id=least($3::uuid,$4::uuid)
+            AND upper_story_id=greatest($3::uuid,$4::uuid)) LIMIT 1`,
+      [component, provenance.origin === 'user', storyId, decision.storyId]);
       if (conflicts.rows.length) continue;
+      await client.query(`DELETE FROM story_relations
+        WHERE lower_story_id=ANY($1::uuid[]) AND upper_story_id=ANY($1::uuid[]) AND relation<>'same'
+          AND provenance->>'origin' IS DISTINCT FROM 'user'`, [component]);
     } else if (left.includes(decision.storyId)) {
-      // Automated classifications cannot contradict an authoritative same path.
-      if (provenance.origin !== 'user' && (await sameComponent(storyId, client, true)).includes(decision.storyId)) continue;
-      // Do not choose an arbitrary path through a contradictory component. Retain the
-      // old decisions for audit, but require fresh classification before using them again.
-      await client.query(`UPDATE story_relations SET provenance=provenance||jsonb_build_object(
-          'quarantined',true,'quarantineReason','conflicting_non_same','quarantineVersion',$2::text)
-        WHERE relation='same' AND lower_story_id=ANY($1::uuid[]) AND upper_story_id=ANY($1::uuid[])
-          AND ($3::boolean OR provenance->>'origin' IS DISTINCT FROM 'user')`, [left, classifierVersion, provenance.origin === 'user']);
-      await client.query(`UPDATE story_publication_threads SET classification_version=NULL
-        WHERE story_id=ANY($1::uuid[]) AND previous_story_id=ANY($1::uuid[])`, [left]);
+      // Event identity is monotonic. A later comparison must never split a group,
+      // including by replacing one of its existing same edges with a negative.
+      continue;
     }
     // Each row describes one pair, not a copy of the entire grouping catalogue.
     // Complete grouping inputs/results already belong to the model cache.

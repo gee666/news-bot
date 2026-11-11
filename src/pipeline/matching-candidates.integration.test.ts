@@ -3,8 +3,9 @@ import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppSettings } from '../settings.js';
 import type { EventInput } from './consolidation-input.js';
+import type { StoryRelationDecision } from './story-relations.js';
 
-const model = vi.hoisted(() => ({ group: vi.fn<(incoming: EventInput, candidates: EventInput[]) => Promise<never[]>>()
+const model = vi.hoisted(() => ({ group: vi.fn<(incoming: EventInput, candidates: EventInput[]) => Promise<StoryRelationDecision[]>>()
   .mockResolvedValue([]) }));
 vi.mock('./grouping-model.js', () => ({ GROUPING_VERSION: 'candidate-test', groupReport: model.group }));
 vi.mock('../models/embedding.js', () => ({ EmbeddingClient: class {
@@ -26,11 +27,11 @@ async function batch(): Promise<string> {
   return one(`INSERT INTO processing_batches(status,cutoff_at,settings_snapshot,profile_version,model_version)
     VALUES('processing',now(),$1,$2,$3) RETURNING id`, [JSON.stringify(settings), settings.profileVersion, settings.modelVersion]);
 }
-async function report(text: string, story: string | null, access = 'public', vector = [1, 2, 3]) {
+async function report(text: string, story: string | null, access = 'public', vector = [1, 2, 3], ageDays = 0) {
   const source = await one(`INSERT INTO sources(connector_type,external_id,name,access)
     VALUES('feed',$1,'Fixture',$2) RETURNING id`, [randomUUID(), access]);
   const item = await one(`INSERT INTO source_items(source_id,external_id,original_url,published_at)
-    VALUES($1,'1',$2,now()) RETURNING id`, [source, `https://example.org/${source}`]);
+    VALUES($1,'1',$2,now()-$3*interval '1 day') RETURNING id`, [source, `https://example.org/${source}`, ageDays]);
   const revision = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
     VALUES($1,1,$2,$3,$3) RETURNING id`, [item, randomUUID(), text]);
   await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
@@ -39,10 +40,10 @@ async function report(text: string, story: string | null, access = 'public', vec
     VALUES($1,$2,'fixture',$3::vector)`, [config.id, mention, JSON.stringify(vector)]);
   return { source, item, revision, mention };
 }
-async function story(text: string, age = 0, access = 'public', vector = [1, 2, 3]) {
+async function story(text: string, age = 0, access = 'public', vector = [1, 2, 3], reportAgeDays = 0) {
   const id = await one(`INSERT INTO stories(chosen_excerpt,summary,created_at)
     VALUES('Display text is not evidence','Generated summary is not evidence',now()-$1*interval '1 hour') RETURNING id`, [age]);
-  return { id, ...await report(text, id, access, vector) };
+  return { id, ...await report(text, id, access, vector, reportAgeDays) };
 }
 async function same(older: string, newer: string, thread = true, quarantined = false) {
   await database.db.query(`INSERT INTO story_relations(lower_story_id,upper_story_id,relation,classifier_version,provenance)
@@ -79,15 +80,15 @@ describe.skipIf(!url)('canonical matching candidate selection', () => {
     config = await configuration.getActiveEmbeddingConfig();
   });
   beforeEach(async () => {
-    model.group.mockClear(); vi.stubEnv('ALLOW_PRIVATE_INFERENCE', 'false');
-    await database.db.query('TRUNCATE processing_batches,sources,stories,model_cache CASCADE');
+    model.group.mockReset().mockResolvedValue([]); vi.stubEnv('ALLOW_PRIVATE_INFERENCE', 'false');
+    await database.db.query('TRUNCATE processing_batches,sources,stories,story_merges,model_cache CASCADE');
   });
   afterAll(async () => {
     await database?.db.end();
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
-  it('compares C only against B, keeping every owned report and leaving A available to generation history', async () => {
+  it('compares C once against combined A and B reports without changing either owner', async () => {
     const a = await story('Initial announcement A.', 3); const b = await story('Latest report B.', 2);
     await report('Second B report with uncertainty.', b.id);
     const link = await one("INSERT INTO item_links(revision_id,url) VALUES($1,'https://example.org/primary') RETURNING id", [b.revision]);
@@ -96,7 +97,12 @@ describe.skipIf(!url)('canonical matching candidate selection', () => {
     const { eventInput } = await import('./consolidation-input.js');
     const originalA = await eventInput(a.id); const originalB = await eventInput(b.id);
     expect(await retainedIds()).toEqual([b.id]);
-    expect(await classify()).toEqual([originalB]);
+    const { groupEventInput } = await import('./matching-group-input.js');
+    const group = await groupEventInput(b.id, settings);
+    expect(await classify()).toEqual([group]);
+    expect(group?.reports).toEqual([...(originalA?.reports ?? []), ...(originalB?.reports ?? [])]);
+    expect(group?.reports).toHaveLength(3);
+    expect(group?.text).not.toContain('Generated summary');
     expect(originalB?.reports).toHaveLength(2);
     expect(originalB?.reports[0]).toMatchObject({ text: 'Latest report B.', links: ['https://example.org/primary'],
       sourceUrl: `https://example.org/${b.source}`, publishedAt: expect.any(String) });
@@ -132,13 +138,15 @@ describe.skipIf(!url)('canonical matching candidate selection', () => {
     expect((await classify()).map(input => input.id).sort()).toEqual([a.id, b.id, legacy.id].sort());
     expect((await database.db.query('SELECT * FROM story_relations')).rows).toEqual(before);
   });
-  it('leaves contradictory legacy same components separate instead of choosing an identity path', async () => {
+  it('keeps established same identity despite an older model negative within the component', async () => {
     const a = await story('A.', 3); const b = await story('B.', 2); const c = await story('C.', 1);
     await same(a.id, b.id); await same(b.id, c.id);
     await database.db.query(`INSERT INTO story_relations(lower_story_id,upper_story_id,relation,classifier_version)
       VALUES(least($1::uuid,$2::uuid),greatest($1::uuid,$2::uuid),'unrelated','fixture')`, [a.id, c.id]);
-    expect(await retainedIds()).toEqual([a.id, b.id, c.id].sort());
-    expect((await classify()).map(input => input.id).sort()).toEqual([a.id, b.id, c.id].sort());
+    expect(await retainedIds()).toEqual([c.id]);
+    const candidates = await classify();
+    expect(candidates.map(input => input.id)).toEqual([c.id]);
+    expect(candidates[0]?.reports.map(report => report.text)).toEqual(['A.', 'B.', 'C.']);
   });
   it('excludes a merged predecessor even when it incorrectly still owns current reports', async () => {
     const canonical = await story('Canonical.', 3); const merged = await story('Merged audit report.', 1);
@@ -181,5 +189,97 @@ describe.skipIf(!url)('canonical matching candidate selection', () => {
     const candidates = await classify(currentBatch, revision, mention);
     expect(candidates.map(input => input.id)).toContain(b.id); expect(candidates.map(input => input.id)).not.toContain(a.id);
     expect(candidates.find(input => input.id === b.id)?.reports.map(report => report.text)).toEqual(['B owns current evidence.']);
+  });
+  it('combines every publication branch once and excludes the incoming entire component', async () => {
+    const a = await story('Root source report.', 4); const b = await story('Left branch report.', 3);
+    const c = await story('Right branch report.', 2); const independent = await story('Separate event.', 1);
+    await same(a.id, b.id); await same(a.id, c.id);
+    const { retainedStories } = await import('./matching.js');
+    const { groupEventInput } = await import('./matching-group-input.js');
+    const group = await groupEventInput(c.id, settings);
+    expect(group?.storyIds.sort()).toEqual([a.id, b.id, c.id].sort());
+    expect(group?.reports.map(report => report.text)).toEqual(['Root source report.', 'Left branch report.', 'Right branch report.']);
+    expect((await retainedStories(settings, a.id)).map(input => input.id)).toEqual([independent.id]);
+    const candidates = await classify();
+    expect(candidates).toHaveLength(2); expect(candidates.find(input => input.id === c.id)).toEqual(group);
+  });
+  it('does not expose a private ancestor through a newer public representative', async () => {
+    const a = await story('Secret ancestor.', 3, 'restricted'); const b = await story('Public latest.', 2);
+    await same(a.id, b.id);
+    const { currentStoryRepresentatives } = await import('./matching-representatives.js');
+    expect(await currentStoryRepresentatives([a.id, b.id], settings)).toEqual(new Map());
+    expect(await retainedIds()).toEqual([]);
+    vi.stubEnv('ALLOW_PRIVATE_INFERENCE', 'true');
+    const retained = await (await import('./matching.js')).retainedStories(settings);
+    expect(retained).toHaveLength(1);
+    expect(retained[0]?.reports.map(report => report.text)).toEqual(['Secret ancestor.', 'Public latest.']);
+    vi.stubEnv('ALLOW_PRIVATE_INFERENCE', 'false');
+    expect(await classify()).toEqual([]);
+  });
+  it('fingerprints every retained member report and membership, excluding expired and superseded reports', async () => {
+    const a = await story('A current.', 4); const b = await story('B current.', 3);
+    const expired = await story('Expired report.', 2, 'public', [1, 2, 3], settings.retentionDays + 1);
+    await same(a.id, b.id); await same(b.id, expired.id);
+    const { groupEventInput, currentMatchingInput } = await import('./matching-group-input.js');
+    const original = await groupEventInput(b.id, settings);
+    expect(original?.reports.map(report => report.text)).toEqual(['A current.', 'B current.']);
+    if (!original) throw new Error('Missing aggregate');
+    await database.db.query("UPDATE story_mentions SET text='A changed.' WHERE id=$1", [a.mention]);
+    expect((await currentMatchingInput(original))?.fingerprint).not.toBe(original.fingerprint);
+    const revision = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
+      VALUES($1,2,$2,'Replacement','Replacement') RETURNING id`, [a.item, randomUUID()]);
+    await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [a.item, revision]);
+    expect((await groupEventInput(b.id, settings))?.reports.map(report => report.text)).toEqual(['B current.']);
+    const beforeMembership = await groupEventInput(b.id, settings);
+    const auditOnly = await one('INSERT INTO stories DEFAULT VALUES RETURNING id');
+    await same(b.id, auditOnly, false);
+    const afterMembership = await groupEventInput(b.id, settings);
+    expect(afterMembership?.reports).toEqual(beforeMembership?.reports);
+    expect(afterMembership?.fingerprint).not.toBe(beforeMembership?.fingerprint);
+  });
+  it('physically consolidates matching drafts before attaching and compares their combined group next time', async () => {
+    const a = await story('First group.', 3); const b = await story('Second group.', 2);
+    const c = await story('Third group.', 4);
+    model.group.mockImplementation(async (_incoming, candidates) => candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' })));
+    await classify();
+    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation='same'")).rows).toHaveLength(2);
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toHaveLength(2);
+    expect(await retainedIds()).toHaveLength(1);
+    const { groupEventInput } = await import('./matching-group-input.js');
+    const aggregate = await groupEventInput(a.id, settings);
+    expect(aggregate?.storyIds.sort()).toEqual([a.id, b.id, c.id].sort());
+    expect(aggregate?.reports.map(report => report.text).sort()).toEqual(['First group.', 'Second group.', 'Third group.', 'Incoming C.'].sort());
+    model.group.mockClear();
+    expect(await classify()).toHaveLength(1);
+  });
+  it('rejects a changed non-representative report before merging any same drafts', async () => {
+    const a = await story('Ancestor report.', 4); const b = await story('Representative report.', 3);
+    await same(a.id, b.id); await story('Other matching draft.', 2);
+    model.group.mockImplementation(async (_incoming, candidates) => {
+      await database.db.query("UPDATE story_mentions SET text='Changed while matching.' WHERE id=$1", [a.mention]);
+      return candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' }));
+    });
+    await classify();
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
+    expect((await database.db.query("SELECT story_id FROM story_mentions WHERE text='Incoming C.'")).rows).toEqual([{ story_id: null }]);
+  });
+  it('bridges every published same group without physically merging or changing their owners', async () => {
+    const a = await story('Published A.', 3); const b = await story('Published B.', 2);
+    for (const id of [a.id, b.id]) {
+      const snapshot = await one(`INSERT INTO publication_snapshots(story_id,content)
+        VALUES($1,'{"headline":"Published","score":7,"details":"Original","detailsKind":"excerpt","sources":[]}') RETURNING id`, [id]);
+      await database.db.query(`INSERT INTO publications(story_id,snapshot_id,destination_id,message_id,callback_id,status,published_at)
+        VALUES($1,$2,'fixture',$3,$4,'published',now())`, [id, snapshot, randomUUID(), randomUUID()]);
+    }
+    const before = (await database.db.query('SELECT * FROM stories ORDER BY id')).rows;
+    model.group.mockImplementation(async (_incoming, candidates) => candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' })));
+    await classify();
+    expect((await database.db.query('SELECT * FROM stories WHERE id=ANY($1::uuid[]) ORDER BY id', [[a.id, b.id]])).rows).toEqual(before);
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
+    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation='same'")).rows).toHaveLength(2);
+    expect(await retainedIds()).toHaveLength(1);
+    const { groupEventInput } = await import('./matching-group-input.js');
+    expect((await groupEventInput(a.id, settings))?.reports.map(report => report.text).sort())
+      .toEqual(['Published A.', 'Published B.', 'Incoming C.'].sort());
   });
 });

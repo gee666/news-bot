@@ -9,7 +9,7 @@ import { readEditionPrimaries } from './research-edition.js';
 import { researchEvidence } from './research.js';
 import { publishedThread, rebaseFollowup } from './publication-thread.js';
 import { generationClient } from './generation-model.js';
-import { evidenceDocument, modelResult, storyId, storyInput } from './generation.test-helpers.js';
+import { evidenceDocument, modelResult, secondId, storyId, storyInput } from './generation.test-helpers.js';
 
 vi.mock('../media/story-media.js', () => ({ summaryImages: vi.fn(async () => []) }));
 
@@ -213,10 +213,10 @@ it('skips an already generated story without buying another review', async () =>
   expect(mocks.generate).not.toHaveBeenCalled();
 });
 
-const previous = { storyId:'previous',headline:'Предыдущий заголовок',details:'Старые сведения',
+const previous = { storyId:secondId,headline:'Предыдущий заголовок',details:'Старые сведения',
   destinationId:'-100123',messageId:'644',sources:[] };
 it('writes a self-contained event summary from full current and ancestor sources, including repeated coverage', async () => {
-  vi.mocked(publishedThread).mockResolvedValueOnce([previous, { ...previous, storyId:'second',details:'Продолжение' }]);
+  vi.mocked(publishedThread).mockResolvedValueOnce([previous, { ...previous, storyId:'55555555-5555-4555-8555-555555555555',details:'Продолжение' }]);
   const input = storyInput();
   const original = 'Полный исходный текст о выпуске. '.repeat(500) + 'Старые условия лицензии.';
   input.mentions.push({ ...input.mentions[0]!, id:'55555555-5555-4555-8555-555555555555', text: original });

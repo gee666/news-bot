@@ -5,6 +5,7 @@ import { ModelRequestError, RequestFault, failureMetadata } from '../models/erro
 import { jevTemplates } from '../models/templates.js';
 import { defaultSettings } from '../settings.js';
 import type { EventInput } from './consolidation-input.js';
+import type { GroupEventInput } from './matching-group-input.js';
 import { groupingState } from './grouping-input.js';
 import { GROUPING_VERSION, groupReport } from './grouping-model.js';
 import { approveRemoteInput } from './privacy.js';
@@ -36,7 +37,7 @@ function result(choice = 'unrelated'): JevResult {
 }
 beforeEach(() => {
   mocks.cache.clear(); mocks.judge.mockReset().mockResolvedValue(result()); mocks.close.mockReset().mockResolvedValue(undefined);
-  vi.mocked(JevClient).mockClear(); vi.mocked(approveRemoteInput).mockClear();
+  vi.mocked(JevClient).mockClear(); vi.mocked(approveRemoteInput).mockReset().mockResolvedValue(undefined);
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
@@ -84,6 +85,17 @@ it('does not call or construct a classifier with no candidates or fully cached p
   expect(await groupReport(incoming, [candidate], defaultSettings, context)).toEqual([{ storyId: candidate.id, relation: 'unrelated' }]);
   expect(JevClient).not.toHaveBeenCalled(); expect(mocks.judge).not.toHaveBeenCalled();
 });
+it('saves classifier probabilities and exact model/prompt provenance with each cached verdict', async () => {
+  const incoming = report('Release demonstration'), candidate = report('Release announcement');
+  mocks.judge.mockResolvedValue(result('same'));
+  await groupReport(incoming, [candidate], defaultSettings, context);
+  expect([...mocks.cache.values()]).toEqual([expect.objectContaining({
+    relation: 'same', probabilities: { same: 1 }, confidence: 1,
+    model: 'autojev', promptVersion: jevTemplates.duplicate.version, inputHash: expect.any(String),
+  })]);
+  await groupReport(incoming, [candidate], defaultSettings, context);
+  expect(mocks.judge).toHaveBeenCalledOnce();
+});
 it('rejects malformed JEV answers without treating them as unrelated or caching them', async () => {
   mocks.judge.mockResolvedValue(result('update'));
   await expect(groupReport(report('New'), [report('Old')], defaultSettings, context)).rejects.toThrow();
@@ -111,10 +123,11 @@ it('retains completed pairs after failure and candidate insertion or reranking',
   ]);
   expect(mocks.judge).toHaveBeenCalledTimes(4);
 });
-it('uses only the first ranked same match without manufacturing related links', async () => {
+it('returns every same group so one incoming report can bridge their identity', async () => {
   const incoming = report('New'); const candidates = [report('One'), report('Two'), report('Three')];
   mocks.judge.mockResolvedValue(result('same'));
-  expect(await groupReport(incoming, candidates, defaultSettings, context)).toEqual([{ storyId: candidates[0]?.id, relation: 'same' }]);
+  expect(await groupReport(incoming, candidates, defaultSettings, context)).toEqual(candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' })));
+  expect(await groupReport(incoming, candidates, defaultSettings, context)).toHaveLength(3);
   expect(mocks.judge).toHaveBeenCalledTimes(3);
 });
 it('invalidates pairs for changed evidence, timestamps and JEV settings, not Pi settings or local receipts', async () => {
@@ -144,5 +157,28 @@ it('keeps prefix-first and state-first judgments in separate cache entries', asy
   expect(await groupReport(incoming, [candidate], { ...defaultSettings, prefixCacheEnabled: false }, context))
     .toEqual([{ storyId: candidate.id, relation: 'related', relatedPromptVersion: jevTemplates.duplicate.version }]);
   await groupReport(incoming, [candidate], { ...defaultSettings, prefixCacheEnabled: false }, context);
+  expect(mocks.judge).toHaveBeenCalledTimes(2);
+});
+
+it('checks every incoming and candidate group owner before exposing reports to JEV', async () => {
+  const incoming: GroupEventInput = { ...report('Incoming'), storyIds: [randomUUID(), randomUUID()], retentionDays: 7 };
+  const candidate: GroupEventInput = { ...report('Public candidate'), storyIds: [randomUUID(), randomUUID()], retentionDays: 7 };
+  vi.mocked(approveRemoteInput).mockImplementation(async (_endpoint, _operation, owner) => {
+    if (owner.storyId === candidate.storyIds[1]) throw new Error('Private group member');
+  });
+  await expect(groupReport(incoming, [candidate], defaultSettings, context)).rejects.toThrow('Private group member');
+  for (const storyId of [...incoming.storyIds, ...candidate.storyIds]) {
+    expect(approveRemoteInput).toHaveBeenCalledWith(defaultSettings.jevUrl, context.id, { storyId });
+  }
+  expect(mocks.judge).not.toHaveBeenCalled(); expect(JevClient).not.toHaveBeenCalled(); expect(mocks.cache.size).toBe(0);
+});
+it('invalidates a cached group decision when any member report changes', async () => {
+  const incoming = report('Incoming'); const first = report('First member'); const second = report('Second member');
+  const candidate: GroupEventInput = { ...second, storyIds: [first.id, second.id], retentionDays: 7,
+    reports: [...first.reports, ...second.reports] };
+  await groupReport(incoming, [candidate], defaultSettings, context);
+  await groupReport(incoming, [candidate], defaultSettings, context);
+  expect(mocks.judge).toHaveBeenCalledOnce();
+  await groupReport(incoming, [{ ...candidate, reports: [{ ...first.reports[0]!, text: 'Changed first member' }, ...second.reports] }], defaultSettings, context);
   expect(mocks.judge).toHaveBeenCalledTimes(2);
 });

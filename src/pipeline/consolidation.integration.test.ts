@@ -213,6 +213,26 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
     expect((await database.db.query('SELECT merged_story_id,assessment FROM story_merge_evidence WHERE evidence_id=$1', [evidence])).rows)
       .toEqual([{ merged_story_id: sibling, assessment: 'Failed original read' }]);
   });
+  it('validates the full compared group before merging and supersedes old model negatives', async () => {
+    const left = await story('Fable release pricing', [1, 0, 0]);
+    const sibling = await story('Fable release speed', [1, 0, 0]);
+    const right = await story('Fable release recap', [1, 0, 0]);
+    const { recordStoryRelations } = await import('./story-relations.js');
+    const { groupEventInput } = await import('./matching-group-input.js');
+    await recordStoryRelations(left, [{ storyId: sibling, relation: 'same' }], 'fixture', { origin: 'model' });
+    await recordStoryRelations(sibling, [{ storyId: right, relation: 'unrelated' }], 'fixture', { origin: 'model' });
+    const leftInput = await groupEventInput(left, { retentionDays: 7 });
+    const rightInput = await groupEventInput(right, { retentionDays: 7 });
+    if (!leftInput || !rightInput) throw new Error('Missing group input');
+    expect(leftInput.reports).toHaveLength(2);
+    await database.db.query("UPDATE story_mentions SET text='Corrected release speed' WHERE story_id=$1", [sibling]);
+    expect(await merge(leftInput, rightInput, 'same')).toBeNull();
+    const corrected = await groupEventInput(left, { retentionDays: 7 });
+    if (!corrected) throw new Error('Missing corrected input');
+    expect(await merge(corrected, rightInput, 'same')).not.toBeNull();
+    expect((await database.db.query(`SELECT relation FROM story_relations
+      WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`, [sibling, right])).rows).toEqual([]);
+  });
   it('retains artifact and hosting links in event decisions and rejects merges after their identity changes', async () => {
     const artifact = await story('GLM-5.3 uncensored checkpoint released', [1, 0, 0]);
     const hosted = await story('GLM-5.3 uncensored hosted API for $20', [1, 0, 0]);

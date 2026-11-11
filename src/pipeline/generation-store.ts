@@ -145,6 +145,11 @@ export async function alreadyGenerated(input: StoryInput, settings: AppSettings,
     input.story.headline, input.story.summary, input.story.translated_excerpt,receiptId ?? null]);
   if (!result.rows.length) return false;
   if (isNoticeGeneration(result.rows[0]?.result)) return false;
+  const requiredPosts = [...new Set((input.previous_posts ?? []).map(post => post.storyId))];
+  if (requiredPosts.length > 1) {
+    const coverage = z.object({ coveredPublishedStoryIds: z.array(z.uuid()) }).safeParse(result.rows[0]?.result);
+    if (!coverage.success || requiredPosts.some(id => !coverage.data.coveredPublishedStoryIds.includes(id))) return false;
+  }
   const signature = z.object({ evidenceSignature: z.string().min(1) }).safeParse(result.rows[0]?.result);
   return signature.success && signature.data.evidenceSignature === await evidenceSnapshotHash(input.story.id, query);
 }
@@ -173,6 +178,7 @@ export interface GeneratedStory {
   sourceUrls?: string[];
   primarySourceUrls?: string[];
   secondarySourceUrls?: string[];
+  coveredPublishedStoryIds?: string[];
 }
 
 export async function saveGenerations(inputs: StoryInput[], values: GeneratedStory[], settings: AppSettings): Promise<void> {
@@ -188,6 +194,7 @@ export async function saveGenerations(inputs: StoryInput[], values: GeneratedSto
       if (value.sourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.sourceUrls);
       if (value.primarySourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.primarySourceUrls);
       if (value.secondarySourceUrls) z.array(z.url({ protocol: /^https?$/u })).parse(value.secondarySourceUrls);
+      if (value.coveredPublishedStoryIds) z.array(z.uuid()).parse(value.coveredPublishedStoryIds);
       const stored = { ...value, contentVersion: input.story.content_version, evidenceSignature: signature };
       const updated = await client.query(`UPDATE stories SET headline = $2, summary = $3, translated_excerpt = $4,
         researched = $5, updated_at = now() WHERE id = $1 AND content_version = $6
