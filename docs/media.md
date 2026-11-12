@@ -26,7 +26,25 @@ event belonging to the story or a verified ancestor bypass relevance screening.
 Multi-event source pictures and research media still receive relevance screening.
 
 Unavailable source attachments are omitted without failing text generation.
-Privacy checks still apply before downloads and inference.
+`MEDIA_PREPARATION_TIMEOUT_MS` sets the total optional media deadline in milliseconds,
+defaulting to `120000`. Source lookup, cache reads, downloads, decoding,
+deduplication, JEV comparison and relevance screening share this budget. Summary
+image encoding uses the same total budget from the start of summary preparation,
+not a fresh timeout per image. A timeout or unexpected preparation failure returns
+no attachments so topic text generation and publication can continue. Individual
+missing downloads or undecodable images can still leave healthy siblings intact.
+
+Cancellation stops codec processes and model requests, including requests queued
+behind another inference call. Sequential loops check cancellation before starting
+more work. Expired work cannot start a later selection-cache write or retain a late
+pair verdict. Release cancels preparation instead of waiting for it, serializes
+cache removal after an in-flight save, and bounds the caller's cleanup wait by the
+same setting. A still-pending removal blocks new preparation for that story until
+it finishes, so it cannot delete a newer selection. Cleanup failures are left for
+the startup/hourly sweep.
+
+Privacy checks still apply before downloads and inference. Denied private media
+is omitted, never sent to a model or restored from the selection cache.
 
 Existing album posts can receive caption edits, but new posts never use captions.
 An edit exceeding 1024 characters is skipped with

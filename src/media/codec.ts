@@ -2,12 +2,14 @@ import { spawn } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { abortable } from './deadline.js';
 
 export type MediaCommandRunner = (
   command: 'ffmpeg' | 'ffprobe', args: readonly string[], input?: Buffer,
 ) => Promise<Buffer>;
 
 export interface MediaCodecOptions {
+  signal?: AbortSignal | undefined;
   timeoutMs?: number;
   maxOutputBytes?: number;
   /** Trusted process adapter for tests or sandboxed execution. */
@@ -46,8 +48,9 @@ export async function sweepComparisonTemps(now = Date.now()): Promise<void> {
   }
 }
 
-function commandRunner(timeoutMs: number, maxOutputBytes: number): MediaCommandRunner {
+function commandRunner(timeoutMs: number, maxOutputBytes: number, signal?: AbortSignal): MediaCommandRunner {
   return (command, args, input) => new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
     const child = spawn(command, [...args], { stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -57,6 +60,9 @@ function commandRunner(timeoutMs: number, maxOutputBytes: number): MediaCommandR
       failure ??= new Error(message);
       child.kill('SIGKILL');
     };
+    const abort = () => { child.kill('SIGKILL'); };
+    signal?.addEventListener('abort', abort, { once: true });
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
     const timer = setTimeout(() => stop(`${command} timed out`), timeoutMs);
     child.stdout.on('data', (chunk: Buffer) => {
       bytes += chunk.length;
@@ -68,10 +74,11 @@ function commandRunner(timeoutMs: number, maxOutputBytes: number): MediaCommandR
     child.stdin.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code !== 'EPIPE') stop(`${command} stdin: ${error.message}`);
     });
-    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('error', (error) => { cleanup(); reject(error); });
     child.on('close', (code) => {
-      clearTimeout(timer);
-      if (failure) reject(failure);
+      cleanup();
+      if (signal?.aborted) reject(signal.reason);
+      else if (failure) reject(failure);
       else if (code !== 0) reject(new Error(`${command} exited ${code}: ${stderr}`));
       else resolve(Buffer.concat(chunks));
     });
@@ -87,11 +94,11 @@ export function boundedOption(name: string, value: number, min: number, max: num
 export function createMediaRunner(options: MediaCodecOptions): MediaCommandRunner {
   const timeout = boundedOption('timeoutMs', options.timeoutMs ?? 30_000, 1, 2_147_483_647);
   const maxOutput = boundedOption('maxOutputBytes', options.maxOutputBytes ?? 32 * 1024 * 1024, 1, Infinity);
-  const run = options.run ?? commandRunner(timeout, maxOutput);
-  return (command, args, input) => run(command, [
+  const run = options.run ?? commandRunner(timeout, maxOutput, options.signal);
+  return (command, args, input) => abortable(options.signal, () => run(command, [
     '-protocol_whitelist', 'pipe,file', '-format_whitelist', inputFormats, '-max_pixels', '40000000',
     ...(command === 'ffmpeg' ? ['-xerror'] : []), ...args,
-  ], input);
+  ], input));
 }
 
 export async function decodeImage(data: Buffer, run: MediaCommandRunner): Promise<Buffer> {
@@ -133,7 +140,7 @@ export async function isPublishableImage(data: Buffer, options: MediaCodecOption
     return typeof width === 'number' && Number.isInteger(width) && width > 2
       && typeof height === 'number' && Number.isInteger(height) && height > 2
       && width * height <= 40_000_000;
-  } catch { return false; }
+  } catch { options.signal?.throwIfAborted(); return false; }
 }
 
 /** Decode the first image to PNG, fitting inside 2560 x 2560 without upscaling. */
@@ -183,19 +190,24 @@ function requireWebpContainer(output: Buffer): void {
 /** Some MP4 containers need a seekable input. Only that fallback writes to disk. */
 export async function runVideo(
   run: MediaCommandRunner, command: 'ffmpeg' | 'ffprobe', data: Buffer,
-  args: (input: string) => string[], validate: (output: Buffer) => void = requireOutput,
+  args: (input: string) => string[], validate: (output: Buffer) => void = requireOutput, signal?: AbortSignal,
 ): Promise<Buffer> {
   try {
     const output = await run(command, args('pipe:0'), data);
     validate(output);
     return output;
-  } catch {
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof DOMException && ['AbortError', 'TimeoutError'].includes(error.name)) throw error;
     await ensureTmpRoot();
+    signal?.throwIfAborted();
     const directory = await mkdtemp(join(tmpRoot, 'comparison-'));
     activeTemps.add(directory);
     try {
       const path = join(directory, 'input');
-      await writeFile(path, data, { mode: 0o600 });
+      signal?.throwIfAborted();
+      await writeFile(path, data, { mode: 0o600, signal });
+      signal?.throwIfAborted();
       const output = await run(command, args(path));
       validate(output);
       return output;
@@ -234,18 +246,18 @@ function requireOutput(output: Buffer): void {
   if (!output.length) throw new Error('Media decoder produced no image');
 }
 
-export async function probeVideoDuration(data: Buffer, run: MediaCommandRunner): Promise<number> {
+export async function probeVideoDuration(data: Buffer, run: MediaCommandRunner, signal?: AbortSignal): Promise<number> {
   const output = await runVideo(run, 'ffprobe', data, (input) => [
     '-v', 'error', '-show_entries', 'format=duration:stream=duration', '-of', 'json', input,
-  ], (result) => { parseDuration(result); });
+  ], (result) => { parseDuration(result); }, signal);
   return parseDuration(output);
 }
 
-export function extractVideoFrame(data: Buffer, time: number, run: MediaCommandRunner): Promise<Buffer> {
+export function extractVideoFrame(data: Buffer, time: number, run: MediaCommandRunner, signal?: AbortSignal): Promise<Buffer> {
   return runVideo(run, 'ffmpeg', data, (input) => [
     '-v', 'error', '-threads', '1', '-filter_threads', '1', '-i', input,
     '-ss', String(time), '-map', '0:v:0', '-frames:v', '1',
     '-vf', modelImageScale, '-map_metadata', '-1', '-pix_fmt', 'rgba',
     '-f', 'image2pipe', '-c:v', 'png', '-threads', '1', 'pipe:1',
-  ]);
+  ], requireOutput, signal);
 }

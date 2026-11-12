@@ -83,7 +83,7 @@ Start returns a login ID and provider authorization URL. Render that link, accep
 
 ```ts
 new JevClient(config: JevConfig)
-  readonly supportsImages = false
+  readonly supportsImages = true
   judge(template: JevTemplate, state: unknown, context: RequestContext, images?: readonly ModelImage[]): Promise<JevResult>
   test(context: RequestContext): Promise<JevResult>
   close(): Promise<void>
@@ -103,7 +103,8 @@ JEV template names and state fields. The pipeline uses JEV for coherence, repres
 | story_count | message.text | count: choice none, 1 through 20, more |
 | link_relevance | story, link, anchor, surroundingText | relevance: relevant, irrelevant, uncertain |
 | duplicate | mention, candidate | relation: same, related, unrelated |
-| media_identity | detailed left/right visual evidence from Pi, correspondences, differences, limitations | relation: same, different |
+| media_identity | comparisonVersion plus exactly two ordered image attachments | relation: same, different, unresolved |
+| media_relevance | story plus one whole-image attachment | relation: relevant, irrelevant, unresolved |
 | interest | story, interestProfile | interest: score index 0 through 9 |
 | representative | story, left, right | best: left or right |
 
@@ -113,34 +114,46 @@ Instructions, option ordering and question serialization are frozen. Candidate t
 
 Ollama receives `POST /api/embed`, `options.num_ctx: 2048`, `truncate: false`. Vector count, dimensions, finite values, nonzero content and returned model are checked. No truncation or output-dimension reduction is applied. `EmbeddingResult` contains `model`, `vectors`, `dimensions`, `durationMs`, optional `promptTokens`, and `inputVersion: "plain-text-ctx2048-v1"`. Cache keys must include model, dimensions, input version and input. The host owns judgment/embedding caches and corpus re-embedding.
 
-## Media identity integration
+## Direct media identity and relevance
 
 ```ts
 import { compareMediaIdentity, JevClient } from "./models/index.js";
 
 const result = await compareMediaIdentity(
-  await generationClient(settings), // Existing TextGenerator factory in the host.
-  jev,                            // JevClient with its normal config and recorders.
-  [leftImage, rightImage],         // Exactly two ModelImage values, in this order.
-  context,                        // Stable per-pair operationId, attempt and signal.
+  jev,                      // JevClient with its normal config and recorders.
+  [leftImage, rightImage],   // Exactly two ModelImage values, in this order.
+  context,                  // Stable per-pair operationId, attempt and optional signal.
   recordGenerationFailure,
 );
-// result.decision: "same" | "different" | "unresolved"
+// result: { decision: "same" | "different" | "unresolved", judgment: JevResult }
 ```
 
-`ModelImage` is exported as `{ data: string; mimeType: string }`. `PiRequest.images` also enables direct multimodal `TextGenerator.generate()` calls without this comparator.
+`ModelImage` contains raw base64 `data` and a `mimeType`. The client sends images as an ordered top-level `images` array of `data:image/png;base64,...`, `data:image/jpeg;base64,...` or `data:image/webp;base64,...` URLs in the same `/v1/systemone` request as `state` and `questions`. Images never go into text state. Text-only requests omit `images` and do not query vision status.
 
-`compareMediaIdentity(generator, jev, images, context, recordFailure)` first sends both image attachments to Pi for detailed structured visual evidence, not a final verdict. It includes subjects, composition, distinctive features, readable text, chart/screenshot details, correspondences, differences, possible transformations and limitations. JEV then judges `media_identity` from that evidence. Identity means reuse of underlying visual content, allowing incidental crops, captions and recompression, not merely a shared topic or event.
+`compareMediaIdentity(jev, images, context, recordFailure)` makes one direct JEV judgment. No Pi/OpenAI call, visual-description extraction, structured repair, or alternate-model fallback occurs. JEV compares both complete canvases, including collages, corresponding panels and insets across attachments. Matching internal scenes are not compared against one another within one attachment. Identifiable reuse may survive incidental crops, captions, borders and recompression. A shared topic, logo or caption alone is not identity, and a single common panel does not establish identity of otherwise different collages.
 
-The result retains `evidence`, `evidenceVersion`, `generation` and `repaired`. When sufficient, it also has `judgment: JevResult` and the final JEV `same`/`different` decision. Unreadable or insufficient evidence returns `decision: "unresolved"` and `judgment: null` without a JEV call. Treat that as no identity decision, never as proof of difference. Provider, cancellation, context-budget and invalid-output errors propagate, never become an identity verdict. Invalid evidence gets the existing one isolated Pi repair with both attachments.
+The result contains the direct `judgment` receipt and an explicit decision. `unresolved` means insufficient readable or distinctive visual evidence, not proof of difference. Provider, cancellation, context-budget and invalid-output errors propagate from the helper. `judgeMedia(left, right, storyId, settings, signal?)` compresses both complete inputs to WebP with the same optional signal, passes it into JEV context, and conservatively returns `unresolved` on failure so both sources survive.
 
-Pi uses `operationId + ":vision"`, its repair uses `":vision:repair"`, and JEV uses `":jev"`; stage labels get matching suffixes. Attempt and signal are preserved. Both adapters keep their standard failure/usage accounting. The host must use a stable ID for each distinct image pair, store the receipts, and manage caching/restarts. Re-running the helper after a JEV failure also repeats the Pi call. To resume without paying for evidence again, save the returned validated evidence before dispatching JEV through a host-owned staged workflow using `generateStructured()` and `judge("media_identity", evidenceState, context)`. Include `MEDIA_IDENTITY_EVIDENCE_VERSION`, `jevTemplates.media_identity.version`, both image identities and the model choices in cache keys. The helper itself has no durable checkpoint.
+JEV uses `operationId + ":jev"` and a matching stage suffix when supplied. Attempt and signal are preserved. The adapter keeps normal JEV failure and usage accounting. Diagnostics and usage receipts contain no image bytes, source text, credentials or provider payloads. Include `MEDIA_IDENTITY_VERSION`, `jevTemplates.media_identity.version`, image identities, preparation policy and JEV endpoint/model in identity cache keys. The direct-image version invalidates the former description-based cache. Pi provider/model settings no longer affect identity cache keys. The old evidence, generation and repair result fields and `MediaVisualEvidence` contract are removed.
 
-### Verified transport limits
+Media relevance also calls JEV directly, one attachment per request:
 
-The configured bridge's `/health` identifies `autojev-27b-q4_k_m` with a 12288-token context; `/v1/models` describes it as local AutoJev, with JEV names as compatibility aliases. Neither advertises image support. The installed Pi SDK's `api/system-one-shared.js` explicitly rejects `context.images` and sends only `{ state, questions }` through System One. Its separate `openai-decisions.js` supports images, but that is a different API and is not evidence that AutoJev supports them. The Pi Responses adapter supports actual `input_image` data URLs, and `AgentSession` exposes `PromptOptions.images`.
+```ts
+const receipt = await jev.judge("media_relevance", { story }, context, [image]);
+// receipt.answers.relation: choice relevant | irrelevant | unresolved
+```
 
-The bridge's OpenAPI/dashboard routes require dashboard authentication, so its internal backend implementation could not be inspected here. Direct AutoJev vision support remains unverified and unsupported by this adapter. Do not infer it from the model family, send base64 inside JSON state, or add guessed image fields that a server might ignore. `jev.judge(..., context, nonemptyImages)` fails locally with a recorded, non-retryable `invalid_request`, `outcome: "not_submitted"`, explaining that vision-capable Pi extraction is required. The supported path is Pi vision followed by JEV text-evidence judgment, not a claim that JEV saw the pixels. No live image-comparison accuracy test has been performed.
+`classifyMediaRelevance()` in `media-relevance.ts` wraps that request and returns attachment decisions, not textual descriptions. The story contains headline, summary, chosen excerpt and extracted mentions. The static template inspects the whole canvas and requires positive story-specific evidence. It rejects generic logos, bylines, ads and unrelated roundup items. A named mission patch or an editorial portrait of the story's named subject can qualify; an unrelated author's byline portrait cannot. Only positive `relevant` decisions survive optional relevance selection. Unresolved inputs are omitted and leave selection provisional. `filterRelevantMedia(..., signal?)` passes the final optional signal through compression and JEV. Selection has no Pi/OpenAI call or fallback. Other generation tasks still use Pi.
+
+### Verified image transport and budget
+
+The bridge's `/docs` specifies a top-level array of at most four images, each with at most 8,000,000 decoded bytes and 16,000,000 pixels. PNG, JPEG and WebP are supported, not GIF. The adapter validates count, MIME, bounded canonical base64, container signatures and encoded dimensions before capability or inference HTTP calls. This header validation is not a full image decoder; the provider still validates complete decoding. The shared Pi image schema and its GIF support are unchanged.
+
+For every image request, `/local/status` must report `visionEnabled: true`, a usable `maxImages` and a positive integer `imageMaxTokens`. Missing, disabled or invalid capability metadata fails before classifier dispatch, even with explicit `contextTokens`. The verified local status reported four images and `imageMaxTokens: 256`. A live red/blue comparison completed in about three seconds; that checks transport, not general identity accuracy.
+
+The text tokenizer cannot count vision tokens. The guard still measures ALL prepared state, question instructions, choices and formatting, then adds `image count * imageMaxTokens` to the framing reserve. No image call skips text checks, clips text or invents evaluated usage. A request must fit the combined budget or it fails with numeric-only `context_limit` metadata before dispatch. The image cap comes from serving status, not a hardcoded assumption about 256 tokens. Unavailable status fails closed rather than guessing a reservation.
+
+Image requests force `X-AutoJev-Prefix-Cache: false` and `X-AutoJev-Cache-Mode: none`, regardless of client prefix settings. Text measurement uses that same non-prefix rendering order because the server bypasses caches for image requests. Text-only cache behavior is unchanged. Budget reservations are not billed usage; accounting uses only the provider's returned token counts and cache counters.
 
 ## Failure record
 

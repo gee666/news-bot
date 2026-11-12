@@ -227,3 +227,22 @@ describe('publication image dimensions', () => {
     })).toBe(false);
   });
 });
+
+it('cancels stalled codec adapters and never starts another command with the expired signal', async () => {
+  const controller = new AbortController();
+  const run = vi.fn<MediaCommandRunner>(() => new Promise(() => {}));
+  const task = compressModelImage(Buffer.from('image'), { run, signal: controller.signal });
+  const rejected = expect(task).rejects.toMatchObject({ name: 'AbortError' });
+  controller.abort();
+  await rejected;
+  await expect(normalizeImage(Buffer.from('another'), { run, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+  expect(run).toHaveBeenCalledTimes(1);
+});
+
+it('does not start a disk fallback after cancellation of a video decoder', async () => {
+  const controller = new AbortController();
+  const run = vi.fn<MediaCommandRunner>(async () => { controller.abort(); throw controller.signal.reason; });
+  await expect(extractVideoFrame(Buffer.from('video'), 3, createMediaRunner({ run, signal: controller.signal }), controller.signal))
+    .rejects.toMatchObject({ name: 'AbortError' });
+  expect(run).toHaveBeenCalledTimes(1);
+});

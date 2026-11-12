@@ -1,48 +1,15 @@
+import { expect, it, vi } from 'vitest';
+import { mocks, image, video } from './story-media.test-helpers.js';
 import { randomUUID } from 'node:crypto';
-import { beforeEach, afterEach, expect, it, vi } from 'vitest';
-import { defaultSettings, type AppSettings } from '../settings.js';
-const mocks = vi.hoisted(() => ({ query: vi.fn(), load: vi.fn(), save: vi.fn(), release: vi.fn(),
-  download: vi.fn(), dedup: vi.fn(), normalize: vi.fn(), privacy: vi.fn(), judge: vi.fn(),
-  context: vi.fn(), relevance: vi.fn(), publishable: vi.fn(), sweep: vi.fn(), pairSweep: vi.fn(), tempSweep: vi.fn() }));
-vi.mock('../db.js', () => ({ db: { query: mocks.query } }));
-vi.mock('./cache.js', () => ({ MEDIA_TTL_MS: 604800000, MediaCache: class { load = mocks.load; save = mocks.save; release = mocks.release; sweep = mocks.sweep; } }));
-vi.mock('./download.js', async original => ({ ...await original<typeof import('./download.js')>(), downloadMedia: mocks.download }));
-vi.mock('./comparison.js', () => ({ deduplicateMedia: mocks.dedup, compressModelImage: mocks.normalize, sweepComparisonTemps: mocks.tempSweep }));
-vi.mock('./pair-cache.js', () => ({ MediaPairCache: class { sweep = mocks.pairSweep; } }));
-vi.mock('./codec.js', () => ({ isPublishableImage: mocks.publishable }));
-vi.mock('./judgment.js', () => ({ judgeMedia: mocks.judge,
-  mediaJudgmentVersion: (settings: AppSettings) => JSON.stringify(settings) }));
-vi.mock('../pipeline/generation-model.js', () => ({ requireInferenceApproval: mocks.privacy }));
-vi.mock('./relevance.js', () => ({ loadMediaStoryContext: mocks.context, filterRelevantMedia: mocks.relevance,
-  mediaRelevanceVersion: (settings: AppSettings) => `relevance-v1:${settings.piProvider}:${settings.piModel}:${settings.modelVersion}` }));
+import { defaultSettings } from '../settings.js';
 import { publicationMedia, summaryImages, releaseStoryMedia, cleanupMedia } from './story-media.js';
-
-const image = { type: 'image' as const, data: Buffer.from('image'), mimeType: 'image/jpeg' };
-const video = { type: 'video' as const, data: Buffer.from('video'), mimeType: 'video/mp4' };
-beforeEach(() => {
-  vi.resetAllMocks();
-  mocks.query.mockResolvedValue({ rows: [{ revision_id: randomUUID(), metadata: { media: [
-    { type: 'image', url: 'https://example.org/a.jpg' }, { type: 'image', url: 'https://example.org/a.jpg' },
-    { type: 'video', url: 'https://example.org/a.mp4' },
-  ] }, source_metadata: {}, access: 'public', own_media: false }] });
-  mocks.load.mockResolvedValue(null);
-  mocks.judge.mockResolvedValue('different');
-  mocks.save.mockResolvedValue(Date.now() + 604800000);
-  mocks.download.mockResolvedValueOnce(image).mockResolvedValueOnce(video);
-  mocks.dedup.mockImplementation(async items => items);
-  mocks.publishable.mockResolvedValue(true);
-  mocks.normalize.mockResolvedValue(Buffer.from('png'));
-  mocks.context.mockResolvedValue({ headline: 'Rocket Lab launches HawkEye 360', summary: 'Mission details', chosenExcerpt: null, mentions: [] });
-  mocks.relevance.mockImplementation(async media => ({ media, resolved: true }));
-});
-afterEach(() => { vi.unstubAllEnvs(); });
 
 it('downloads repeated source URLs once and persists only deduplicated media', async () => {
   const id = randomUUID();
   mocks.dedup.mockResolvedValue([image]);
   expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(image)]);
   expect(mocks.download).toHaveBeenCalledTimes(2);
-  expect(mocks.save).toHaveBeenCalledWith(id, expect.any(String), [expect.objectContaining(image)]);
+  expect(mocks.save).toHaveBeenCalledWith(id, expect.any(String), [expect.objectContaining(image)], expect.any(Number), expect.any(AbortSignal));
   await releaseStoryMedia(id);
   expect(mocks.release).toHaveBeenCalledWith(id);
 });
@@ -54,12 +21,12 @@ it('selects one original from the NVIDIA WordPress pair before downloads or visu
     { type: 'image', url }, { type: 'image', url: url.replace('.jpg', '-842x450.jpg') },
   ] }, source_metadata: {}, access: 'public', own_media: false }] });
   expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(image)]);
-  expect(mocks.download).toHaveBeenCalledExactlyOnceWith({ type: 'image', url }, { metadata: {} });
+  expect(mocks.download).toHaveBeenCalledExactlyOnceWith({ type: 'image', url }, { metadata: {} }, expect.any(AbortSignal));
   expect(mocks.dedup.mock.calls[0]?.[0]).toHaveLength(1);
   expect(mocks.judge).not.toHaveBeenCalled();
   expect(mocks.privacy).toHaveBeenCalledBefore(mocks.load);
   expect(mocks.load).toHaveBeenCalledBefore(mocks.download);
-  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [expect.objectContaining(image)]);
+  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [expect.objectContaining(image)], expect.any(Number), expect.any(AbortSignal));
 });
 
 it('does not infer rendition identity across separate source revisions', async () => {
@@ -98,7 +65,10 @@ it('uses cached media without downloading and checks privacy first', async () =>
 
 it('does not download or send private media without approval', async () => {
   mocks.privacy.mockRejectedValue(new Error('private inference forbidden'));
-  await expect(publicationMedia(randomUUID(), defaultSettings)).rejects.toThrow('private inference forbidden');
+  expect(await publicationMedia(randomUUID(), defaultSettings)).toEqual([]);
+  expect(mocks.load).not.toHaveBeenCalled();
+  expect(mocks.judge).not.toHaveBeenCalled();
+  expect(mocks.relevance).not.toHaveBeenCalled();
   expect(mocks.download).not.toHaveBeenCalled();
 });
 
@@ -155,16 +125,16 @@ it('filters after deduplication and caches only story-relevant attachments', asy
     expect.objectContaining(image), expect.objectContaining(video),
   ]);
   expect(mocks.relevance).toHaveBeenCalledAfter(mocks.dedup);
-  expect(mocks.relevance).toHaveBeenCalledWith([logo, image, video], await mocks.context.mock.results[0]?.value, id, defaultSettings);
+  expect(mocks.relevance).toHaveBeenCalledWith([logo, image, video], await mocks.context.mock.results[0]?.value, id, defaultSettings, expect.any(AbortSignal));
   expect(mocks.save).toHaveBeenCalledAfter(mocks.relevance);
-  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [image, video]);
+  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [image, video], expect.any(Number), expect.any(AbortSignal));
 });
 
 it('omits unresolved relevance images and retries rather than caching an outage as final', async () => {
   const id = randomUUID();
   mocks.relevance.mockResolvedValue({ media: [video], resolved: false });
   expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(video)]);
-  expect(mocks.save).toHaveBeenCalledWith(id, `unresolved:${mocks.load.mock.calls[0]?.[1]}`, [video]);
+  expect(mocks.save).toHaveBeenCalledWith(id, `unresolved:${mocks.load.mock.calls[0]?.[1]}`, [video], expect.any(Number), expect.any(AbortSignal));
   mocks.download.mockResolvedValue(image);
   await publicationMedia(id, defaultSettings);
   expect(mocks.relevance).toHaveBeenCalledTimes(2);
@@ -187,7 +157,7 @@ it('does not load story text or classify images on a video-only source', async (
   mocks.download.mockReset().mockResolvedValue(video);
   expect(await publicationMedia(randomUUID(), defaultSettings)).toHaveLength(1);
   expect(mocks.context).not.toHaveBeenCalled();
-  expect(mocks.relevance).toHaveBeenCalledWith([expect.objectContaining(video)], null, expect.any(String), defaultSettings);
+  expect(mocks.relevance).toHaveBeenCalledWith([expect.objectContaining(video)], null, expect.any(String), defaultSettings, expect.any(AbortSignal));
 });
 
 it('drops decoded spacer images before deduplication, vision and cache, regardless of URL or claimed metadata', async () => {
@@ -196,18 +166,18 @@ it('drops decoded spacer images before deduplication, vision and cache, regardle
   mocks.download.mockReset().mockResolvedValueOnce(spacer).mockResolvedValueOnce(video);
   mocks.publishable.mockResolvedValue(false);
   expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(video)]);
-  expect(mocks.publishable).toHaveBeenCalledExactlyOnceWith(spacer.data);
+  expect(mocks.publishable).toHaveBeenCalledExactlyOnceWith(spacer.data, { signal: expect.any(AbortSignal) });
   expect(mocks.publishable).toHaveBeenCalledBefore(mocks.dedup);
   expect(mocks.dedup.mock.calls[0]?.[0]).toEqual([expect.objectContaining(video)]);
-  expect(mocks.relevance).toHaveBeenCalledWith([expect.objectContaining(video)], expect.any(Object), id, defaultSettings);
-  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [expect.objectContaining(video)]);
+  expect(mocks.relevance).toHaveBeenCalledWith([expect.objectContaining(video)], expect.any(Object), id, defaultSettings, expect.any(AbortSignal));
+  expect(mocks.save).toHaveBeenCalledWith(id, mocks.load.mock.calls[0]?.[1], [expect.objectContaining(video)], expect.any(Number), expect.any(AbortSignal));
 });
 
 it('keeps healthy attachments and source processing when one download fails', async () => {
   const id = randomUUID();
   mocks.download.mockReset().mockRejectedValueOnce(new Error('CDN unavailable')).mockResolvedValueOnce(video);
   expect(await publicationMedia(id, defaultSettings)).toEqual([expect.objectContaining(video)]);
-  expect(mocks.save).toHaveBeenCalledWith(id, `unresolved:${mocks.load.mock.calls[0]?.[1]}`, [expect.objectContaining(video)]);
+  expect(mocks.save).toHaveBeenCalledWith(id, `unresolved:${mocks.load.mock.calls[0]?.[1]}`, [expect.objectContaining(video)], expect.any(Number), expect.any(AbortSignal));
   mocks.download.mockResolvedValue(image);
   await publicationMedia(id, defaultSettings);
   expect(mocks.download).toHaveBeenCalledTimes(4);
@@ -216,7 +186,7 @@ it('keeps healthy attachments and source processing when one download fails', as
 it('allows text-only generation when every attachment is unavailable', async () => {
   mocks.download.mockReset().mockRejectedValue(new Error('Source media removed'));
   expect(await summaryImages(randomUUID(), defaultSettings)).toEqual([]);
-  expect(mocks.save).toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/^unresolved:/u), []);
+  expect(mocks.save).toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/^unresolved:/u), [], expect.any(Number), expect.any(AbortSignal));
   expect(mocks.normalize).not.toHaveBeenCalled();
 });
 

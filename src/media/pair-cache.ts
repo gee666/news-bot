@@ -3,11 +3,12 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { MEDIA_TTL_MS } from './cache.js';
+import { abortable } from './deadline.js';
 
 export type MediaDecision = 'same' | 'different' | 'unresolved';
 export type MediaVerdict = boolean | MediaDecision;
 export interface MediaPairResults {
-  compare(left: string, right: string, judge: () => Promise<MediaVerdict>): Promise<MediaVerdict>;
+  compare(left: string, right: string, judge: () => Promise<MediaVerdict>, signal?: AbortSignal): Promise<MediaVerdict>;
 }
 const resultSchema = z.object({ decision: z.enum(['same', 'different']), expiresAt: z.number().finite() });
 const active = new Map<string, Promise<MediaVerdict>>();
@@ -18,31 +19,41 @@ const digest = (value: string) => createHash('sha256').update(value).digest('hex
 export class MediaPairCache implements MediaPairResults {
   constructor(readonly version: string, readonly root = resolve('tmp/media-pair-cache')) {}
 
-  compare(left: string, right: string, judge: () => Promise<MediaVerdict>): Promise<MediaVerdict> {
+  compare(left: string, right: string, judge: () => Promise<MediaVerdict>, signal?: AbortSignal): Promise<MediaVerdict> {
+    signal?.throwIfAborted();
     const key = digest(JSON.stringify([this.version, ...[left, right].sort()]));
     const path = join(this.root, `${key}.json`);
     const pending = active.get(path);
-    if (pending) return pending;
-    const task = this.resolve(path, judge).finally(() => { active.delete(path); });
+    if (pending) return abortable(signal, () => pending);
+    const task = this.resolve(path, judge, signal).finally(() => {
+      if (active.get(path) === task) active.delete(path);
+    });
     active.set(path, task);
-    return task;
+    return abortable(signal, () => task);
   }
 
-  private async resolve(path: string, judge: () => Promise<MediaVerdict>): Promise<MediaVerdict> {
+  private async resolve(path: string, judge: () => Promise<MediaVerdict>, signal?: AbortSignal): Promise<MediaVerdict> {
     try {
       const cached = resultSchema.safeParse(JSON.parse(await readFile(path, 'utf8')));
+      signal?.throwIfAborted();
       if (cached.success && cached.data.expiresAt > Date.now()) return cached.data.decision;
     } catch (error) {
       if (!(error instanceof SyntaxError) && !missing(error)) throw error;
     }
-    const decision = await judge();
+    signal?.throwIfAborted();
+    const decision = await abortable(signal, judge);
+    signal?.throwIfAborted();
     // A legacy boolean false may mean an outage. Require an explicit resolved verdict.
     if (decision !== 'same' && decision !== 'different') return decision;
     await mkdir(this.root, { recursive: true, mode: 0o700 });
+    signal?.throwIfAborted();
     const staging = join(this.root, `${randomUUID()}.pending`);
     try {
-      await writeFile(staging, JSON.stringify({ decision, expiresAt: Date.now() + MEDIA_TTL_MS }), { mode: 0o600 });
+      await writeFile(staging, JSON.stringify({ decision, expiresAt: Date.now() + MEDIA_TTL_MS }), { mode: 0o600, signal });
+      signal?.throwIfAborted();
       await rename(staging, path);
+      // A rename already in the OS cannot be cancelled. Do not retain its verdict.
+      if (signal?.aborted) { await rm(path, { force: true }); signal.throwIfAborted(); }
     } finally { await rm(staging, { force: true }); }
     return decision;
   }

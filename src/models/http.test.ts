@@ -48,7 +48,7 @@ function countResponse(choice = "1", inputTokens = 42, outputTokens = 0): unknow
 }
 
 describe("model HTTP adapters", () => {
-  it("dispatches media visual evidence using the versioned same/different template", async () => {
+  it("dispatches text-only requests without an images field", async () => {
     const state = { attachment1: { subject: 'A bridge' }, attachment2: { subject: 'The same bridge with a border' },
       correspondences: ['Matching cables and boat'], differences: ['Border'], limitations: [] };
     const baseUrl = await serve((req, res) => {
@@ -56,13 +56,13 @@ describe("model HTTP adapters", () => {
         expect(value).toMatchObject({ state, questions: jevTemplates.media_identity.questions });
         expect(value).not.toHaveProperty('images');
         res.end(JSON.stringify({ model: 'autojev-27b-q4_k_m', usage: { input_tokens: 50, output_tokens: 0 },
-          answers: { relation: { type: 'choice', choice: 'same', probabilities: { same: 0.99, different: 0.01 }, confidence: 0.99 } } }));
+          answers: { relation: { type: 'choice', choice: 'same', probabilities: { same: 0.99, different: 0.01, unresolved: 0 }, confidence: 0.99 } } }));
       });
     });
     const client = new JevClient({ baseUrl, apiKey: 'test-key', contextTokens: 12288, recordFailure: async () => {} });
     cleanups.push(() => client.close());
     expect(await client.judge('media_identity', state, { operationId: 'media-evidence' })).toMatchObject({
-      template: 'media_identity', promptVersion: 'media-identity-visual-evidence-v2', answers: { relation: { choice: 'same' } },
+      template: 'media_identity', promptVersion: 'media-identity-direct-images-v3', answers: { relation: { choice: 'same' } },
     });
   });
 

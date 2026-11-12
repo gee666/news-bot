@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RequestFault, UnsupportedVisionFault } from "./errors.js";
+import { RequestFault } from "./errors.js";
 import { ModelHttp, numericHeader, type HttpConfig } from "./http.js";
 import { infer, type InferenceOptions, type RequestContext } from "./inference.js";
 import { jevTemplates, type JevQuestion, type JevTemplate } from "./templates.js";
@@ -8,6 +8,7 @@ import type { JevContextBudget } from './jev-budget.js';
 import { prepareJevState, referenceInstructions } from './jev-state.js';
 
 import type { ModelImage } from "./images.js";
+import { jevImagePayload } from './jev-images.js';
 
 const probability = z.number().finite().min(0).max(1);
 const distribution = z.record(z.string(), probability);
@@ -63,12 +64,13 @@ export class JevClient {
     this.http = new ModelHttp(httpConfig);
   }
 
-  /** The local System One transport has no supported image attachment protocol. */
-  readonly supportsImages = false;
+  /** Image requests also require the endpoint's runtime vision capability. */
+  readonly supportsImages = true;
 
   judge(template: JevTemplate, state: unknown, context: RequestContext, images?: readonly ModelImage[]): Promise<JevResult> {
     return infer("jev", this.timeoutMs, context, this.config.recordFailure, async (dispatch) => {
-      if (images?.length) throw new UnsupportedVisionFault();
+      const imagePayload = jevImagePayload(images);
+      const prefixCache = imagePayload.length ? false : this.config.prefixCache ?? false;
       if (!(typeof state === "string" || (typeof state === "object" && state !== null))
         || !isJson(state)) throw new RequestFault("invalid_request", { outcome: "not_submitted" });
       if (!this.config.apiKey) throw new RequestFault("authentication", { outcome: "not_submitted" });
@@ -94,14 +96,28 @@ export class JevClient {
       const reserve = z.coerce.number().int().min(128).max(4096).safeParse(
         this.config.framingReserveTokens ?? process.env.JEV_FRAMING_RESERVE_TOKENS ?? 512);
       if (!reserve.success) throw new RequestFault('invalid_request', { outcome: 'not_submitted' });
+      let imageReserve = 0;
+      if (imagePayload.length) {
+        const status = z.object({ visionEnabled: z.literal(true), maxImages: z.number().int().min(1).max(4),
+          imageMaxTokens: z.number().int().min(1).max(1_000_000) }).safeParse(
+          await this.http.metadata('/local/status', AbortSignal.any([dispatch.signal, AbortSignal.timeout(10_000)])));
+        if (!status.success || imagePayload.length > status.data.maxImages) {
+          throw new RequestFault('invalid_request', { outcome: 'not_submitted' });
+        }
+        // The tokenizer measures the complete text only. Reserve the serving cap for EACH image as well.
+        imageReserve = imagePayload.length * status.data.imageMaxTokens;
+      }
       let budget: JevContextBudget;
-      try { budget = await measureJevContext(prepared.state, questions, capacity, actualModel, this.config.prefixCache ?? false, reserve.data); }
+      try { budget = await measureJevContext(prepared.state, questions, capacity, actualModel, prefixCache,
+        reserve.data + imageReserve); }
       catch { throw new RequestFault('invalid_request', { outcome: 'not_submitted' }); }
       requireJevContext(budget);
       const response = await this.http.post("/v1/systemone",
-        { model: this.config.model ?? "jev-latest", state: prepared.state, questions },
+        { model: this.config.model ?? "jev-latest", state: prepared.state, questions,
+          ...(imagePayload.length ? { images: imagePayload } : {}) },
         { Authorization: `Bearer ${this.config.apiKey}`,
-          "X-AutoJev-Prefix-Cache": String(this.config.prefixCache ?? false) }, dispatch);
+          "X-AutoJev-Prefix-Cache": String(prefixCache),
+          ...(imagePayload.length ? { 'X-AutoJev-Cache-Mode': 'none' } : {}) }, dispatch);
       const usage = responseSchema.shape.usage.safeParse(
         z.object({ usage: z.unknown() }).safeParse(response.value).data?.usage);
       const cacheRead = response.headers.has('x-autojev-cached-tokens')

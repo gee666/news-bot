@@ -90,13 +90,16 @@ async function beforeDeadline<T>(promise: Promise<T>, signal: AbortSignal): Prom
 
 /** Resolve once per hop and pin the validated address while preserving Host and TLS SNI. */
 async function fetchContent(input: string, limits: FetchLimits,
-  headers: Record<string, string>, media: boolean): Promise<FetchedBinary> {
-  const signal = AbortSignal.timeout(limits.timeoutMs);
+  headers: Record<string, string>, media: boolean, callerSignal?: AbortSignal): Promise<FetchedBinary> {
+  const timeout = AbortSignal.timeout(limits.timeoutMs);
+  const signal = callerSignal ? AbortSignal.any([timeout, callerSignal]) : timeout;
   let url = publicUrl(input);
   try {
     for (let hop = 0; hop <= limits.maxRedirects; hop++) {
       const host = url.hostname.replace(/^\[|\]$/gu, '');
+      signal.throwIfAborted();
       const pinned = await beforeDeadline(resolvePublicAddress(host), signal);
+      signal.throwIfAborted();
       const dispatcher = new Agent({ connect: { timeout: Math.min(10_000, limits.timeoutMs),
         lookup: (_hostname, options, callback) => {
           if (options.all) callback(null, [pinned]);
@@ -158,6 +161,6 @@ export async function fetchPublic(input: string, limits: FetchLimits = fetchLimi
 }
 
 /** Binary media uses the same pinned DNS, redirect and streaming size checks as research. */
-export function fetchPublicMedia(input: string, maxBytes: number): Promise<FetchedBinary> {
-  return fetchContent(input, { timeoutMs: 60_000, maxBytes, maxRedirects: 3 }, {}, true);
+export function fetchPublicMedia(input: string, maxBytes: number, signal?: AbortSignal): Promise<FetchedBinary> {
+  return fetchContent(input, { timeoutMs: 60_000, maxBytes, maxRedirects: 3 }, {}, true, signal);
 }

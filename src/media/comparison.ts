@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { abortable } from './deadline.js';
 import {
   boundedOption, createMediaRunner, decodeImage, extractVideoFrame, probeVideoDuration, fullImagePixelHash,
   type MediaCodecOptions, type MediaCommandRunner,
@@ -61,27 +62,27 @@ interface Prepared {
 
 const thumbnailSide = 32;
 
-async function getDuration(item: Prepared, run: MediaCommandRunner): Promise<number> {
-  item.duration ??= await probeVideoDuration(item.candidate.data, run);
+async function getDuration(item: Prepared, run: MediaCommandRunner, signal?: AbortSignal): Promise<number> {
+  item.duration ??= await probeVideoDuration(item.candidate.data, run, signal);
   return item.duration;
 }
 
-async function getImage(item: Prepared, run: MediaCommandRunner): Promise<Buffer> {
+async function getImage(item: Prepared, run: MediaCommandRunner, signal?: AbortSignal): Promise<Buffer> {
   if (!item.image) {
     item.image = item.candidate.type === 'image'
       ? await decodeImage(item.candidate.data, run)
-      : await extractVideoFrame(item.candidate.data, await getDuration(item, run) / 3, run);
+      : await extractVideoFrame(item.candidate.data, await getDuration(item, run, signal) / 3, run, signal);
   }
   return item.image;
 }
 
-async function getThumbnail(item: Prepared, run: MediaCommandRunner): Promise<Buffer> {
+async function getThumbnail(item: Prepared, run: MediaCommandRunner, signal?: AbortSignal): Promise<Buffer> {
   if (!item.thumbnail) {
     item.thumbnail = await run('ffmpeg', [
       '-v', 'error', '-threads', '1', '-filter_threads', '1', '-i', 'pipe:0',
       '-map', '0:v:0', '-frames:v', '1', '-vf', `scale=${thumbnailSide}:${thumbnailSide},format=gray`,
       '-f', 'rawvideo', '-pix_fmt', 'gray', 'pipe:1',
-    ], await getImage(item, run));
+    ], await getImage(item, run, signal));
     if (item.thumbnail.length !== thumbnailSide ** 2) throw new Error('Invalid grayscale thumbnail');
   }
   return item.thumbnail;
@@ -136,6 +137,8 @@ async function samePixels(left: Prepared, right: Prepared, run: MediaCommandRunn
 export async function deduplicateMedia(
   candidates: readonly MediaCandidate[], judge: MediaJudge, options: MediaComparisonOptions = {},
 ): Promise<MediaCandidate[]> {
+  const signal = options.signal;
+  signal?.throwIfAborted();
   const seconds = boundedOption('durationToleranceSeconds', options.durationToleranceSeconds ?? 2, 0, Infinity);
   const ratio = boundedOption('durationToleranceRatio', options.durationToleranceRatio ?? 0.1, 0, 1);
   const errorThreshold = boundedOption('distinctErrorThreshold', options.distinctErrorThreshold ?? 0.2, 0, 1);
@@ -155,8 +158,10 @@ export async function deduplicateMedia(
   });
   const kept: Prepared[] = [];
   for (const item of prepared) {
+    signal?.throwIfAborted();
     let duplicate = false;
     for (const prior of kept) {
+      signal?.throwIfAborted();
       if (prior.candidate.type !== item.candidate.type) continue;
       const sameBytes = prior.candidate.data.length === item.candidate.data.length && prior.sha === item.sha;
       if (sameBytes && (item.candidate.type === 'image' || prior.candidate.duration === item.candidate.duration)) {
@@ -164,21 +169,25 @@ export async function deduplicateMedia(
         break;
       }
       const compare = async (): Promise<MediaVerdict> => {
+        signal?.throwIfAborted();
         if (item.candidate.type === 'video') {
-          const leftDuration = await getDuration(prior, run);
-          const rightDuration = await getDuration(item, run);
+          const leftDuration = await getDuration(prior, run, signal);
+          const rightDuration = await getDuration(item, run, signal);
           if (Math.abs(leftDuration - rightDuration) > Math.max(seconds, ratio * Math.max(leftDuration, rightDuration))) return false;
           if (sameBytes && leftDuration === rightDuration) return true;
         }
-        const left = await getImage(prior, run);
-        const right = await getImage(item, run);
+        const left = await getImage(prior, run, signal);
+        const right = await getImage(item, run, signal);
         if (await samePixels(prior, item, run)) return true;
-        const comparison = metrics(await getThumbnail(prior, run), await getThumbnail(item, run));
+        const comparison = metrics(await getThumbnail(prior, run, signal), await getThumbnail(item, run, signal));
         if (comparison.meanAbsoluteError >= errorThreshold && comparison.hashDistance >= hashThreshold) return false;
-        return judge(left, right, { left: metadata(prior), right: metadata(item), ...comparison });
+        signal?.throwIfAborted();
+        return abortable(signal, () => judge(left, right, { left: metadata(prior), right: metadata(item), ...comparison }));
       };
-      const decision = options.pairCache
-        ? await options.pairCache.compare(identity(prior), identity(item), compare) : await compare();
+      const pairCache = options.pairCache;
+      const decision = pairCache
+        ? await abortable(signal, () => pairCache.compare(identity(prior), identity(item), compare, signal)) : await compare();
+      signal?.throwIfAborted();
       if (![true, false, 'same', 'different', 'unresolved'].includes(decision)) throw new TypeError('Invalid media judge verdict');
       if (decision === true || decision === 'same') { duplicate = true; break; }
     }

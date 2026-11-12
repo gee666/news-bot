@@ -8,4 +8,4 @@ export { openPiRuntime, CODEX_MODEL, CODEX_PROVIDER, type PiRuntime } from "./pi
 export { generateStructured, type StructuredRequest, type TextGenerator } from "./structured.js";
 export { jevTemplates, type JevTemplate } from "./templates.js";
 export { type ModelImage } from "./images.js";
-export { MEDIA_IDENTITY_EVIDENCE_VERSION, compareMediaIdentity, type MediaIdentityResult, type MediaVisualEvidence } from "./media-identity.js";
+export { MEDIA_IDENTITY_VERSION, compareMediaIdentity, type MediaIdentityResult } from "./media-identity.js";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { failureMetadata, ModelRequestError, RequestFault, retryTime, classifyProviderError, faultFromError, providerRetryTime } from "./errors.js";
-import { infer, InferenceLimiter, type FailureRecorder } from "./inference.js";
+import { infer, InferenceLimiter, inferenceLimiter, type FailureRecorder } from "./inference.js";
 
 describe("inference reliability", () => {
   it("shares one gate and excludes local waiting from dispatch duration", async () => {
@@ -34,6 +34,56 @@ describe("inference reliability", () => {
     await next;
     const finish = await gate.acquire();
     finish();
+  });
+
+  it("cancels context.signal while queued without dispatch and lets subsequent work run", async () => {
+    const release = await inferenceLimiter.acquire();
+    const controller = new AbortController();
+    let calls = 0;
+    const waiting = infer("jev", 1000, { operationId: "optional-media", signal: controller.signal },
+      async () => {}, async () => { calls++; return true; });
+    const rejected = expect(waiting).rejects.toMatchObject({ metadata: { kind: "cancelled", outcome: "not_submitted" } });
+    controller.abort();
+    await rejected;
+    expect(calls).toBe(0);
+    release();
+    expect(await infer("jev", 1000, { operationId: "next-story" }, async () => {}, async () => 7)).toBe(7);
+  });
+
+  it("does not dispatch when cancellation arrives just after the gate hands off its slot", async () => {
+    const release = await inferenceLimiter.acquire();
+    const controller = new AbortController();
+    let calls = 0;
+    const waiting = infer("jev", 1000, { operationId: "handoff", signal: controller.signal },
+      async () => {}, async () => { calls++; return true; });
+    const rejected = expect(waiting).rejects.toMatchObject({ metadata: { kind: "cancelled", outcome: "not_submitted" } });
+    release();
+    controller.abort();
+    await rejected;
+    expect(calls).toBe(0);
+    const finish = await inferenceLimiter.acquire();
+    finish();
+  });
+
+  it("releases cancelled provider work before waiting for its failure recorder", async () => {
+    const controller = new AbortController();
+    let recording: () => void = () => {};
+    const ready = new Promise<void>(resolve => { recording = resolve; });
+    let finish: () => void = () => {};
+    const stored = new Promise<void>(resolve => { finish = resolve; });
+    const task = infer("jev", 1000, { operationId: "media-diagnostics", signal: controller.signal }, async () => {
+      recording();
+      await stored;
+    }, async ({ signal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    const failed = expect(task).rejects.toMatchObject({ metadata: { kind: "cancelled" } });
+    await Promise.resolve();
+    controller.abort();
+    await ready;
+    expect(await infer("jev", 1000, { operationId: "text-after-media" }, async () => {}, async () => 7)).toBe(7);
+    finish();
+    await failed;
   });
 
   it("persists timeout metadata before throwing, with delayed unknown-outcome retry", async () => {

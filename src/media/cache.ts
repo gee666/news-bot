@@ -11,17 +11,22 @@ const manifestSchema = z.object({ fingerprint: z.string(), expiresAt: z.number()
 
 /** Each story owns temporary files so publishing cannot delete another story's media. */
 export class MediaCache {
+  private readonly pending = new Map<string, Promise<unknown>>();
   constructor(readonly root = resolve('tmp/media-cache')) {}
   private directory(storyId: string): string { return join(this.root, z.uuid().parse(storyId)); }
 
-  async load(storyId: string, fingerprint: string, now = Date.now()): Promise<MediaCandidate[] | null> {
+  async load(storyId: string, fingerprint: string, now = Date.now(), signal?: AbortSignal): Promise<MediaCandidate[] | null> {
+    signal?.throwIfAborted();
     const directory = this.directory(storyId);
     try {
       const manifest = manifestSchema.parse(JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')));
-      if (manifest.expiresAt <= now) { await this.release(storyId); return null; }
+      signal?.throwIfAborted();
+      if (manifest.expiresAt <= now) { await this.release(storyId); signal?.throwIfAborted(); return null; }
       if (manifest.fingerprint !== fingerprint) return null;
       return await Promise.all(manifest.entries.map(async ({ sha, ...media }) => {
-        const data = await readFile(join(directory, sha));
+        signal?.throwIfAborted();
+        const data = await readFile(join(directory, sha), { signal });
+        signal?.throwIfAborted();
         if (createHash('sha256').update(data).digest('hex') !== sha) throw new Error('Media cache hash mismatch');
         return { type: media.type, mimeType: media.mimeType, data, expiresAt: manifest.expiresAt,
           ...(media.duration === undefined ? {} : { duration: media.duration }) };
@@ -32,29 +37,63 @@ export class MediaCache {
     }
   }
 
-  async save(storyId: string, fingerprint: string, media: MediaCandidate[], now = Date.now()): Promise<number> {
+  save(storyId: string, fingerprint: string, media: MediaCandidate[], now = Date.now(), signal?: AbortSignal): Promise<number> {
+    return this.serialize(storyId, () => this.write(storyId, fingerprint, media, now, signal));
+  }
+
+  private async write(storyId: string, fingerprint: string, media: MediaCandidate[], now: number, signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted();
     const directory = this.directory(storyId);
     await mkdir(directory, { recursive: true, mode: 0o700 });
+    signal?.throwIfAborted();
     let expiresAt = now + MEDIA_TTL_MS;
     try { expiresAt = Math.min(expiresAt, manifestSchema.parse(JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'))).expiresAt); }
     catch (error) { if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error; }
+    signal?.throwIfAborted();
     expiresAt = Math.min(expiresAt, ...media.map(item => item.expiresAt ?? expiresAt));
     if (expiresAt <= now) throw new Error('Media cache deadline has expired');
     const entries = [];
     for (const { data, ...candidate } of media) {
       const sha = createHash('sha256').update(data).digest('hex');
-      await writeFile(join(directory, sha), data, { mode: 0o600 });
+      signal?.throwIfAborted();
+      await writeFile(join(directory, sha), data, { mode: 0o600, signal });
+      signal?.throwIfAborted();
       entries.push({ ...candidate, sha });
     }
     const staging = join(directory, `manifest-${randomUUID()}.json`);
-    await writeFile(staging, JSON.stringify({ fingerprint, expiresAt, entries }), { mode: 0o600 });
-    await rename(staging, join(directory, 'manifest.json'));
+    try {
+      signal?.throwIfAborted();
+      await writeFile(staging, JSON.stringify({ fingerprint, expiresAt, entries }), { mode: 0o600, signal });
+      signal?.throwIfAborted();
+      await rename(staging, join(directory, 'manifest.json'));
+      if (signal?.aborted) {
+        await rm(join(directory, 'manifest.json'), { force: true });
+        signal.throwIfAborted();
+      }
+    } finally { await rm(staging, { force: true }); }
+    signal?.throwIfAborted();
     const retained = new Set(['manifest.json', ...entries.map(value => value.sha)]);
-    for (const file of await readdir(directory)) if (!retained.has(file)) await rm(join(directory, file), { force: true });
+    for (const file of await readdir(directory)) {
+      signal?.throwIfAborted();
+      if (!retained.has(file)) await rm(join(directory, file), { force: true });
+    }
+    signal?.throwIfAborted();
     return expiresAt;
   }
 
-  async release(storyId: string): Promise<void> { await rm(this.directory(storyId), { recursive: true, force: true }); }
+  release(storyId: string): Promise<void> {
+    return this.serialize(storyId, () => rm(this.directory(storyId), { recursive: true, force: true }));
+  }
+
+  // Release must run after the real save settles, not its caller's abort race.
+  private serialize<T>(storyId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.pending.get(storyId) ?? Promise.resolve();
+    const task = previous.catch(() => {}).then(work).finally(() => {
+      if (this.pending.get(storyId) === task) this.pending.delete(storyId);
+    });
+    this.pending.set(storyId, task);
+    return task;
+  }
 
   async sweep(now = Date.now(), storyExists?: (storyId: string) => Promise<boolean>): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });

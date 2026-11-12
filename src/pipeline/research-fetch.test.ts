@@ -1,6 +1,6 @@
 import type { LookupFunction } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchPublic, isPublicAddress, publicUrl, resolvePublicAddress, envInteger } from './research-fetch.js';
+import { fetchPublicMedia, fetchPublic, isPublicAddress, publicUrl, resolvePublicAddress, envInteger } from './research-fetch.js';
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), lookup: vi.fn(),
   agents: [] as { connect: { lookup: LookupFunction }; destroy: ReturnType<typeof vi.fn> }[] }));
@@ -147,4 +147,48 @@ describe('bounded pinned fetching', () => {
     vi.stubEnv('RESEARCH_FETCH_MAX_BYTES', '500');
     expect(envInteger('RESEARCH_FETCH_MAX_BYTES', 100, 1000)).toBe(500);
   });
+});
+
+
+it('aborts a media download during DNS and never dispatches the late answer', async () => {
+  const controller = new AbortController();
+  let finish: (addresses: Array<{ address: string; family: number }>) => void = () => {};
+  mocks.lookup.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const task = fetchPublicMedia('https://example.org/photo.jpg', 100, controller.signal);
+  const failed = expect(task).rejects.toThrow('fetch_failed');
+  controller.abort();
+  await failed;
+  finish([{ address: '93.184.215.14', family: 4 }]);
+  await Promise.resolve();
+  expect(mocks.fetch).not.toHaveBeenCalled();
+  expect(mocks.agents).toHaveLength(0);
+});
+
+it('forwards caller cancellation to a stalled media transport and destroys its agent', async () => {
+  const controller = new AbortController();
+  let dispatched: () => void = () => {};
+  const ready = new Promise<void>(resolve => { dispatched = resolve; });
+  mocks.fetch.mockImplementationOnce(async (_url, options) => new Promise((_, reject) => {
+    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    dispatched();
+  }));
+  const task = fetchPublicMedia('https://example.org/photo.jpg', 100, controller.signal);
+  const failed = expect(task).rejects.toThrow('fetch_failed');
+  await ready;
+  controller.abort();
+  await failed;
+  expect(mocks.fetch.mock.calls[0]?.[1].signal.aborted).toBe(true);
+  expect(mocks.agents[0]?.destroy).toHaveBeenCalledOnce();
+});
+
+it('does not follow a media redirect after caller cancellation', async () => {
+  const controller = new AbortController();
+  mocks.fetch.mockImplementationOnce(async () => {
+    controller.abort();
+    return response('', 302, { location: 'https://redirect.org/photo.jpg' });
+  });
+  await expect(fetchPublicMedia('https://example.org/photo.jpg', 100, controller.signal)).rejects.toThrow('fetch_failed');
+  expect(mocks.fetch).toHaveBeenCalledOnce();
+  expect(mocks.lookup).toHaveBeenCalledOnce();
+  expect(mocks.agents[0]?.destroy).toHaveBeenCalledOnce();
 });

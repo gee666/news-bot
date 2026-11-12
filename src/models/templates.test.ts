@@ -38,11 +38,21 @@ it('keeps independent later discoveries, releases and pricing decisions distinct
   expect(instructions).toContain('Independent releases remain UNRELATED even when they share sourceUrl');
 });
 
-it('freezes a visual-evidence identity template with a final same/different relation', () => {
+it('freezes direct image identity and relevance templates with explicit unresolved choices', () => {
   const template = jevTemplates.media_identity;
-  expect(template.version).toBe('media-identity-visual-evidence-v2');
-  expect(Object.keys(template.questions.relation.criteria)).toEqual(['same', 'different']);
-  expect(template.questions.relation.instructions).toContain('You cannot see the images');
+  expect(template.version).toBe('media-identity-direct-images-v3');
+  expect(Object.keys(template.questions.relation.criteria)).toEqual(['same', 'different', 'unresolved']);
+  expect(template.questions.relation.instructions).toContain('attached images themselves');
   expect(template.questions.relation.instructions).not.toContain('Use only supplied text');
   expect(Object.isFrozen(template.questions.relation)).toBe(true);
+  const relevance = jevTemplates.media_relevance;
+  expect(relevance.version).toBe('media-relevance-direct-images-v1');
+  expect(Object.keys(relevance.questions.relation.criteria)).toEqual(['relevant', 'irrelevant', 'unresolved']);
+  expect(relevance.questions.relation.instructions).toContain('COMPLETE canvas');
+  expect(relevance.questions.relation.instructions).toContain('positive story-specific visual evidence');
+  expect(relevance.questions.relation.instructions).toContain('named mission patch');
+  expect(relevance.questions.relation.instructions).toContain('author portraits used only as a byline');
+  expect(relevance.questions.relation.instructions).toContain('other roundup items');
+  expect(relevance.questions.relation.instructions).toContain("An editorial portrait of the story's named subject can be relevant");
+  expect(Object.isFrozen(relevance.questions.relation)).toBe(true);
 });

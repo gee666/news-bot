@@ -104,6 +104,8 @@ export async function infer<T>(
   try {
     if (context.signal?.aborted) throw new RequestFault("cancelled", { outcome: "not_submitted" });
     release = await inferenceLimiter.acquire(context.signal);
+    // Cancellation can arrive after the gate resolves but before this continuation.
+    signal.throwIfAborted();
     if (accounting?.availabilityKey) modelAvailability.check(accounting.availabilityKey);
     startedAt = Date.now();
     timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -116,6 +118,10 @@ export async function infer<T>(
     if (accounting?.availabilityKey) modelAvailability.succeeded(accounting.availabilityKey);
     return result;
   } catch (error) {
+    // Provider execution has settled. Optional-media diagnostics must not hold
+    // the shared inference slot while waiting for storage after cancellation.
+    if (timer) clearTimeout(timer);
+    release?.();
     finishedAt ??= Date.now();
     const original = faultFromError(error);
     const fault = controller.signal.aborted ? new RequestFault("timeout", {

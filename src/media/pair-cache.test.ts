@@ -66,12 +66,39 @@ it('expires without refreshing on reads, sweeps old results and separates versio
   expect(judge).toHaveBeenCalledTimes(3);
 });
 
-it('versions vision provider/model, JEV endpoint/model, and model revision', () => {
+it('versions JEV endpoint/model and model revision', () => {
   const baseline = mediaJudgmentVersion(defaultSettings);
-  for (const change of [{ piProvider: 'openai' }, { piModel: 'another' }, { jevUrl: 'http://another:8765' },
+  for (const change of [{ jevUrl: 'http://another:8765' },
     { jevModel: 'another' }, { modelVersion: defaultSettings.modelVersion + 1 }]) {
-    // Test a provider distinct from the configured default too.
     const settings = { ...defaultSettings, ...change };
     if (JSON.stringify(settings) !== JSON.stringify(defaultSettings)) expect(mediaJudgmentVersion(settings)).not.toBe(baseline);
   }
+});
+
+it('aborts a stalled comparison, accepts a retry and never persists the expired late result', async () => {
+  const cache = await setup();
+  const controller = new AbortController();
+  let finish: (decision: MediaVerdict) => void = () => {};
+  let started: () => void = () => {};
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const judge = vi.fn<() => Promise<MediaVerdict>>(() => {
+    started();
+    return new Promise(resolve => { finish = resolve; });
+  });
+  const task = cache.compare('a', 'b', judge, controller.signal);
+  const rejected = expect(task).rejects.toMatchObject({ name: 'AbortError' });
+  await ready;
+  controller.abort();
+  await rejected;
+  // The real comparison must unwind before a new owner takes the same key.
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(await readdir(cache.root)).toEqual([]);
+  const fresh = vi.fn<() => Promise<MediaVerdict>>(async () => 'different');
+  expect(await cache.compare('a', 'b', fresh)).toBe('different');
+  finish('same');
+  await Promise.resolve();
+  expect(await cache.compare('b', 'a', fresh)).toBe('different');
+  expect(fresh).toHaveBeenCalledTimes(1);
+  expect(await readdir(cache.root)).toHaveLength(1);
 });

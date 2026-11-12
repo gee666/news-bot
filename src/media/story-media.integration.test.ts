@@ -78,7 +78,7 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
       { type: 'image', url: url.replace('.jpg', '-842x450.jpg') }, { type: 'image', url },
     ] })]);
     expect(await service.publicationMedia(storyId, settings)).toHaveLength(1);
-    expect(mocks.download).toHaveBeenCalledExactlyOnceWith({ type: 'image', url }, { metadata: {} });
+    expect(mocks.download).toHaveBeenCalledExactlyOnceWith({ type: 'image', url }, { metadata: {} }, expect.any(AbortSignal));
     expect(await service.publicationMedia(storyId, settings)).toHaveLength(1);
     expect(mocks.download).toHaveBeenCalledTimes(1);
   });
@@ -94,7 +94,7 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     await database.db.query("INSERT INTO story_link_sources(story_id,link_id,classification,model_key,model_version,prompt_version,input_hash) VALUES($1,$2,'relevant','test',1,'test','hash')", [story, link]);
     const media = await service.publicationMedia(story, settings);
     expect(media).toHaveLength(1);
-    expect(mocks.download).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://example.org/supplement.png' }), expect.anything());
+    expect(mocks.download).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://example.org/supplement.png' }), expect.anything(), expect.any(AbortSignal));
     await service.releaseStoryMedia(story);
     await database.db.query("UPDATE story_link_sources SET classification='irrelevant' WHERE story_id=$1", [story]);
     expect(await service.publicationMedia(story, settings)).toEqual([]);
@@ -144,7 +144,7 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     expect(await service.publicationMedia(latest, settings)).toHaveLength(1);
     mocks.download.mockClear();
     await database.db.query("UPDATE sources SET access='restricted' WHERE id=$1", [ancestor.source]);
-    await expect(service.publicationMedia(latest, settings)).rejects.toThrow('Private or unknown source access');
+    expect(await service.publicationMedia(latest, settings)).toEqual([]);
     expect(mocks.download).not.toHaveBeenCalled();
   });
 
@@ -221,6 +221,37 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     }
     expect(await service.publicationMedia(outage, settings)).toHaveLength(1);
     expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url)).toEqual(['https://example.org/alderon-outage.png']);
+  });
+
+  it('falls back after a stalled comparison, releases cleanly, and prepares the next story without a late cache entry', async () => {
+    const expired = await story();
+    await report(expired, 'deadline', 'mention');
+    const next = await story();
+    await report(next, 'next', 'mention');
+    const previousTimeout = process.env.MEDIA_PREPARATION_TIMEOUT_MS;
+    let entered: () => void = () => {};
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    let finish: (items: MediaCandidate[]) => void = () => {};
+    mocks.dedup.mockImplementationOnce(() => new Promise<MediaCandidate[]>(resolve => { finish = resolve; entered(); }));
+    vi.stubEnv('MEDIA_PREPARATION_TIMEOUT_MS', '100');
+    vi.useFakeTimers();
+    try {
+      const task = service.publicationMedia(expired, settings);
+      await ready;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await task).toEqual([]);
+      await service.releaseStoryMedia(expired);
+      expect(await service.publicationMedia(next, settings)).toHaveLength(1);
+      finish([{ type: 'image', mimeType: 'image/png', data: Buffer.from('late') }]);
+      await vi.advanceTimersByTimeAsync(0);
+      const { readFile } = await import('node:fs/promises');
+      await expect(readFile(new URL(`../../tmp/media-cache/${expired}/manifest.json`, import.meta.url)))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+      expect(mocks.relevance).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      vi.stubEnv('MEDIA_PREPARATION_TIMEOUT_MS', previousTimeout);
+    }
   });
 
 });
