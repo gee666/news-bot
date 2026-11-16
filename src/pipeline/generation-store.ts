@@ -32,16 +32,8 @@ const contextSpansSchema = z.object({ contextSpans: z.array(z.object({
 const linkSchema = z.object({ url: z.string(), classification: z.enum(['relevant', 'uncertain']),
   access: accessSchema.optional(), original_url: z.string().nullable().optional(), source_name: z.string().optional() });
 export type Story = z.infer<typeof storySchema>;
-const supplementaryReportSchema = z.object({
-  media: z.array(z.unknown()).nullish(),
-  source_id: z.uuid(), revision_id: z.uuid(), text: z.string(), source_name: z.string(),
-  original_url: z.string().nullable(), access: accessSchema,
-  published_at: timestampSchema.nullable(), collected_at: timestampSchema.nullable(),
-});
-export type SupplementaryReport = z.infer<typeof supplementaryReportSchema>;
 export interface StoryInput {
   story: Story; mentions: z.infer<typeof mentionSchema>[]; links: z.infer<typeof linkSchema>[];
-  supplementary_reports?: SupplementaryReport[];
   previous_posts?: ThreadPost[];
 }
 
@@ -73,26 +65,9 @@ export async function loadStoryWithQuery(id: string, query: typeof db.query): Pr
     JOIN sources so ON so.id=i.source_id
     JOIN mention_links ml ON ml.mention_id = m.id JOIN item_links l ON l.id = ml.link_id
     WHERE m.story_id IN(SELECT id FROM generation_story_ids) AND ml.classification <> 'irrelevant' AND ${evidenceLinkSql}
-    UNION
-    SELECT l.url, sl.classification, so.access, i.original_url, so.name AS source_name
-    FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-    JOIN item_revisions r ON r.id=l.revision_id
-    JOIN source_items i ON i.id=r.item_id AND (sl.story_id<>$1 OR i.current_revision_id=r.id) JOIN sources so ON so.id=i.source_id
-    WHERE sl.story_id IN(SELECT id FROM generation_story_ids) AND sl.classification='relevant' AND ${evidenceLinkSql}
     ORDER BY classification, url`, [id]);
-  const reports = await query(`${generationThread} SELECT DISTINCT so.id AS source_id, r.id AS revision_id,
-      r.metadata->'media' AS media, r.original_text AS text, so.name AS source_name, i.original_url, so.access, i.published_at, i.collected_at
-    FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-    JOIN item_revisions r ON r.id=l.revision_id
-    JOIN source_items i ON i.id=r.item_id AND (sl.story_id<>$1 OR i.current_revision_id=r.id) JOIN sources so ON so.id=i.source_id
-    WHERE sl.story_id IN(SELECT id FROM generation_story_ids) AND sl.classification='relevant' AND ${evidenceLinkSql}
-      AND NOT EXISTS (SELECT 1 FROM story_mentions m WHERE m.story_id IN(SELECT id FROM generation_story_ids) AND m.revision_id=r.id)
-      AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
-      AND NOT EXISTS (SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
-    ORDER BY i.published_at DESC NULLS LAST, i.collected_at DESC NULLS LAST, r.id`, [id]);
-  const supplementaryReports = z.array(supplementaryReportSchema).parse(reports.rows);
   const previousPosts = await publishedThread(id, query);
-  return { story, previous_posts: previousPosts, ...(supplementaryReports.length ? { supplementary_reports: supplementaryReports } : {}),
+  return { story, previous_posts: previousPosts,
     mentions: z.array(storedMentionSchema).parse(mentions.rows).map(mention => {
     const { parent_text, metadata } = mention;
     const source = { id: mention.id, text: mention.text, access: mention.access, original_url: mention.original_url,
@@ -109,7 +84,6 @@ export function generationHash(input: StoryInput, settings: AppSettings): string
     model: [settings.piProvider, settings.piModel, settings.modelVersion], contentVersion: input.story.content_version,
     content: input.story.meaningful_hash ?? { mentions: input.mentions.map(mention => mention.text) },
     links: input.links.map(link => [link.url, link.classification, link.access, link.original_url, link.source_name]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-    supplementaryReports: (input.supplementary_reports ?? []).map(report => JSON.stringify(report)).sort(),
     previousPosts: generationHistory(input.previous_posts ?? []),
     excerpt: input.story.chosen_excerpt,
     headlineContext: [...new Set(input.mentions.map(mention => JSON.stringify({

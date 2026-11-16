@@ -77,6 +77,19 @@ describe.skipIf(!url)('read-source publication and diagnostic history', () => {
     expect((await database.db.query('SELECT evidence_id FROM story_evidence WHERE story_id=$1', [current.id])).rows).toHaveLength(9);
   });
 
+  it('cites an image-only Telegram report without requiring a caption', async () => {
+    const current = await story();
+    await database.db.query(`UPDATE item_revisions r SET original_text='',normalized_text=''
+      FROM story_mentions m WHERE m.revision_id=r.id AND m.story_id=$1`, [current.id]);
+    await database.db.query(`UPDATE story_mentions SET text=$2,
+      metadata='{"extractionKind":"image"}'::jsonb WHERE story_id=$1`,
+    [current.id, '[Image-derived report; not a source-text quotation]\nThe chart reports a new research finding.']);
+    const sources = (await snapshotFor(database.db, current)).sources;
+    expect(sources).toContainEqual(expect.objectContaining({
+      url: 'https://t.me/reporter/1', classification: 'relevant', access: 'public',
+    }));
+  });
+
   it('lets a read relevant primary assessment supersede an earlier irrelevant link decision', async () => {
     const current = await story();
     await database.db.query("UPDATE mention_links ml SET classification='irrelevant' FROM item_links l WHERE ml.link_id=l.id AND l.url='https://arxiv.org/abs/2609.16247'");

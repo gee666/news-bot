@@ -83,21 +83,11 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     expect(mocks.download).toHaveBeenCalledTimes(1);
   });
 
-  it('loads relevant supplementary source attachments without requiring story mentions', async () => {
-    const story = await id("INSERT INTO stories(status) VALUES('completed') RETURNING id"); stories.push(story);
-    const source = await id("INSERT INTO sources(connector_type,external_id,name,access) VALUES('feed',$1,'Test','public') RETURNING id", [randomUUID()]);
-    const item = await id('INSERT INTO source_items(source_id,external_id,retention_at) VALUES($1,$2,now()) RETURNING id', [source, randomUUID()]);
-    const revision = await id(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text,metadata)
-      VALUES($1,1,'hash','Test','Test',$2) RETURNING id`, [item, JSON.stringify({ media: [{ type: 'image', url: 'https://example.org/supplement.png' }] })]);
-    await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
-    const link = await id("INSERT INTO item_links(revision_id,url,anchor_text,start_offset,end_offset) VALUES($1,'https://example.org/story','story',0,5) RETURNING id", [revision]);
-    await database.db.query("INSERT INTO story_link_sources(story_id,link_id,classification,model_key,model_version,prompt_version,input_hash) VALUES($1,$2,'relevant','test',1,'test','hash')", [story, link]);
-    const media = await service.publicationMedia(story, settings);
-    expect(media).toHaveLength(1);
-    expect(mocks.download).toHaveBeenCalledWith(expect.objectContaining({ url: 'https://example.org/supplement.png' }), expect.anything(), expect.any(AbortSignal));
-    await service.releaseStoryMedia(story);
-    await database.db.query("UPDATE story_link_sources SET classification='irrelevant' WHERE story_id=$1", [story]);
-    expect(await service.publicationMedia(story, settings)).toEqual([]);
+  it('ignores legacy source-only attachments even when marked relevant', async () => {
+    const storyId = await story();
+    await report(storyId, 'supplement', 'supplement');
+    expect(await service.publicationMedia(storyId, settings)).toEqual([]);
+    expect(mocks.download).not.toHaveBeenCalled();
   });
 
   it('excludes expired and superseded research attachments', async () => {
@@ -114,7 +104,7 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     expect(mocks.download.mock.calls[0]?.[0].url).toBe('https://example.org/0.png');
   });
 
-  it('collects distinct URLs from every ancestor, including historical mention and supplement revisions', async () => {
+  it('collects historical report and research URLs but ignores legacy source-only revisions', async () => {
     const oldest = await story(); const middle = await story(oldest); const latest = await story(middle);
     const oldMention = await report(oldest, 'old-mention', 'mention');
     const oldSupplement = await report(oldest, 'old-supplement', 'supplement');
@@ -130,10 +120,10 @@ describe.skipIf(!url)('story media current-evidence selection', () => {
     await database.db.query("INSERT INTO story_evidence(story_id,evidence_id,role,relevance) VALUES($1,$2,'primary','relevant')", [oldest, evidence]);
     await database.db.query("UPDATE evidence_documents SET fetched_at=now()-interval '8 days' WHERE id=$1", [evidence]);
     const result = await service.publicationMedia(latest, settings);
-    expect(result).toHaveLength(5);
+    expect(result).toHaveLength(4);
     expect(mocks.download.mock.calls.map(([descriptor]) => descriptor.url).sort()).toEqual([
       'https://example.org/ancestor-research.mp4', 'https://example.org/latest.png', 'https://example.org/middle.png',
-      'https://example.org/old-mention.png', 'https://example.org/old-supplement.png',
+      'https://example.org/old-mention.png',
     ]);
   });
 

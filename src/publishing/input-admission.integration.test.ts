@@ -107,7 +107,7 @@ describe.skipIf(!url)('publication input baselines in PostgreSQL', () => {
     await revise(input.item, 'Model released with newly announced training results');
     expect(await admission.publicationInputAdmission(draft, '-100123', settings)).toEqual({ allowed: true });
   });
-  it('admits recent source-only coverage, including additions still on a queued ancestor', async () => {
+  it('rejects retired source-only coverage, including additions still on a queued ancestor', async () => {
     const prior = await story(); const input = await report(prior);
     await published(prior, [input.origin]);
     const draft = await fork(prior);
@@ -115,7 +115,36 @@ describe.skipIf(!url)('publication input baselines in PostgreSQL', () => {
     expect(await admission.publicationInputAdmission(draft, '-100123', settings))
       .toEqual({ allowed: false, reason: 'no_new_source_input' });
     expect(await admission.publicationInputAdmission(draft, '-100123', settings, undefined, { storyIds: [prior] }))
-      .toEqual({ allowed: true });
+      .toEqual({ allowed: false, reason: 'no_new_source_input' });
+  });
+  it('does not let a zero-event meme with a hidden channel footer revive eight unrelated published stories', async () => {
+    const { reportBoundary } = await import('./input-evidence.js');
+    const targets: string[] = [];
+    for (let index = 0; index < 8; index++) {
+      const id = await story(); const input = await report(id);
+      await database.db.query('UPDATE stories SET headline=$2 WHERE id=$1', [id, `Unrelated event ${index}`]);
+      await published(id, [input.origin]); targets.push(id);
+    }
+    const meme = await report(targets[0] ?? '', 1, true);
+    const footer = 'https://t.me/meme_channel';
+    const raw = `![Monday meme](https://example.org/meme.jpg)\n[ ](${footer})`;
+    await database.db.query(`UPDATE item_revisions SET original_text=$2,normalized_text=$2,
+      metadata='{"pipelineExtraction":[]}'::jsonb WHERE id=$1`, [meme.revision, raw]);
+    await database.db.query('UPDATE item_links SET url=$2 WHERE revision_id=$1', [meme.revision, footer]);
+    for (const id of targets.slice(1)) await database.db.query(`INSERT INTO story_link_sources
+      (link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
+      SELECT id,$2,'relevant','fixture',1,'fixture','fixture' FROM item_links WHERE revision_id=$1`, [meme.revision, id]);
+    const retired = reportBoundary([{ item_id: meme.item, content_hash: 'original', text: '', urls: [footer],
+      source_time: new Date(), collected_text: raw, collected_urls: [footer] }]);
+    for (const id of targets) {
+      const boundary = await admission.publicationInputBoundary(id);
+      expect(boundary.inputs.some(input => input.itemId === meme.item)).toBe(false);
+      const frozen = { ...boundary, inputs: [...boundary.inputs, ...retired.inputs] };
+      expect(await admission.publicationInputAdmission(id, '-100123', settings))
+        .toEqual({ allowed: false, reason: 'no_new_source_input' });
+      expect(await admission.publicationInputAdmission(id, '-100123', settings, undefined, { boundary: frozen }))
+        .toEqual({ allowed: false, reason: 'no_new_source_input' });
+    }
   });
   it('does not infer historical ownership from extraction time when an old mention is moved in later', async () => {
     const prior = await story(); const original = await report(prior);
@@ -151,7 +180,7 @@ describe.skipIf(!url)('publication input baselines in PostgreSQL', () => {
     const prior = await story(); const original = await report(prior);
     await published(prior, [original.origin]);
     const draft = await fork(prior);
-    await report(draft, 300, true);
+    await report(draft, 300);
     expect(await admission.publicationInputAdmission(draft, '-100123', settings))
       .toEqual({ allowed: false, reason: 'stale_source_input' });
   });

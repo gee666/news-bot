@@ -5,7 +5,7 @@ import { unpublished } from './generation-store.js';
 import { getSettings, type AppSettings } from '../settings.js';
 import { publicationInputAdmission } from '../publishing/input-admission.js';
 
-/** A source-only enrichment creates a new edition, never a content edit of a sent post.
+/** New or meaningfully changed reports create an edition, never a content edit of a sent post.
  * Move real reports rather than inventing extracted quotes. Durable thread edges keep
  * the sent edition's ancestry even when its last report moves to the draft. */
 export async function forkPublishedRefresh(storyId: string, settings?: AppSettings): Promise<string | null> {
@@ -26,8 +26,6 @@ export async function forkPublishedRefresh(storyId: string, settings?: AppSettin
     await client.query(`SELECT i.id FROM source_items i WHERE EXISTS(
       SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
       WHERE m.story_id=ANY($1::uuid[]) AND r.item_id=i.id)
-      OR EXISTS(SELECT 1 FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-        JOIN item_revisions r ON r.id=l.revision_id WHERE sl.story_id=ANY($1::uuid[]) AND r.item_id=i.id)
       ORDER BY i.id FOR SHARE`, [ownedStoryIds]);
     const destinations = await client.query<{ destination_id: string }>(`SELECT DISTINCT destination_id FROM publications
       WHERE story_id=$1 AND message_id IS NOT NULL AND published_at IS NOT NULL`, [latest]);
@@ -57,13 +55,6 @@ export async function forkPublishedRefresh(storyId: string, settings?: AppSettin
       await client.query(`UPDATE story_mentions SET story_id=$2,metadata=metadata||jsonb_build_object('previous_story_id',$1::text)
         WHERE story_id=$1`, [latest, draft]);
     }
-    await client.query(`INSERT INTO story_link_sources(link_id,story_id,classification,model_key,model_version,prompt_version,input_hash,assessed_at)
-      SELECT DISTINCT ON(link_id) link_id,$2,classification,model_key,model_version,prompt_version,input_hash,assessed_at
-      FROM story_link_sources WHERE story_id=ANY($1::uuid[])
-      ORDER BY link_id,array_position(ARRAY['irrelevant','uncertain','relevant'],classification) DESC,assessed_at DESC
-      ON CONFLICT(link_id,story_id) DO UPDATE SET classification=EXCLUDED.classification,model_key=EXCLUDED.model_key,
-        model_version=EXCLUDED.model_version,prompt_version=EXCLUDED.prompt_version,input_hash=EXCLUDED.input_hash,assessed_at=EXCLUDED.assessed_at`,
-    [[storyId, latest], draft]);
     await client.query(`UPDATE stories SET status='processing',interest_stale=true,content_version=content_version+1,
       headline=NULL,summary=NULL,translated_excerpt=NULL,researched=false,updated_at=now() WHERE id=$1`, [draft]);
     await client.query(`INSERT INTO operational_state(key,value) VALUES($1,jsonb_build_object('storyId',$2::text))

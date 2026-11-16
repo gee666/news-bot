@@ -13,9 +13,7 @@ export async function expireStaleStoryWork(id: string, settings: AppSettings, ba
       OR EXISTS(SELECT 1 FROM processing_batches p WHERE p.manual_operation_id IS NOT NULL AND p.completed_at IS NULL AND (
         EXISTS(SELECT 1 FROM stage_state st WHERE st.batch_id=p.id AND st.story_id=s.id)
         OR EXISTS(SELECT 1 FROM story_mentions m JOIN batch_items b ON b.revision_id=m.revision_id
-          WHERE b.batch_id=p.id AND m.story_id=s.id)
-        OR EXISTS(SELECT 1 FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-          JOIN batch_items b ON b.revision_id=l.revision_id WHERE b.batch_id=p.id AND sl.story_id=s.id))))`, [id, batchId]);
+          WHERE b.batch_id=p.id AND m.story_id=s.id))))`, [id, batchId]);
     if (protectedStory.rows.length) return false;
     const query = client.query.bind(client);
     const boundary = await publicationInputBoundary(id, query);

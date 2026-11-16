@@ -19,10 +19,10 @@ vi.mock('./generation-model.js', async original => ({ ...await original<typeof i
     const { modelResult } = await import('./generation.test-helpers.js');
     const raw: unknown = JSON.parse(request.prompt);
     const links = z.object({ message: z.string(), links: z.array(z.object({ id:z.uuid() })),
-      targets: z.array(z.object({ id:z.uuid(), reports:z.array(z.object({ text:z.string() })) })) }).safeParse(raw);
+      targets: z.array(z.object({ id:z.uuid(), text:z.string() })) }).safeParse(raw);
     if (links.success) {
       model.linksCalls++;
-      return modelResult({ associations: links.data.targets.filter(target=>target.reports.some(report=>report.text.includes('Compiler 2')))
+      return modelResult({ associations: links.data.targets.filter(target=>target.text.includes('Compiler 2'))
         .flatMap(target=>links.data.links.map(link=>({linkId:link.id,targetId:target.id,classification:'relevant'}))) });
     }
     throw new Error('Pi must not handle grouping');
@@ -225,50 +225,23 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
       .toEqual([{story_id:shutdown}]);
     expect(await (await import('./story-relations.js')).relatedStoryIds(discovery)).toEqual([shutdown]);
   });
-  it('adds a source-only recap to stories arriving later, without a separate post or confirmation calls', async () => {
+  it('does not attach empty-extraction recap links when matching stories arrive later', async () => {
     const recap=await intake(['Ссылки на релизы Compiler 2.']);
     const revision=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[recap]);
     const link=await one("INSERT INTO item_links(revision_id,url,anchor_text) VALUES($1,'https://example.org/recap','Compiler 2') RETURNING id",[revision]);
     await processIntake(recap);
     expect(model.linksCalls).toBe(0);
     await processIntake(await intake(['Acme выпустила Compiler 2.','Beta выпустила Database 3.']));
-    const { associateSourceLinks }=await import('./source-links.js');
-    await associateSourceLinks(settings); await associateSourceLinks(settings);
-    expect(model.linksCalls).toBe(1);
-    const oldStage=await one(`INSERT INTO stage_state(batch_id,revision_id,stage,status,next_retry_at)
-      VALUES($1,$2,'source_links:item-links-v1:obsolete:m1','waiting',now()-interval '1 hour') RETURNING id`,[recap,revision]);
-    await database.db.query("UPDATE processing_batches SET status='waiting',completed_at=NULL WHERE id=$1",[recap]);
-    // The associations committed, but the follow-up acknowledgement was interrupted.
-    const currentStage=await one(`UPDATE stage_state SET status='waiting',next_retry_at=now()-interval '1 hour',error_code='transient'
-      WHERE revision_id=$1 AND stage=(SELECT processing_key FROM source_link_processing WHERE revision_id=$1) RETURNING id`,[revision]);
-    await associateSourceLinks(settings);
-    await (await import('./item-failures.js')).completeBatchItems(recap);
-    expect((await database.db.query('SELECT status FROM stage_state WHERE id=$1',[oldStage])).rows).toEqual([{status:'skipped'}]);
-    expect((await database.db.query('SELECT status,output,next_retry_at,error_code FROM stage_state WHERE id=$1',[currentStage])).rows)
-      .toEqual([{status:'completed',output:true,next_retry_at:null,error_code:null}]);
-    expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[recap])).rows).toEqual([{status:'completed'}]);
-    expect((await database.db.query('SELECT id FROM story_mentions WHERE revision_id=$1',[revision])).rows).toHaveLength(0);
-    const compiler=await one("SELECT id FROM stories WHERE chosen_excerpt LIKE '%Compiler 2%'");
-    expect((await database.db.query('SELECT story_id,classification FROM story_link_sources WHERE link_id=$1',[link])).rows)
-      .toEqual([{story_id:compiler,classification:'relevant'}]);
-    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
-    await database.db.query('UPDATE stories SET interest_stale=false WHERE id=$1', [compiler]);
-    await database.db.query('DELETE FROM operational_state WHERE key=$1', [`digest_refresh:${compiler}`]);
     await (await import('./source-links.js')).classifyItemLinks(revision, settings, {
-      id: currentStage, attempt: 1, batchId: recap, revisionId: revision, storyId: null,
+      id: randomUUID(), attempt: 1, batchId: recap, revisionId: revision, storyId: null,
     });
-    expect((await database.db.query('SELECT interest_stale FROM stories WHERE id=$1', [compiler])).rows)
-      .toEqual([{ interest_stale: false }]);
-    expect((await database.db.query('SELECT 1 FROM operational_state WHERE key=$1', [`digest_refresh:${compiler}`])).rows).toHaveLength(0);
-    const text=(await database.db.query<{text:string}>('SELECT text FROM story_mentions WHERE story_id=$1',[compiler])).rows[0]?.text;
-    if (!text) throw new Error('Missing compiler report');
-    await database.db.query("UPDATE story_mentions SET text='Different product announcement.' WHERE story_id=$1",[compiler]);
-    await associateSourceLinks(settings);
-    expect((await database.db.query('SELECT story_id FROM story_link_sources WHERE link_id=$1',[link])).rows).toHaveLength(0);
-    await database.db.query('UPDATE story_mentions SET text=$2 WHERE story_id=$1',[compiler,text]);
-    await associateSourceLinks(settings); await associateSourceLinks(settings);
-    expect(model.linksCalls).toBe(4);
-    expect((await database.db.query('SELECT story_id FROM story_link_sources WHERE link_id=$1',[link])).rows).toEqual([{story_id:compiler}]);
+    expect(model.linksCalls).toBe(0);
+    expect((await database.db.query('SELECT id FROM story_mentions WHERE revision_id=$1',[revision])).rows).toEqual([]);
+    expect((await database.db.query('SELECT story_id FROM story_link_sources WHERE link_id=$1',[link])).rows).toEqual([]);
+    expect((await database.db.query('SELECT 1 FROM source_link_processing WHERE revision_id=$1',[revision])).rows).toEqual([]);
+    expect((await database.db.query("SELECT 1 FROM stage_state WHERE revision_id=$1 AND stage LIKE 'source_links:%'",[revision])).rows).toEqual([]);
+    expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[recap])).rows).toEqual([{status:'completed'}]);
+    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
   });
   it('shortlists twenty ordinary candidates while retaining source, link and historical anchors', async () => {
     const { applyExtraction } = await import('./extraction-store.js');

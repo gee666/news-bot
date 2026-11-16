@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { db } from '../db.js';
 import type { AppSettings } from '../settings.js';
+import { extractionImages } from '../media/extraction-images.js';
 import { generationClient, recordGenerationFailure, requireInferenceApproval } from './generation-model.js';
 
 import { stage } from './state.js';
@@ -10,7 +11,8 @@ import { classifyItemLinks } from './source-links.js';
 import { existingItemFailures, itemWork } from './item-failures.js';
 
 export { validSpans } from './extraction-store.js';
-const revisionSchema = z.object({ id: z.uuid(), original_text: z.string(), access: z.string() });
+const revisionSchema = z.object({ id: z.uuid(), original_text: z.string(), access: z.string(),
+  metadata: z.record(z.string(), z.unknown()), source_metadata: z.record(z.string(), z.unknown()) });
 export async function extractBatch(batchId: string, settings: AppSettings,
   onExtracted?: (revisionId: string) => Promise<void>): Promise<void> {
   await db.query(`UPDATE batch_items b SET status='failed',disposition_reason='superseded_revision'
@@ -21,7 +23,7 @@ export async function extractBatch(batchId: string, settings: AppSettings,
     FROM item_revisions r JOIN source_items i ON i.id=r.item_id
     WHERE s.batch_id=$1 AND s.revision_id=r.id AND i.current_revision_id IS DISTINCT FROM r.id
       AND s.status IN ('pending','waiting','running')`, [batchId]);
-  const result = await db.query(`SELECT r.id,r.original_text,s.access FROM batch_items b JOIN item_revisions r ON r.id=b.revision_id
+  const result = await db.query(`SELECT r.id,r.original_text,r.metadata,s.metadata AS source_metadata,s.access FROM batch_items b JOIN item_revisions r ON r.id=b.revision_id
     JOIN source_items i ON i.id=r.item_id JOIN sources s ON s.id=i.source_id WHERE b.batch_id=$1 AND i.current_revision_id=r.id
       AND b.disposition_reason IS DISTINCT FROM 'outside_collection_window'
     ORDER BY (b.status IN ('pending','processing')) DESC,
@@ -32,13 +34,14 @@ export async function extractBatch(batchId: string, settings: AppSettings,
   for (const revision of z.array(revisionSchema).parse(result.rows)) {
     await itemWork(batchId, revision.id, failed, async () => {
       const committed = await committedExtraction(revision.id);
-      if (committed !== null) await applyExtraction(batchId, revision.id, revision.original_text, committed);
+      if (committed !== null) await applyExtraction(batchId, revision.id, revision.original_text, committed, true);
       else await stage(batchId, { revisionId: revision.id }, `extract:${EXTRACTION_VERSION}`, settings, eventsSchema, async context => {
         await requireInferenceApproval([revision.access], context.id);
+        const images = await extractionImages(revision, context.id);
         const events = await extractEvents(revision.original_text, await generationClient(settings),
-          { operationId: context.id, attempt: context.attempt }, recordGenerationFailure, settings.interestProfile);
-        await applyExtraction(batchId, revision.id, revision.original_text, events);
-        return events;
+          { operationId: context.id, attempt: context.attempt }, recordGenerationFailure, settings.interestProfile,
+          ...(images.length ? [images] as const : []));
+        return applyExtraction(batchId, revision.id, revision.original_text, events, true);
       });
       // Successful extraction is immutable, even when another task failed before the checkpoint.
       await db.query(`UPDATE stage_state SET status='skipped',next_retry_at=NULL,updated_at=now()

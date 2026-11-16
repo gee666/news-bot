@@ -14,6 +14,22 @@ it('keeps news eligibility separate from personal interest scoring and versioned
   expect(Object.isFrozen(jevTemplates.news_eligibility.questions.eligible)).toBe(true);
 });
 
+it('requires a specific reported event association for links and rejects footer or broad overlap', () => {
+  const template = jevTemplates.link_relevance;
+  const question = template.questions.relevance;
+  expect(template.version).toBe('link-relevance-v4');
+  expect(Object.keys(question.criteria)).toEqual(['relevant', 'irrelevant', 'uncertain']);
+  expect(question.instructions).toContain('specific reported event');
+  expect(question.instructions).toContain('Shared vendor, product family, category, domain or broad topic alone is insufficient');
+  expect(question.instructions).toContain('Channel footers, subscription links, social profiles, menus and other navigation are irrelevant');
+  expect(question.instructions).toContain('a link attached to another item is irrelevant to this target');
+  expect(question.instructions).toContain('Do not assume every product from an organizer appears in its recap');
+  expect(question.instructions).toContain('not uncertain');
+  expect(question.instructions).toContain('do not fetch the link or infer unseen page contents');
+  expect(question.criteria.relevant).toContain('event reported in this story');
+  expect(Object.hasOwn(jevTemplates, 'source_link_role')).toBe(false);
+});
+
 it('versions release-facet grouping and compares one complete pair rather than isolated wording', () => {
   const template = jevTemplates.duplicate;
   const question = template.questions.relation;

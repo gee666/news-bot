@@ -31,7 +31,6 @@ vi.mock('./extraction.js', () => ({ extractBatch: async (batchId: string, settin
 vi.mock('./matching.js', () => ({ matchBatch: vi.fn() }));
 vi.mock('./revisions.js', () => ({ reconcileEdits: vi.fn() }));
 vi.mock('./consolidation.js', () => ({ consolidateStories: vi.fn() }));
-vi.mock('./source-links.js', () => ({ associateSourceLinks: vi.fn(), SOURCE_MESSAGES_PER_PASS: 50 }));
 vi.mock('./judgments.js', () => ({ Judgments: class { async close() {} } }));
 vi.mock('./vectors.js', () => ({ Vectors: class { async close() {} } }));
 const url = process.env.TEST_DATABASE_URL;
@@ -92,7 +91,8 @@ describe.skipIf(!url)('cooperative batch checkpoints with PostgreSQL', () => {
     const { withLease } = await import('./lease.js');
     expect(await withLease('news-bot-pipeline', async () => { mocks.competitorRan = true; })).toBe(true);
     expect(mocks.competitorRan).toBe(true);
-    await runBatch(); expect(mocks.secondCalls).toBe(0); // Even a checkpoint's future deadline remains enforced.
+    // A batch-level checkpoint cannot postpone a pending stage with no unit cooldown.
+    await runBatch(); expect(mocks.secondCalls).toBe(1);
     await database.db.query("UPDATE processing_batches SET next_retry_at=now()-interval '1 second' WHERE id=$1", [batchId]);
     expect(await runBatch()).toBe(true);
     expect(mocks.firstCalls).toBe(1); expect(mocks.secondCalls).toBe(1);

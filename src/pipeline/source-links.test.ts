@@ -1,116 +1,102 @@
 import { randomUUID } from 'node:crypto';
 import { beforeEach, expect, it, vi } from 'vitest';
+import type { StructuredRequest } from '../models/structured.js';
 import { defaultSettings } from '../settings.js';
-const mocks = vi.hoisted(() => ({ query: vi.fn(), retained: vi.fn(), generate: vi.fn(), currentInput: vi.fn() }));
-vi.mock('../db.js', () => ({ db: { query: mocks.query },
-  transaction: (run: (client: { query: typeof mocks.query }) => Promise<void>) => run({ query: mocks.query }),
+import type { StageContext } from './state.js';
+
+type Decision = { associations: { linkId: string; targetId: string; classification: 'relevant' | 'uncertain' | 'irrelevant' }[] };
+const mocks = vi.hoisted(() => ({
+  query: vi.fn(), transaction: vi.fn(),
+  generate: vi.fn<(generator: unknown, request: StructuredRequest<Decision>, context: unknown, failure: unknown) => Promise<{ value: Decision }>>(),
 }));
-vi.mock('./matching.js', () => ({ retainedStories: mocks.retained }));
+vi.mock('../db.js', () => ({ db: { query: mocks.query }, transaction: mocks.transaction }));
 vi.mock('../models/index.js', () => ({ generateStructured: mocks.generate }));
 vi.mock('./generation-model.js', () => ({ generationClient: vi.fn(), recordGenerationFailure: vi.fn(), requireInferenceApproval: vi.fn() }));
-vi.mock('./privacy.js', () => ({ approveRemoteInput: vi.fn() }));
-vi.mock('./matching-group-input.js', async original => ({
-  ...await original<typeof import('./matching-group-input.js')>(), currentMatchingInput: mocks.currentInput,
-}));
-import { associateSourceLinks, classifyItemLinks } from './source-links.js';
+import { requireInferenceApproval } from './generation-model.js';
+import { classifyItemLinks } from './source-links.js';
+
+const revisionId = randomUUID();
+const context: StageContext = { id: randomUUID(), attempt: 1, batchId: null, revisionId, storyId: null };
+const mentions = [
+  { id: randomUUID(), text: 'Acme released Compiler 2.' },
+  { id: randomUUID(), text: 'Beta released Database 3.' },
+];
+const links = [
+  { id: randomUUID(), url: 'https://example.org/compiler-2', anchor_text: 'Compiler 2 announcement' },
+  { id: randomUUID(), url: 'https://example.org/channel', anchor_text: 'Subscribe to the channel' },
+];
 beforeEach(() => {
   vi.resetAllMocks();
-  mocks.retained.mockResolvedValue([]);
-});
-it('defers catalogue-wide enrichment while current intake awaits extraction', async () => {
-  mocks.query.mockResolvedValue({ rows: [{ pending: true }] });
-  await associateSourceLinks(defaultSettings);
-  expect(mocks.query).toHaveBeenCalledOnce();
-  expect(mocks.retained).not.toHaveBeenCalled();
-});
-it('resumes catalogue enrichment once extraction catches up', async () => {
-  mocks.query.mockResolvedValueOnce({ rows: [{ pending: false }] }).mockResolvedValue({ rows: [] });
-  await associateSourceLinks(defaultSettings);
-  expect(mocks.retained).toHaveBeenCalledOnce();
-  expect(mocks.query).toHaveBeenCalledTimes(2);
-});
-
-it.each([
-  [null, 'irrelevant', false],
-  ['irrelevant', null, false],
-  ['irrelevant', 'irrelevant', false],
-  [null, 'uncertain', false],
-  ['uncertain', null, false],
-  ['irrelevant', 'uncertain', false],
-  ['uncertain', 'irrelevant', false],
-  ['uncertain', 'uncertain', false],
-  [null, null, false],
-  [null, 'relevant', true],
-  ['irrelevant', 'relevant', true],
-  ['uncertain', 'relevant', true],
-  ['relevant', null, true],
-  ['relevant', 'irrelevant', true],
-  ['relevant', 'uncertain', true],
-  ['relevant', 'relevant', false],
-] as const)('queues refresh for source-link %s -> %s only when relevance changes: %s', async (previous, next, refresh) => {
-  const revisionId = randomUUID();
-  const linkId = randomUUID();
-  const storyId = randomUUID();
-  const story = { id: storyId, text: 'Existing story', fingerprint: 'unchanged', reports: [] };
-  mocks.retained.mockResolvedValue([story]);
-  mocks.currentInput.mockResolvedValue(story);
-  mocks.generate.mockResolvedValue({ value: { associations: next ? [{ linkId, targetId: storyId, classification: next }] : [] } });
-  mocks.query
-    .mockResolvedValueOnce({ rows: [{ original_text: 'Source-only post', access: 'public' }] })
-    .mockResolvedValueOnce({ rows: [{ id: linkId, url: 'https://example.org/source', anchor_text: null }] })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: [{ id: randomUUID() }] })
-    .mockResolvedValueOnce({ rows: [{ exists: true }] })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: previous ? [{ link_id: linkId, story_id: storyId, classification: previous }] : [] })
-    .mockResolvedValue({ rows: [] });
-
-  await classifyItemLinks(revisionId, defaultSettings, {
-    id: randomUUID(), attempt: 1, batchId: null, revisionId, storyId: null,
-  });
-
-  const refreshQueries = mocks.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO operational_state'));
-  expect(refreshQueries).toHaveLength(refresh ? 1 : 0);
-  if (refresh) expect(refreshQueries[0]?.[1]).toEqual([[storyId]]);
-  const inserts = mocks.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO story_link_sources'));
-  expect(inserts).toHaveLength(next ? 1 : 0);
-  if (next) expect(inserts[0]?.[1]).toEqual(expect.arrayContaining([linkId, storyId, next]));
-});
-
-it.each([false, true])('revalidates the complete source-only group before writes, changed: %s', async changed => {
-  const revisionId = randomUUID(), linkId = randomUUID(), storyId = randomUUID(), siblingId = randomUUID();
-  const story = { id: storyId, storyIds: [siblingId, storyId], retentionDays: 7,
-    text: 'Release pricing\n\nRelease benchmarks', fingerprint: 'full-group-fingerprint',
-    reports: ['Release pricing', 'Release benchmarks'].map(text => ({ text, sourceUrl: null, links: [] })) };
-  mocks.retained.mockResolvedValue([story]);
-  mocks.currentInput.mockResolvedValue({ ...story, fingerprint: changed ? 'changed-member' : story.fingerprint });
-  mocks.generate.mockResolvedValue({ value: { associations: [{ linkId, targetId: storyId, classification: 'relevant' }] } });
+  mocks.transaction.mockImplementation(run => run({ query: mocks.query }));
   mocks.query.mockImplementation(async (sql: string) => {
-    if (sql.includes('SELECT r.original_text')) return { rows: [{ original_text: 'Source-only recap', access: 'public' }] };
-    if (sql.includes('SELECT id,url,anchor_text')) return { rows: [{ id: linkId, url: 'https://example.org/source', anchor_text: null }] };
+    if (sql.includes('SELECT id,text FROM story_mentions')) return { rows: mentions };
+    if (sql.includes('SELECT r.original_text')) return { rows: [{ original_text: 'Two releases. Subscribe below.', access: 'public' }] };
+    if (sql.includes('SELECT id,url,anchor_text')) return { rows: links };
     if (sql.includes('SELECT 1 FROM source_items')) return { rows: [{ exists: true }] };
     return { rows: [] };
   });
-  const { approveRemoteInput } = await import('./privacy.js');
-  const run = classifyItemLinks(revisionId, defaultSettings, {
-    id: randomUUID(), attempt: 1, batchId: null, revisionId, storyId: null,
-  });
-  if (changed) await expect(run).rejects.toThrow('Link target changed');
-  else await run;
+  mocks.generate.mockResolvedValue({ value: { associations: [] } });
+});
 
-  expect(mocks.currentInput).toHaveBeenCalledExactlyOnceWith(story, { query: mocks.query });
-  for (const id of story.storyIds) expect(approveRemoteInput).toHaveBeenCalledWith(
-    'https://api.openai.com', expect.any(String), { storyId: id });
-  const prompt = JSON.parse(mocks.generate.mock.calls[0]?.[1].prompt);
-  expect(prompt.targets).toEqual([{ id: storyId, reports: story.reports }]);
-  const calls = mocks.query.mock.calls;
-  const membershipLock = calls.findIndex(([sql]) => sql.includes('pg_advisory_xact_lock'));
-  const sourceLock = calls.findIndex(([sql]) => sql.includes('ORDER BY i.id FOR SHARE'));
-  expect(membershipLock).toBeGreaterThanOrEqual(0);
-  expect(sourceLock).toBeGreaterThan(membershipLock);
-  expect(calls[sourceLock]?.[1]).toEqual([revisionId, [siblingId, storyId]]);
-  expect(mocks.query.mock.invocationCallOrder[sourceLock]).toBeLessThan(mocks.currentInput.mock.invocationCallOrder[0]!);
-  expect(calls.filter(([sql]) => /INSERT INTO (story_link_sources|source_link_processing)/u.test(sql)))
-    .toHaveLength(changed ? 0 : 2);
+it('stops empty extraction before link lookup, privacy approval, inference or any writes', async () => {
+  mocks.query.mockResolvedValue({ rows: [] });
+  await classifyItemLinks(revisionId, defaultSettings, context);
+  expect(mocks.query).toHaveBeenCalledExactlyOnceWith(
+    'SELECT id,text FROM story_mentions WHERE revision_id=$1 ORDER BY ordinal', [revisionId]);
+  expect(requireInferenceApproval).not.toHaveBeenCalled();
+  expect(mocks.generate).not.toHaveBeenCalled();
+  expect(mocks.transaction).not.toHaveBeenCalled();
+});
+
+it('does no model work when extracted news has no evidence links', async () => {
+  mocks.query.mockResolvedValueOnce({ rows: mentions })
+    .mockResolvedValueOnce({ rows: [{ original_text: 'Release.', access: 'public' }] })
+    .mockResolvedValueOnce({ rows: [] });
+  await classifyItemLinks(revisionId, defaultSettings, context);
+  expect(requireInferenceApproval).not.toHaveBeenCalled();
+  expect(mocks.generate).not.toHaveBeenCalled();
+  expect(mocks.transaction).not.toHaveBeenCalled();
+});
+
+it('classifies links only for this revision\'s extracted reports, persisting omitted pairs as irrelevant', async () => {
+  const mention = mentions[0]!, link = links[0]!;
+  mocks.generate.mockResolvedValue({ value: { associations: [{ linkId: link.id, targetId: mention.id, classification: 'relevant' }] } });
+  await classifyItemLinks(revisionId, defaultSettings, context);
+
+  expect(requireInferenceApproval).toHaveBeenCalledExactlyOnceWith(['public'], context.id);
+  expect(mocks.generate).toHaveBeenCalledOnce();
+  const request = mocks.generate.mock.calls[0]![1];
+  expect(JSON.parse(request.prompt)).toEqual({ message: 'Two releases. Subscribe below.', links, targets: mentions });
+  expect(request.systemPrompt).toContain('specific event reported by that target');
+  expect(request.systemPrompt).not.toContain('source_only');
+  const inserts = mocks.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO mention_links'));
+  expect(inserts.map(([, params]) => params)).toEqual(mentions.flatMap(target => links.map(candidate => [
+    target.id, candidate.id, target.id === mention.id && candidate.id === link.id ? 'relevant' : 'irrelevant', defaultSettings.modelVersion,
+  ])));
+  expect(mocks.query.mock.calls.some(([sql]) => /story_link_sources|source_link_processing|operational_state|UPDATE stories/u.test(sql))).toBe(false);
+});
+
+it('accepts uncertain attachments without promoting them to relevant', async () => {
+  mocks.generate.mockResolvedValue({ value: { associations: [{ linkId: links[0]!.id, targetId: mentions[0]!.id, classification: 'uncertain' }] } });
+  await classifyItemLinks(revisionId, defaultSettings, context);
+  expect(mocks.query).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO mention_links'),
+    [mentions[0]!.id, links[0]!.id, 'uncertain', defaultSettings.modelVersion]);
+});
+
+it('rejects foreign link/target IDs and duplicate pairs in model output', async () => {
+  await classifyItemLinks(revisionId, defaultSettings, context);
+  const request = mocks.generate.mock.calls[0]![1];
+  const pair = { linkId: links[0]!.id, targetId: mentions[0]!.id, classification: 'relevant' as const };
+  expect(request.validate?.({ associations: [pair] })).toBe(true);
+  expect(request.validate?.({ associations: [{ ...pair, targetId: randomUUID() }] })).toBe(false);
+  expect(request.validate?.({ associations: [{ ...pair, linkId: randomUUID() }] })).toBe(false);
+  expect(request.validate?.({ associations: [pair, pair] })).toBe(false);
+});
+
+it('rejects a superseded source before saving mention links', async () => {
+  mocks.query.mockResolvedValueOnce({ rows: mentions })
+    .mockResolvedValueOnce({ rows: [{ original_text: 'Release.', access: 'public' }] })
+    .mockResolvedValueOnce({ rows: links }).mockResolvedValue({ rows: [] });
+  await expect(classifyItemLinks(revisionId, defaultSettings, context)).rejects.toThrow('Link source changed');
+  expect(mocks.query.mock.calls.some(([sql]) => sql.includes('INSERT INTO mention_links'))).toBe(false);
 });

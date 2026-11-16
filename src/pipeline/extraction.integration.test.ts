@@ -3,10 +3,12 @@ import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppSettings } from '../settings.js';
 import { withProcessingSlice } from './processing-slice.js';
+import { extractionImage, visualEvent } from './extraction-image-fixtures.js';
 
-const mocks = vi.hoisted(() => ({ empty: vi.fn(), clock: 0 }));
+const mocks = vi.hoisted(() => ({ empty: vi.fn(), images: vi.fn(), clock: 0 }));
 vi.mock('./generation-model.js', () => ({ generationClient: async () => ({}), recordGenerationFailure: vi.fn(), requireInferenceApproval: vi.fn() }));
 vi.mock('./extraction-model.js', () => ({ extractEvents: mocks.empty }));
+vi.mock('../media/extraction-images.js', () => ({ extractionImages: mocks.images }));
 const url = process.env.TEST_DATABASE_URL;
 const schema = `extraction_${randomUUID().replaceAll('-', '')}`;
 let admin: pg.Pool;
@@ -38,6 +40,7 @@ describe.skipIf(!url)('extraction scheduling and recovery callbacks', () => {
     settings = await (await import('../settings.js')).getSettings();
   });
   beforeEach(async () => {
+    mocks.images.mockReset().mockResolvedValue([]);
     mocks.clock = 0; mocks.empty.mockReset().mockImplementation(async (text: string) => [{ parts: [{ start: 0, end: text.length }], context: [] }]);
     await database.db.query('TRUNCATE sources,stories,processing_batches CASCADE');
   });
@@ -65,6 +68,48 @@ describe.skipIf(!url)('extraction scheduling and recovery callbacks', () => {
       expect((await database.db.query("SELECT metadata ? 'pipelineExtraction' AS extracted FROM item_revisions WHERE id=$1", [fresh])).rows)
         .toEqual([{ extracted: true }]);
     } finally { now.mockRestore(); vi.stubEnv('PROCESSING_SLICE_MS', '120000'); }
+  });
+  it.each(['', 'Finally!'])('persists image-only and weak-caption facts with provenance, not synthetic source offsets: %s', async caption => {
+    const batchId = await batch(); const revision = await item(batchId, caption);
+    const image = extractionImage(); const event = visualEvent();
+    mocks.images.mockResolvedValue([image]); mocks.empty.mockResolvedValue([event]);
+    const { extractBatch } = await import('./extraction.js');
+    const { committedExtraction } = await import('./extraction-store.js');
+    await extractBatch(batchId, settings);
+    const mention = (await database.db.query('SELECT id,text,start_offset,end_offset,metadata FROM story_mentions WHERE revision_id=$1', [revision])).rows[0];
+    expect(mention).toMatchObject({ start_offset: null, end_offset: null, metadata: { extractionKind: 'image', sourceSpans: [],
+      imageEvidence: 'kind' in event ? event.imageEvidence : [] } });
+    expect(mention.text).toContain('Compiler 2');
+    expect(mention.text).toContain('not a source-text quotation');
+    expect((await database.db.query('SELECT original_text,normalized_text FROM item_revisions WHERE id=$1', [revision])).rows)
+      .toEqual([{ original_text: caption, normalized_text: caption }]);
+    expect(await committedExtraction(revision)).toEqual([event]);
+    const receipt = (await database.db.query('SELECT metadata FROM item_revisions WHERE id=$1', [revision])).rows;
+    mocks.images.mockRejectedValue(new Error('Original media removed after extraction'));
+    await extractBatch(batchId, { ...settings, interestProfile: 'Changed profile' });
+    expect(mocks.images).toHaveBeenCalledOnce(); expect(mocks.empty).toHaveBeenCalledOnce();
+    expect((await database.db.query('SELECT id FROM story_mentions WHERE revision_id=$1', [revision])).rows).toEqual([{ id: mention.id }]);
+    expect((await database.db.query('SELECT metadata FROM item_revisions WHERE id=$1', [revision])).rows).toEqual(receipt);
+  });
+  it('does not commit empty extraction when image preparation fails', async () => {
+    const batchId = await batch(); const revision = await item(batchId, 'Wow!');
+    mocks.images.mockRejectedValue(new Error('Image unavailable'));
+    await (await import('./extraction.js')).extractBatch(batchId, settings);
+    expect(mocks.empty).not.toHaveBeenCalled();
+    expect(await (await import('./extraction-store.js')).committedExtraction(revision)).toBeNull();
+    expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1', [batchId])).rows)
+      .not.toEqual([{ status: 'rejected' }]);
+    expect((await database.db.query("SELECT status FROM stage_state WHERE batch_id=$1 AND stage LIKE 'extract:%'", [batchId])).rows)
+      .toEqual([{ status: 'waiting' }]);
+  });
+  it('keeps the first visual receipt under the revision lock even if a competing extraction differs', async () => {
+    const batchId = await batch(); const revision = await item(batchId, '');
+    const { applyExtraction, committedExtraction } = await import('./extraction-store.js');
+    const first = visualEvent(); await applyExtraction(batchId, revision, '', [first], true);
+    expect(await applyExtraction(batchId, revision, '', [visualEvent('Different model wording.')], true)).toEqual([first]);
+    expect(await committedExtraction(revision)).toEqual([first]);
+    expect((await database.db.query('SELECT text FROM story_mentions WHERE revision_id=$1', [revision])).rows[0]?.text)
+      .not.toContain('Different model wording');
   });
   it('still calls recovery callbacks for committed extraction while links cool down', async () => {
     const batchId = await batch(); const text = 'Committed release.';

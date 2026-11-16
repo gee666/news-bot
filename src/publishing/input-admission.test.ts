@@ -93,13 +93,21 @@ describe('publication input policy', () => {
     const edited = report(item, 'See [report](https://example.org/new) and https://unrelated.example/new');
     expect(policy(edited, old)).toEqual({ allowed: false, reason: 'no_new_source_input' });
   });
-  it('source-only coverage contains relevant URLs, not the report parent text', () => {
+  it('never treats retired source-only URLs as novel input, even in frozen v2 boundaries', () => {
     const old = report(item, '', undefined, undefined, ['https://example.org/relevant']);
     expect(old.inputs.map(input => input.payload)).toEqual([{ kind: 'url', url: 'https://example.org/relevant' }]);
     const metadataEdit = report(item, '', undefined, undefined, ['https://example.org/relevant'], 'changed-parent');
     expect(policy(metadataEdit, old)).toEqual({ allowed: false, reason: 'no_new_source_input' });
-    expect(policy(report(item, '', undefined, undefined,
-      ['https://example.org/relevant', 'https://example.org/new-relevant']), old)).toEqual({ allowed: true });
+    const changed = report(item, '', undefined, undefined,
+      ['https://example.org/relevant', 'https://example.org/new-relevant']);
+    expect(novelPublicationInputs(changed, old)).toEqual([]);
+    expect(policy(changed, old)).toEqual({ allowed: false, reason: 'no_new_source_input' });
+    expect(policy(changed)).toEqual({ allowed: false, reason: 'stale_source_input' });
+    const realReport = report(other);
+    expect(policy(combine(realReport, changed), realReport)).toEqual({ allowed: false, reason: 'no_new_source_input' });
+    const anotherRevision = report(item, 'Real report', undefined, undefined, [], 'other-revision');
+    expect(policy(combine(anotherRevision, changed), anotherRevision))
+      .toEqual({ allowed: false, reason: 'no_new_source_input' });
   });
   it('does not turn re-extraction of existing raw text into new coverage', () => {
     const raw = 'Alpha released. Beta costs 10 million.';
@@ -171,7 +179,7 @@ describe('publication input policy', () => {
     const sql = String(mocks.query.mock.calls.at(-2)?.[0]);
     expect(sql).toContain('SELECT m.revision_id,m.text');
     expect(sql).toContain("ml.classification='relevant'");
-    expect(sql).toContain("sl.story_id=$1 AND sl.classification='relevant'");
+    expect(sql).not.toContain('story_link_sources');
     expect(sql).not.toContain('r.normalized_text,');
     expect(sql).not.toContain('r.original_text');
   });

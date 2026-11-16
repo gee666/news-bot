@@ -55,7 +55,8 @@ export async function preparedPublicationInputs(publicationId: string, query = d
   const row = (await query<{ value: unknown }>('SELECT value FROM operational_state WHERE key=$1',
     [`publication_input:${publicationId}`])).rows[0];
   const saved = publicationBoundarySchema.safeParse(row?.value);
-  return saved.success && saved.data.inputs.length ? saved.data : null;
+  // URL-only v2 boundaries came from retired source-only coverage, not a report.
+  return saved.success && saved.data.inputs.some(input => input.payload.kind === 'text' || input.payload.kind === 'image') ? saved.data : null;
 }
 
 export async function publicationInputAdmission(storyId: string, destinationId: string, settings: AppSettings,

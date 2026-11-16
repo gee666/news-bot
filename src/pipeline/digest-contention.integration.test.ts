@@ -6,7 +6,6 @@ const mocks = vi.hoisted(() => ({ modelStarted: false, refresh: vi.fn() }));
 vi.mock('./stories.js', () => ({ refreshDigest: mocks.refresh }));
 vi.mock('./judgments.js', () => ({ Judgments: class { async close() {} } }));
 vi.mock('./consolidation.js', () => ({ consolidateStories: vi.fn() }));
-vi.mock('./source-links.js', () => ({ associateSourceLinks: vi.fn(), SOURCE_MESSAGES_PER_PASS: 50 }));
 const url = process.env.TEST_DATABASE_URL;
 const schema = `digest_contention_${randomUUID().replaceAll('-', '')}`;
 let admin: pg.Pool;

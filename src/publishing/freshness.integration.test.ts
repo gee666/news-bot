@@ -125,6 +125,24 @@ describe.skipIf(!url)('exact publication admission in PostgreSQL', () => {
     expect((await database.db.query('SELECT status,error_code FROM publications WHERE id=$1', [f.id])).rows)
       .toEqual([{ status: 'failed', error_code: 'publication_admission_stale_source_input' }]);
   });
+  it.each(['text', 'media_first'] as const)('blocks a frozen source-only %s boundary without rewriting its snapshot or receipt', async kind => {
+    const f = await fixture();
+    const { reportBoundary } = await import('./input-evidence.js');
+    const frozen = reportBoundary([{ item_id: f.item, content_hash: 'original', text: '',
+      urls: ['https://t.me/meme_channel'], source_time: new Date(),
+      collected_text: '![meme](https://example.org/meme.jpg) [ ](https://t.me/meme_channel)' }]);
+    await store.saveState(`publication_input:${f.id}`, frozen);
+    if (kind === 'media_first') await database.db.query("UPDATE publications SET delivery_kind='media_first' WHERE id=$1", [f.id]);
+    const before = (await database.db.query('SELECT * FROM publication_snapshots WHERE id=$1', [f.desired])).rows;
+    expect(await delivery.sendPrepared(await publication(f.id), new BotApi(), settings)).toBeNull();
+    expect(BotApi.prototype.send).not.toHaveBeenCalled();
+    expect((await database.db.query('SELECT id FROM request_attempts')).rows).toEqual([]);
+    expect((await database.db.query('SELECT id FROM publication_media_batches')).rows).toEqual([]);
+    expect((await database.db.query('SELECT error_code FROM publications WHERE id=$1', [f.id])).rows)
+      .toEqual([{ error_code: 'publication_admission_publication_input_unverifiable' }]);
+    expect((await database.db.query('SELECT * FROM publication_snapshots WHERE id=$1', [f.desired])).rows).toEqual(before);
+    expect(await store.state(`publication_input:${f.id}`)).toEqual(frozen);
+  });
   it('blocks an already prepared unchanged edition with a legacy published ancestor', async () => {
     const f = await fixture();
     const ancestor = await one(`INSERT INTO stories(status,headline,summary,interest_score,researched)

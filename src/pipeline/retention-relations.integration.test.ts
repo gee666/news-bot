@@ -29,7 +29,7 @@ async function expiredEvidence() {
     VALUES('https://example.org/archived-page','public',now()-interval '1 day',now()-interval '30 days') RETURNING id`);
 }
 
-describe.skipIf(!databaseUrl)('retention of source-only and archived merge dependencies', () => {
+describe.skipIf(!databaseUrl)('retention of extracted reports and archived merge dependencies', () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: databaseUrl });
     await admin.query(`CREATE SCHEMA ${schema}`);
@@ -46,7 +46,7 @@ describe.skipIf(!databaseUrl)('retention of source-only and archived merge depen
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
-  it.each(['digest', 'batch-mention', 'batch-source-only'] as const)(
+  it.each(['digest', 'batch-mention'] as const)(
     'protects only %s dependencies until completion, preserving publication snapshots and aliases', async mode => {
       const story = await one("INSERT INTO stories(status) VALUES('processing') RETURNING id");
       const article = await expiredItem('Original release');
@@ -72,7 +72,7 @@ describe.skipIf(!databaseUrl)('retention of source-only and archived merge depen
         batch = await one(`INSERT INTO processing_batches(status,cutoff_at,settings_snapshot,profile_version,model_version)
           VALUES('waiting',now(),$1,$2,$3) RETURNING id`, [JSON.stringify(settings), settings.profileVersion, settings.modelVersion]);
         await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',
-          [batch, mode === 'batch-mention' ? article.revision : recap.revision]);
+          [batch, article.revision]);
       }
       const content = { headline: 'Сохраненная публикация', score: 5, details: 'Полный текст', detailsKind: 'excerpt',
         sources: [{ label: 'Recap', url: 'https://vendor.example/recap', access: 'public', primary: false, classification: 'relevant' }] };
@@ -85,8 +85,8 @@ describe.skipIf(!databaseUrl)('retention of source-only and archived merge depen
         VALUES($1,$2,$2),($3,$2,$2)`, [prepared, story, published]);
 
       await cleanup(settings);
-      expect((await database.db.query('SELECT id FROM source_items WHERE id=ANY($1::uuid[])', [[article.item, recap.item]])).rows).toHaveLength(2);
-      expect((await database.db.query('SELECT link_id FROM story_link_sources WHERE story_id=$1', [story])).rows).toEqual([{ link_id: link }]);
+      expect((await database.db.query('SELECT id FROM source_items WHERE id=ANY($1::uuid[])', [[article.item, recap.item]])).rows).toEqual([{ id: article.item }]);
+      expect((await database.db.query('SELECT link_id FROM story_link_sources WHERE story_id=$1', [story])).rows).toEqual([]);
       expect((await database.db.query('SELECT evidence_id FROM story_merge_evidence WHERE canonical_story_id=$1', [story])).rows).toEqual([{ evidence_id: archived }]);
       expect((await database.db.query('SELECT id FROM evidence_documents WHERE id=$1', [archived])).rows).toHaveLength(1);
       expect((await database.db.query('SELECT id FROM source_items WHERE id=$1', [unrelated.item])).rows).toHaveLength(0);

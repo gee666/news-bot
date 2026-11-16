@@ -14,13 +14,6 @@ function input(id: string, rows: ReportRow[]): EventInput | null {
     reports: rows.map(row => ({ text: row.text, sourceUrl: row.source_url, links: row.links, publishedAt: row.published_at?.toISOString() ?? null })) } : null;
 }
 
-/** Metadata-created IDs and report order are not new collected evidence. Keep all
- * text/provenance/link payloads, including repeated reports, in a stable selection key. */
-export function eventSemanticHash(...stories: EventInput[]): string {
-  return hash(stories.map(story=>({ id: story.id,reports: story.reports.map(report=>({ ...report,links: [...report.links].sort() }))
-    .sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b))) })).sort((a,b)=>a.id.localeCompare(b.id)));
-}
-
 export async function mentionInput(id: string, client: Pick<PoolClient, 'query'> = db): Promise<EventInput | null> {
   const mentions = await client.query<ReportRow>(`SELECT ${reportColumns} FROM story_mentions m
     JOIN item_revisions r ON r.id=m.revision_id JOIN source_items i ON i.current_revision_id=r.id WHERE m.id=$1`, [id]);

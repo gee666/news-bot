@@ -153,7 +153,7 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
     expect([...new Set((await loadStory(announcement)).links.map(link => link.url))].sort()).toEqual([...new Set([...supplied, later])].sort());
     expect((await loadStory(announcement)).mentions.map(mention => mention.text)).not.toContain('Retired claim');
   });
-  it('transfers all source-only associations with winning metadata and all origin URLs', async () => {
+  it('does not transfer or consume obsolete source-only associations when merging', async () => {
     const canonical = await story('Release', [1, 0, 0]);
     const loser = await story('Release preview', [1, 0, 0]);
     const source = await one(`INSERT INTO sources(connector_type,external_id,name,access)
@@ -163,41 +163,18 @@ describe.skipIf(!databaseUrl)('same-event consolidation in isolated PostgreSQL',
     const revision = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
       VALUES($1,1,$2,'Release recap links','Release recap links') RETURNING id`, [item, randomUUID()]);
     await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
-    const cases = [
-      { left: 'uncertain', right: 'relevant', winner: 'right' },
-      { left: 'relevant', right: 'irrelevant', winner: 'left' },
-      { left: 'irrelevant', right: 'uncertain', winner: 'right' },
-      { left: 'relevant', right: 'relevant', winner: 'left' },
-      { left: null, right: 'irrelevant', winner: 'right' },
-    ];
-    const expected = [];
-    for (const [index, test] of cases.entries()) {
-      const link = await one('INSERT INTO item_links(revision_id,url) VALUES($1,$2) RETURNING id', [revision, `https://recap.example/link${index}`]);
-      for (const [owner, classification, side] of [[canonical, test.left, 'left'], [loser, test.right, 'right']]) {
-        if (classification === null) continue;
-        await database.db.query(`INSERT INTO story_link_sources
-          (link_id,story_id,classification,model_key,model_version,prompt_version,input_hash,assessed_at)
-          VALUES($1,$2,$3,$4,7,$4,$4,'2026-09-30T00:00:00Z')`, [link, owner, classification, side]);
-      }
-      expected.push({ link_id: link, classification: test.winner === 'left' ? test.left : test.right,
-        model_key: test.winner, model_version: 7, prompt_version: test.winner, input_hash: test.winner });
-    }
+    const link = await one(`INSERT INTO item_links(revision_id,url) VALUES($1,'https://recap.example/link') RETURNING id`, [revision]);
+    await database.db.query(`INSERT INTO story_link_sources
+      (link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
+      VALUES($1,$2,'relevant','legacy',1,'legacy','legacy')`, [link, loser]);
+    const before = (await database.db.query('SELECT * FROM story_link_sources WHERE story_id=$1', [loser])).rows;
     await merge(await current(canonical), await current(loser), 'same');
-    const moved = (await database.db.query(`SELECT link_id,classification,model_key,model_version,prompt_version,input_hash
-      FROM story_link_sources WHERE story_id=$1`, [canonical])).rows;
-    expect(moved).toEqual(expect.arrayContaining(expected));
-    expect(moved).toHaveLength(expected.length);
-    expect((await database.db.query('SELECT * FROM story_link_sources WHERE story_id=$1', [loser])).rows).toEqual([]);
-    expect((await database.db.query(`SELECT DISTINCT assessed_at FROM story_link_sources WHERE story_id=$1`, [canonical])).rows)
-      .toEqual([{ assessed_at: new Date('2026-09-30T00:00:00Z') }]);
-    const { loadStory } = await import('./generation-store.js');
-    const loaded = await loadStory(canonical);
+    expect((await database.db.query('SELECT * FROM story_link_sources WHERE story_id=$1', [canonical])).rows).toEqual([]);
+    expect((await database.db.query('SELECT * FROM story_link_sources WHERE story_id=$1', [loser])).rows).toEqual(before);
+    const loaded = await (await import('./generation-store.js')).loadStory(canonical);
     expect([...new Set(loaded.links.map(link => link.url))].sort()).toEqual([
       `https://example.org/${canonical}`, `https://example.org/${loser}`,
-      'https://recap.example/link0', 'https://recap.example/link1', 'https://recap.example/link3',
     ].sort());
-    // Readability/authority decides publication inventory separately; merging must retain the raw associations.
-    expect(loaded.links.map(link => link.url)).toContain('https://recap.example/link0');
   });
   it('archives diagnostic provenance without resurrecting superseded evidence after a merge', async () => {
     const canonical = await story('Release announcement', [1, 0, 0], '2026-09-30T14:00:00Z');

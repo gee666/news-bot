@@ -51,16 +51,6 @@ export async function mergeStories(left: EventInput, right: EventInput, relation
       SELECT $1,evidence_id,role,assessment,verified_at,relevance,assessed_at,superseded_at FROM story_evidence WHERE story_id=$2
       ON CONFLICT(story_id,evidence_id) DO NOTHING`, [canonicalId, mergedId]);
     await client.query('DELETE FROM story_evidence WHERE story_id=$1', [mergedId]);
-    await client.query(`INSERT INTO story_link_sources
-      (link_id,story_id,classification,model_key,model_version,prompt_version,input_hash,assessed_at)
-      SELECT link_id,$1,classification,model_key,model_version,prompt_version,input_hash,assessed_at
-      FROM story_link_sources WHERE story_id=$2
-      ON CONFLICT(link_id,story_id) DO UPDATE SET classification=EXCLUDED.classification,
-        model_key=EXCLUDED.model_key,model_version=EXCLUDED.model_version,prompt_version=EXCLUDED.prompt_version,
-        input_hash=EXCLUDED.input_hash,assessed_at=EXCLUDED.assessed_at
-      WHERE array_position(ARRAY['irrelevant','uncertain','relevant'],EXCLUDED.classification) >
-        array_position(ARRAY['irrelevant','uncertain','relevant'],story_link_sources.classification)`, [canonicalId, mergedId]);
-    await client.query('DELETE FROM story_link_sources WHERE story_id=$1', [mergedId]);
     await client.query(`UPDATE story_mentions SET story_id=$1,
       metadata=metadata || jsonb_build_object('mergedFromStoryId',$2::text) WHERE story_id=$2`, [canonicalId, mergedId]);
     await client.query(`INSERT INTO story_merges(merged_story_id,canonical_story_id,relation) VALUES($1,$2,$3)`, [mergedId, canonicalId, relation]);

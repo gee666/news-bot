@@ -32,7 +32,7 @@ async function associatedReport(text: string, classification = 'relevant') {
   return { itemId, revisionId };
 }
 
-describe.skipIf(!url)('supplementary report database boundary', () => {
+describe.skipIf(!url)('generation report database boundary', () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: url });
     await admin.query(`CREATE SCHEMA ${schema}`);
@@ -50,7 +50,7 @@ describe.skipIf(!url)('supplementary report database boundary', () => {
     vi.unstubAllEnvs();
   });
 
-  it('excludes stale, already-mentioned, quarantined and uncertain reports, deduplicating approved current revisions', async () => {
+  it('ignores every legacy source-only association and keeps only extracted reports', async () => {
     const current = await associatedReport('Pro $200 now 10x Plus, previously 20x; $500 25x.');
     const stale = await associatedReport('Stale report');
     const next = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text)
@@ -66,10 +66,12 @@ describe.skipIf(!url)('supplementary report database boundary', () => {
       [failed.revisionId, JSON.stringify({ pipelineFailure: true })]);
     await associatedReport('Uncertain report', 'uncertain');
     const { loadStory } = await import('./generation-store.js');
-    expect((await loadStory(storyId)).supplementary_reports).toEqual([
-      expect.objectContaining({ revision_id: current.revisionId, source_id: sourceId, access: 'public',
-        text: 'Pro $200 now 10x Plus, previously 20x; $500 25x.' }),
-    ]);
+    const input = await loadStory(storyId);
+    expect(input).not.toHaveProperty('supplementary_reports');
+    expect(input.mentions.map(mention => mention.text)).toEqual(['Already mentioned']);
+    expect(input.links).toEqual([]);
+    expect(input.mentions.some(mention => mention.text.includes('10x Plus'))).toBe(false);
+    expect((await database.db.query('SELECT id FROM item_revisions WHERE id=$1', [current.revisionId])).rows).toHaveLength(1);
   });
   it('loads and fingerprints retained SAME snapshots and expired evidence without reviving legacy RELATED ancestry', async () => {
     const oldest = await one("INSERT INTO stories(status) VALUES('completed') RETURNING id");

@@ -1,5 +1,31 @@
 # Media delivery
 
+## Image-aware extraction
+
+Extraction sends still images alongside the source text to the configured vision-capable
+Pi model. Screenshots, charts and image-only announcements can supply a news event even
+when the caption is empty. Captionless Telegram albums produce one collected input
+containing their images, not a separate input per sibling. Stable Telegram attachment
+IDs participate in revision identity, and downloads reject a replacement that no longer
+matches the collected attachment. Videos are not inspected during extraction. Memes, satire,
+unexplained photos and decoration do not by themselves establish a news event.
+
+Caption passages keep exact source offsets. Image-derived reports are labeled separately
+and saved with attachment descriptors and SHA-256 hashes of the downloaded and encoded
+images. They are not stored as quotations from the caption. Matching and generation
+receive these reports, while the collected revision's original text stays unchanged.
+Successful extraction receipts remain immutable and do not cause a historical replay
+when this feature is deployed.
+
+`MEDIA_EXTRACTION_MAX_IMAGES` defaults to ten, and `MEDIA_EXTRACTION_MAX_BYTES` defaults
+to 45 MB for each extraction's downloaded and encoded images. Preparation uses
+`MEDIA_PREPARATION_TIMEOUT_MS`. Privacy approval runs before downloads or inference.
+An unavailable, invalid or oversized extraction image fails the extraction attempt
+under the normal retry policy rather than silently committing an empty news result.
+This differs from optional publication media, whose failure can leave a text-only post.
+
+## Publication attachments
+
 New posts with media send caption-free attachments first, then one complete HTML
 text message. Text-only posts send just that message. Media IDs are not canonical
 post IDs, and attachments are never replies or navigation targets.

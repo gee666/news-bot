@@ -220,9 +220,8 @@ it('writes a self-contained event summary from full current and ancestor sources
   const input = storyInput();
   const original = 'Полный исходный текст о выпуске. '.repeat(500) + 'Старые условия лицензии.';
   input.mentions.push({ ...input.mentions[0]!, id:'55555555-5555-4555-8555-555555555555', text: original });
-  input.supplementary_reports = [{ source_id:'22222222-2222-4222-8222-222222222222',
-    revision_id:'66666666-6666-4666-8666-666666666666', text:'Полный прежний отчёт с деталями.',
-    source_name:'Автор', original_url:'https://author.org/report', access:'public', published_at:null,collected_at:null }];
+  input.mentions.push({ id:'66666666-6666-4666-8666-666666666666', text:'Полный прежний отчёт с деталями.',
+    source_name:'Автор', original_url:'https://author.org/report', access:'public', published_at:null,collected_at:null });
   mocks.input.mockResolvedValueOnce(input);
   const content = 'Полный прочитанный документ предшественника. '.repeat(500) + 'Старая цена 40 долларов.';
   vi.mocked(loadPreviousEvidence).mockResolvedValue([{ ...evidenceDocument(),
@@ -239,7 +238,8 @@ it('writes a self-contained event summary from full current and ancestor sources
   expect(material).not.toHaveProperty('previous_posts');
   expect(readEditionPrimaries).toHaveBeenCalledWith(input, ['https://author.org/release', 'https://example.org/release'], defaultSettings, expect.anything());
   expect(material.mentions).toContainEqual(expect.objectContaining({text:original}));
-  expect(material.reports).toContainEqual(expect.objectContaining({text:'Полный прежний отчёт с деталями.'}));
+  expect(material.mentions).toContainEqual(expect.objectContaining({text:'Полный прежний отчёт с деталями.'}));
+  expect(material).not.toHaveProperty('reports');
   expect(material.documents).toContainEqual(expect.objectContaining({content}));
   expect(request.systemPrompt).not.toContain('только новые сведения');
   expect(request.responseSchema.schema.required).toEqual(['headline','summary','source_urls']);

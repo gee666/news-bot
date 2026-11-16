@@ -90,11 +90,7 @@ export async function finishBatchStories(batchId: string, settings: AppSettings,
     AND (EXISTS(SELECT 1 FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
       JOIN item_revisions br ON br.item_id=r.item_id JOIN batch_items b ON b.revision_id=br.id
       WHERE b.batch_id=$1 AND m.story_id=s.id) OR EXISTS(SELECT 1 FROM stage_state st
-      WHERE st.batch_id=$1 AND st.story_id=s.id AND st.stage='extraction_affected') OR (
-        EXISTS(SELECT 1 FROM operational_state o WHERE o.key='run_now_batch:'||$1::text)
-        AND EXISTS(SELECT 1 FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-          JOIN batch_items b ON b.revision_id=l.revision_id WHERE b.batch_id=$1 AND sl.story_id=s.id AND sl.classification='relevant')
-      )) ORDER BY s.id`, [batchId]);
+      WHERE st.batch_id=$1 AND st.story_id=s.id AND st.stage='extraction_affected')) ORDER BY s.id`, [batchId]);
   const scope = await db.query<{ value: unknown }>('SELECT value FROM operational_state WHERE key=$1', [`run_now_batch:${batchId}`]);
   const manual = z.object({ runId: z.uuid().optional(), storyLimit: z.number().int().positive(), storyIds: z.array(z.uuid()).optional() }).safeParse(scope.rows[0]?.value);
   const selectedIds = storyIds === undefined ? null : z.array(z.uuid()).parse(storyIds);
@@ -204,9 +200,7 @@ export async function refreshDigest(settings: AppSettings, judgments: Judgments,
     AND ($3::uuid[] IS NOT NULL OR NOT EXISTS(SELECT 1 FROM processing_batches batch
       WHERE batch.completed_at IS NULL AND batch.manual_operation_id IS NOT NULL AND (
         EXISTS(SELECT 1 FROM stage_state st WHERE st.batch_id=batch.id AND st.story_id=s.id)
-        OR EXISTS(SELECT 1 FROM story_mentions m JOIN batch_items b ON b.revision_id=m.revision_id WHERE b.batch_id=batch.id AND m.story_id=s.id)
-        OR EXISTS(SELECT 1 FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-          JOIN batch_items b ON b.revision_id=l.revision_id WHERE b.batch_id=batch.id AND sl.story_id=s.id))))
+        OR EXISTS(SELECT 1 FROM story_mentions m JOIN batch_items b ON b.revision_id=m.revision_id WHERE b.batch_id=batch.id AND m.story_id=s.id))))
     AND (s.status IN ('pending','processing','completed','failed')
       OR EXISTS(SELECT 1 FROM operational_state o WHERE o.key='digest_refresh:'||s.id::text)
       OR (s.status='rejected' AND NOT EXISTS(${currentDecision})))

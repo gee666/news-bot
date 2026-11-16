@@ -14,7 +14,7 @@ async function one(sql: string, values: unknown[] = []): Promise<string> {
   if (!row) throw new Error('Missing fixture');
   return row.id;
 }
-async function sent(previous?: string, ageDays = 0, options: { legacy?: boolean; supplementary?: boolean } = {}) {
+async function sent(previous?: string, ageDays = 0, options: { legacy?: boolean; additionalReport?: boolean } = {}) {
   const id = await one(`INSERT INTO stories(status,headline,summary,chosen_excerpt,interest_score,researched)
     VALUES('completed','Тема','Все известные сведения','Exact source report',7,true) RETURNING id`);
   const source = await one(`INSERT INTO sources(connector_type,external_id,name,access)
@@ -28,7 +28,7 @@ async function sent(previous?: string, ageDays = 0, options: { legacy?: boolean;
   const mention = await one(`INSERT INTO story_mentions(story_id,revision_id,text,ordinal,metadata)
     VALUES($1,$2,'Exact source report',0,$3) RETURNING id`, [id, revision, JSON.stringify(previous ? { previous_story_id: previous } : {})]);
   if (previous) await database.db.query("INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version) VALUES($1,$2,'fixture-verified')", [id, previous]);
-  const supplementary = options.supplementary ? await supplement(id) : null;
+  const additionalReport = options.additionalReport ? await addedReport(id) : null;
   const snapshot = await one(`INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id`, [id,
     JSON.stringify({ headline: 'Тема', details: 'Все известные сведения', score: 7, detailsKind: 'summary',
       sources: [{ url: originalUrl, label: 'Original report', primary: false, access: 'public', classification: 'relevant' }] })]);
@@ -40,9 +40,9 @@ async function sent(previous?: string, ageDays = 0, options: { legacy?: boolean;
   }
   await database.db.query(`UPDATE publications SET status='published',message_id=$2,published_at=now() WHERE id=$1`,
     [publication, randomUUID()]);
-  return { id, mention, revision, item, snapshot, publication, supplementary };
+  return { id, mention, revision, item, snapshot, publication, additionalReport };
 }
-async function supplement(storyId: string, ageDays = 0) {
+async function addedReport(storyId: string, ageDays = 0) {
   const source = await one(`INSERT INTO sources(connector_type,external_id,name,access)
     VALUES('feed',$1,'Secondary coverage','public') RETURNING id`, [randomUUID()]);
   const item = await one(`INSERT INTO source_items(source_id,external_id,original_url,published_at)
@@ -51,12 +51,16 @@ async function supplement(storyId: string, ageDays = 0) {
     VALUES($1,1,$2,'Independent secondary report','Independent secondary report') RETURNING id`, [item, randomUUID()]);
   await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
   const link = await one('INSERT INTO item_links(revision_id,url) VALUES($1,$2) RETURNING id', [revision, `https://example.org/${randomUUID()}`]);
-  await associate(storyId, link);
-  return { item, revision, link };
+  const mention = await one(`INSERT INTO story_mentions(story_id,revision_id,text,ordinal)
+    VALUES($1,$2,'Independent secondary report',0) RETURNING id`, [storyId, revision]);
+  await database.db.query(`INSERT INTO mention_links(mention_id,link_id,classification,model_version)
+    VALUES($1,$2,'relevant',1)`, [mention, link]);
+  return { item, revision, link, mention };
 }
-async function associate(storyId: string, link: string) {
-  await database.db.query(`INSERT INTO story_link_sources(link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
-    VALUES($1,$2,'relevant','fixture',1,'fixture','fixture')`, [link, storyId]);
+async function expectReportLink(storyId: string, linkId: string) {
+  const input = await (await import('./generation-store.js')).loadStory(storyId);
+  const url = (await database.db.query<{ url: string }>('SELECT url FROM item_links WHERE id=$1', [linkId])).rows[0]?.url;
+  expect(input.links.map(link => link.url)).toContain(url);
 }
 async function revise(target: Awaited<ReturnType<typeof sent>>, text: string) {
   const revision = await one(`INSERT INTO item_revisions(item_id,revision_number,content_hash,original_text,normalized_text,metadata)
@@ -71,7 +75,7 @@ async function queue(id: string) {
     [`digest_refresh:${id}`, JSON.stringify({ storyId: id })]);
 }
 
-describe.skipIf(!url)('new cumulative editions for published source enrichment', () => {
+describe.skipIf(!url)('new cumulative editions for published report updates', () => {
   beforeAll(async () => {
     admin = new pg.Pool({ connectionString: url }); await admin.query(`CREATE SCHEMA ${schema}`);
     const scoped = new URL(url ?? ''); scoped.searchParams.set('options', `-c search_path=${schema},public`);
@@ -87,7 +91,7 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
   it('creates a draft from actual reports, preserves sent text and complete ancestry, and consumes the marker atomically', async () => {
     const first = await sent(); const second = await sent(first.id);
     const before = (await database.db.query('SELECT * FROM publications WHERE story_id=$1', [second.id])).rows;
-    await supplement(second.id);
+    await addedReport(second.id);
     await queue(second.id);
     const { forkPublishedRefresh } = await import('./publication-edition.js');
     const draft = await forkPublishedRefresh(second.id);
@@ -101,16 +105,30 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
     expect((await database.db.query('SELECT key FROM operational_state WHERE key=$1', [`digest_refresh:${draft}`])).rows).toHaveLength(1);
     expect(await forkPublishedRefresh(second.id)).toBeNull();
   });
-  it('reuses an existing unpublished edition and copies shared source associations once', async () => {
+  it('ignores a legacy source-only refresh marker without creating a draft', async () => {
+    const target = await sent();
+    const legacy = await addedReport(target.id);
+    await database.db.query('DELETE FROM story_mentions WHERE id=$1', [legacy.mention]);
+    await database.db.query(`INSERT INTO story_link_sources
+      (link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
+      VALUES($1,$2,'relevant','legacy',1,'legacy','legacy')`, [legacy.link, target.id]);
+    await queue(target.id);
+    const { forkPublishedRefresh } = await import('./publication-edition.js');
+    expect(await forkPublishedRefresh(target.id, settings)).toBeNull();
+    expect((await database.db.query('SELECT story_id FROM story_link_sources WHERE link_id=$1', [legacy.link])).rows)
+      .toEqual([{ story_id: target.id }]);
+    expect((await database.db.query('SELECT 1 FROM story_publication_threads WHERE previous_story_id=$1', [target.id])).rows).toEqual([]);
+  });
+  it('reuses an existing unpublished edition and reads extracted links through its thread', async () => {
     const target = await sent();
     const draft = await one("INSERT INTO stories(status,chosen_excerpt) VALUES('processing','Exact source report') RETURNING id");
     await database.db.query("INSERT INTO story_publication_threads(story_id,previous_story_id,classification_version) VALUES($1,$2,'fixture-verified')", [draft, target.id]);
-    const { link } = await supplement(target.id);
-    await associate(draft, link);
+    const { link } = await addedReport(target.id);
+    await addedReport(draft);
     await queue(target.id);
     const { forkPublishedRefresh } = await import('./publication-edition.js');
     expect(await forkPublishedRefresh(target.id)).toBe(draft);
-    expect((await database.db.query('SELECT link_id FROM story_link_sources WHERE story_id=$1', [draft])).rows).toEqual([{ link_id: link }]);
+    await expectReportLink(draft ?? '', link);
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE id=$1', [target.mention])).rows).toEqual([{ story_id: target.id }]);
   });
   it.each([13, 5])('consumes an unchanged %i-day-old report marker without touching published history', async ageDays => {
@@ -135,17 +153,17 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
     expect((await database.db.query('SELECT key FROM operational_state WHERE key=$1', [`digest_refresh:${target.id}`])).rows).toEqual([]);
   });
   it('does not treat a metadata-only revision or refreshed source classification as a new report', async () => {
-    const target = await sent(undefined, 13, { supplementary: true });
-    const source = target.supplementary;
-    if (!source) throw new Error('Missing supplementary fixture');
-    await database.db.query(`UPDATE story_link_sources SET classification='irrelevant' WHERE story_id=$1`, [target.id]);
-    await database.db.query(`UPDATE story_link_sources SET classification='relevant',model_version=2,assessed_at=now() WHERE story_id=$1`, [target.id]);
+    const target = await sent(undefined, 13, { additionalReport: true });
+    const source = target.additionalReport;
+    if (!source) throw new Error('Missing additionalReport fixture');
+    await database.db.query(`UPDATE mention_links SET classification='irrelevant' WHERE mention_id=$1`, [source.mention]);
+    await database.db.query(`UPDATE mention_links SET classification='relevant',model_version=2 WHERE mention_id=$1`, [source.mention]);
     await revise(target, 'Exact source report');
     await queue(target.id);
     const { forkPublishedRefresh } = await import('./publication-edition.js');
     expect(await forkPublishedRefresh(target.id, settings)).toBeNull();
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1', [target.revision])).rows).toEqual([{ story_id: target.id }]);
-    expect((await database.db.query('SELECT link_id FROM story_link_sources WHERE story_id=$1', [target.id])).rows).toEqual([{ link_id: source.link }]);
+    await expectReportLink(target.id, source.link);
   });
   it('allows a meaningful update to a previously published old report and preserves both revisions', async () => {
     const target = await sent(undefined, 13);
@@ -164,21 +182,21 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
   });
   it('rejects a newly attached old article despite its new association and extraction timestamps', async () => {
     const target = await sent(undefined, 13);
-    await supplement(target.id, 5);
+    await addedReport(target.id, 5);
     await queue(target.id);
     const { forkPublishedRefresh } = await import('./publication-edition.js');
     expect(await forkPublishedRefresh(target.id, settings)).toBeNull();
   });
-  it('copies genuinely new secondary-only coverage queued on an older published ancestor', async () => {
+  it('inherits newly extracted secondary coverage queued on an older published ancestor', async () => {
     const first = await sent(undefined, 13); const latest = await sent(first.id, 5);
-    const { link } = await supplement(first.id);
+    const { link } = await addedReport(first.id);
     await queue(first.id);
     const { forkPublishedRefresh } = await import('./publication-edition.js');
     const draft = await forkPublishedRefresh(first.id, settings);
     expect(draft).toBeTruthy();
     expect((await database.db.query('SELECT previous_story_id FROM story_publication_threads WHERE story_id=$1', [draft])).rows)
       .toEqual([{ previous_story_id: latest.id }]);
-    expect((await database.db.query('SELECT link_id FROM story_link_sources WHERE story_id=$1', [draft])).rows).toEqual([{ link_id: link }]);
+    await expectReportLink(draft ?? '', link);
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE id=$1', [latest.mention])).rows).toEqual([{ story_id: draft }]);
   });
   it('admits new coverage already owned by an existing draft but leaves an unchanged draft intact', async () => {
@@ -192,7 +210,7 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
     await queue(target.id);
     expect(await forkPublishedRefresh(target.id, settings)).toBeNull();
     expect((await database.db.query('SELECT * FROM stories WHERE id=$1', [draft])).rows).toEqual(before);
-    await supplement(draft);
+    await addedReport(draft);
     await queue(target.id);
     expect(await forkPublishedRefresh(target.id, settings)).toBe(draft);
   });
@@ -206,7 +224,7 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
         await revise(target, 'Intermediate revision');
         await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [target.item, target.revision]);
       }
-      const precollected = await supplement(target.id);
+      const precollected = await addedReport(target.id);
       await database.db.query(`UPDATE source_items SET collected_at=
         (SELECT published_at FROM publications WHERE id=$2)-interval '1 hour' WHERE id=$1`,
       [precollected.item, target.publication]);
@@ -226,14 +244,14 @@ describe.skipIf(!url)('new cumulative editions for published source enrichment',
     const target = await sent(undefined, 13, { legacy: true });
     const queries = ['SELECT * FROM publications WHERE story_id=$1', 'SELECT * FROM publication_snapshots WHERE story_id=$1'];
     const before = await Promise.all(queries.map(sql => database.db.query(sql, [target.id]).then(result => result.rows)));
-    const { link } = await supplement(target.id);
+    const { link } = await addedReport(target.id);
     await queue(target.id);
     const { forkPublishedRefresh } = await import('./publication-edition.js');
     const draft = await forkPublishedRefresh(target.id, settings);
     expect(draft).toBeTruthy(); expect(draft).not.toBe(target.id);
     expect((await database.db.query('SELECT previous_story_id FROM story_publication_threads WHERE story_id=$1', [draft])).rows)
       .toEqual([{ previous_story_id: target.id }]);
-    expect((await database.db.query('SELECT link_id FROM story_link_sources WHERE story_id=$1', [draft])).rows).toEqual([{ link_id: link }]);
+    await expectReportLink(draft ?? '', link);
     expect(await Promise.all(queries.map(sql => database.db.query(sql, [target.id]).then(result => result.rows)))).toEqual(before);
     expect((await database.db.query('SELECT key FROM operational_state WHERE key=ANY($1::text[])',
       [[`publication_input:${target.publication}`, `publication_refresh_hold:${target.id}`, `digest_refresh:${target.id}`]])).rows).toEqual([]);

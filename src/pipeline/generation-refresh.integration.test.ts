@@ -116,7 +116,7 @@ describe.skipIf(!url)('current editorial generation integration', () => {
     expect(researchStory).toHaveBeenCalledTimes(researchCalls + 1);
     expect(await (await import('./generation-freshness.js')).generationIsCurrent(storyId, settings)).toBe(true);
   });
-  it.each(['stale rank', 'expired rank', 'wrong rank model', 'expired eligibility', 'wrong eligibility model', 'source association'] as const)(
+  it.each(['stale rank', 'expired rank', 'wrong rank model', 'expired eligibility', 'wrong eligibility model', 'legacy source association'] as const)(
     'repairs completed checkpoint receipts after %s without another JEV request', async mutation => {
       const { finishBatchStories } = await import('./stories.js');
       const { Judgments } = await import('./judgments.js');
@@ -138,13 +138,13 @@ describe.skipIf(!url)('current editorial generation integration', () => {
           [storyId, mutation.includes('eligibility') ? 'eligibility' : 'interest']);
       } else {
         await database.db.query("UPDATE stories SET status='processing',interest_stale=true WHERE id=$1", [storyId]);
-        if (mutation === 'source association') {
-          const revision = (await database.db.query<{ revision_id: string }>('SELECT revision_id FROM story_mentions WHERE story_id=$1 LIMIT 1', [storyId])).rows[0];
+        if (mutation === 'legacy source association') {
+          const revision = (await database.db.query<{ revision_id: string; id: string }>('SELECT id,revision_id FROM story_mentions WHERE story_id=$1 LIMIT 1', [storyId])).rows[0];
           if (!revision) throw new Error('Missing current revision');
           const link = await one(`INSERT INTO item_links(revision_id,url,anchor_text)
             VALUES($1,'https://example.org/association','Report') RETURNING id`, [revision.revision_id]);
           await database.db.query(`INSERT INTO story_link_sources(link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
-            VALUES($1,$2,'relevant','fixture',1,'fixture','fixture')`, [link, storyId]);
+            VALUES($1,$2,'relevant','legacy',1,'legacy','legacy')`, [link, storyId]);
         }
       }
       try { await finishBatchStories(batchId, settings, judgments, vectors); }
@@ -179,11 +179,11 @@ describe.skipIf(!url)('current editorial generation integration', () => {
     try {
       await finishBatchStories(batchId, settings, judgments, vectors);
       const peerReceipts = (await database.db.query('SELECT * FROM stage_state WHERE story_id=$1 ORDER BY id', [peer])).rows;
-      const ownRevision = (await database.db.query<{ revision_id: string }>('SELECT revision_id FROM story_mentions WHERE story_id=$1 LIMIT 1', [storyId])).rows[0];
+      const ownRevision = (await database.db.query<{ revision_id: string; id: string }>('SELECT id,revision_id FROM story_mentions WHERE story_id=$1 LIMIT 1', [storyId])).rows[0];
       if (!ownRevision) throw new Error('Missing current revision');
       const link = await one("INSERT INTO item_links(revision_id,url) VALUES($1,'https://example.org/checkpoint') RETURNING id", [ownRevision.revision_id]);
-      await database.db.query(`INSERT INTO story_link_sources(link_id,story_id,classification,model_key,model_version,prompt_version,input_hash)
-        VALUES($1,$2,'relevant','fixture',1,'fixture','checkpoint')`, [link, storyId]);
+      await database.db.query(`INSERT INTO mention_links(link_id,mention_id,classification,model_version)
+        VALUES($1,$2,'relevant',1)`, [link, ownRevision.id]);
       await database.db.query("UPDATE stories SET status='processing',interest_stale=true WHERE id=$1", [storyId]);
       const originalSlice = process.env.PROCESSING_SLICE_MS;
       vi.stubEnv('PROCESSING_SLICE_MS', '1000');

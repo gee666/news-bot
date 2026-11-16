@@ -74,27 +74,17 @@ const collectedArticleSchema = z.object({
 });
 
 export async function sourceInventory(client: Pick<PoolClient, 'query'>, storyId: string): Promise<PublicationSource[]> {
-  const sourceAssignments = `SELECT ml.link_id,ml.classification FROM story_mentions m
-    JOIN item_revisions r ON r.id=m.revision_id JOIN source_items i ON i.id=r.item_id
-    JOIN mention_links ml ON ml.mention_id=m.id WHERE m.story_id=$1 AND i.current_revision_id=r.id
-    UNION ALL SELECT sl.link_id,sl.classification FROM story_link_sources sl
-    JOIN item_links l ON l.id=sl.link_id JOIN item_revisions r ON r.id=l.revision_id
-    JOIN source_items i ON i.id=r.item_id WHERE sl.story_id=$1 AND i.current_revision_id=r.id`;
   const origins = await client.query<{ source_id: string; text: string; metadata: unknown; parent_text: string; name: string; external_id: string; original_url: string | null;
     connector_type: string; read_metadata: unknown; source_external_id: string; access: PublicationSource['access']; classification: PublicationSource['classification'] }>(`
-    WITH source_assignments AS (${sourceAssignments}), source_revisions AS (
+    WITH source_revisions AS (
       SELECT m.revision_id,'mention:'||m.id AS source_id,m.text,m.metadata FROM story_mentions m WHERE m.story_id=$1
-      UNION SELECT l.revision_id,'report:'||l.revision_id,r.original_text,NULL::jsonb FROM source_assignments a
-        JOIN item_links l ON l.id=a.link_id JOIN item_revisions r ON r.id=l.revision_id
-        WHERE a.classification='relevant' AND NOT EXISTS (
-          SELECT 1 FROM story_mentions m WHERE m.story_id=$1 AND m.revision_id=l.revision_id)
     ) SELECT sr.source_id,sr.text,sr.metadata,r.original_text AS parent_text,src.name,i.external_id,i.original_url,src.connector_type,
       src.external_id AS source_external_id,src.access,r.metadata AS read_metadata,'relevant' AS classification
     FROM source_revisions sr JOIN item_revisions r ON r.id=sr.revision_id JOIN source_items i ON i.id=r.item_id
     JOIN sources src ON src.id=i.source_id WHERE i.current_revision_id=r.id
       AND (src.connector_type='telegram' OR (src.connector_type IN ('feed','website') AND src.access='public'
         AND r.metadata->>'connectorKind'=src.connector_type AND r.metadata->>'canonicalUrl' IS NOT NULL))
-      AND length(trim(sr.text))>0 AND length(trim(r.original_text))>0
+      AND length(trim(sr.text))>0
       AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
     ORDER BY src.name,i.external_id,sr.source_id`, [storyId]);
@@ -155,10 +145,9 @@ export async function snapshotSources(client: Pick<PoolClient, 'query'>, story: 
   const primary=new Set([...(metadata?.primarySourceUrls ?? []), ...mentions.rows.map(row => row.url)]);
   const referenceUrls = new Set([...primary,...(metadata?.secondarySourceUrls ?? [])]);
   const referenced=referenceUrls.size ? await client.query<{url:string}>(`SELECT DISTINCT l.url FROM item_links l
-    JOIN source_items i ON i.current_revision_id=l.revision_id WHERE l.url=ANY($2::text[]) AND (
+    JOIN source_items i ON i.current_revision_id=l.revision_id WHERE l.url=ANY($2::text[]) AND
       EXISTS(SELECT 1 FROM story_mentions m JOIN mention_links ml ON ml.mention_id=m.id
-        WHERE m.story_id=$1 AND m.revision_id=l.revision_id AND ml.link_id=l.id AND ml.classification='relevant')
-      OR EXISTS(SELECT 1 FROM story_link_sources sl WHERE sl.story_id=$1 AND sl.link_id=l.id AND sl.classification='relevant'))`,[story.id,[...referenceUrls]]) : {rows:[]};
+        WHERE m.story_id=$1 AND m.revision_id=l.revision_id AND ml.link_id=l.id AND ml.classification='relevant')`,[story.id,[...referenceUrls]]) : {rows:[]};
   const sources = mergeSources([...inventory.map(source=>({...source,
     primary:source.primary || primary.has(source.url)})),
     ...referenced.rows.map(({url})=>{const parsed=new URL(url);return {url,label:parsed.hostname+parsed.pathname,

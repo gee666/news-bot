@@ -23,10 +23,6 @@ export async function cleanup(settings: AppSettings): Promise<void> {
       SELECT DISTINCT m.story_id AS id FROM story_mentions m JOIN item_revisions r ON r.id=m.revision_id
         JOIN item_revisions br ON br.item_id=r.item_id JOIN batch_items bi ON bi.revision_id=br.id
         JOIN processing_batches b ON b.id=bi.batch_id WHERE b.completed_at IS NULL AND m.story_id IS NOT NULL
-      UNION SELECT sl.story_id FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-        JOIN item_revisions r ON r.id=l.revision_id JOIN item_revisions br ON br.item_id=r.item_id
-        JOIN batch_items bi ON bi.revision_id=br.id JOIN processing_batches b ON b.id=bi.batch_id
-        WHERE b.completed_at IS NULL
       UNION SELECT st.story_id FROM stage_state st JOIN processing_batches b ON b.id=st.batch_id
         WHERE b.completed_at IS NULL AND st.story_id IS NOT NULL
       UNION SELECT s.id FROM stories s JOIN operational_state o ON o.value->>'storyId'=s.id::text WHERE o.key LIKE 'digest_refresh:%'`);
@@ -34,10 +30,7 @@ export async function cleanup(settings: AppSettings): Promise<void> {
       AND NOT EXISTS(SELECT 1 FROM item_revisions r JOIN batch_items bi ON bi.revision_id=r.id
         JOIN processing_batches b ON b.id=bi.batch_id WHERE r.item_id=i.id AND b.completed_at IS NULL)
       AND NOT EXISTS(SELECT 1 FROM story_mentions m JOIN pipeline_protected_stories p ON p.id=m.story_id
-        WHERE m.revision_id=i.current_revision_id)
-      AND NOT EXISTS(SELECT 1 FROM story_link_sources sl JOIN pipeline_protected_stories p ON p.id=sl.story_id
-        JOIN item_links l ON l.id=sl.link_id JOIN item_revisions r ON r.id=l.revision_id
-        WHERE r.item_id=i.id)`, [settings.retentionDays]);
+        WHERE m.revision_id=i.current_revision_id)`, [settings.retentionDays]);
     await client.query(`WITH RECURSIVE ${blockedStoriesCte} DELETE FROM stories s WHERE NOT EXISTS(SELECT 1 FROM story_mentions m WHERE m.story_id=s.id)
       AND NOT EXISTS(SELECT 1 FROM pipeline_protected_stories p WHERE p.id=s.id)
       AND s.id::text NOT IN(SELECT id FROM blocked_stories)`);

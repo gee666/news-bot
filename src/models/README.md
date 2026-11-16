@@ -96,7 +96,7 @@ new EmbeddingClient(config: EmbeddingConfig)
 
 Both configs take `baseUrl`, `recordFailure`, optional `model`, `timeoutMs`, `connectTimeoutMs`, `requestMaxAttempts`. JEV also requires `apiKey` and accepts `prefixCache`, `onMetrics`. Embeddings accept `dimensions`, default 4096.
 
-JEV template names and state fields. The pipeline uses JEV for coherence, representative selection, eligibility and interest. Extraction uses Pi with exact source coordinates and a review. Grouping calls JEV's `duplicate` template directly for each uncached pair and retains pair receipts and checkpoints. It does not fall back to Pi. Link assessment uses one Pi call across all candidates.
+JEV template names and state fields. The pipeline uses JEV for coherence, representative selection, eligibility and interest. Extraction uses Pi with caption coordinates, attached still images and local validation. Image-derived reports keep attachment provenance separately from exact caption quotations. Grouping calls JEV's `duplicate` template directly for each uncached pair and retains pair receipts and checkpoints. It does not fall back to Pi. Link assessment uses one Pi call across a revision's own links and extracted reports. Empty extraction makes no link-assessment call. `link_relevance` v4 requires a specific reported event association and excludes channel footers, navigation and broad vendor/category overlap; it does not match source-only posts to the catalogue.
 
 | Template | State | Answer |
 | --- | --- | --- |

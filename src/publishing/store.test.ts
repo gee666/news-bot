@@ -52,14 +52,14 @@ describe('publication snapshots', () => {
     ]);
   });
 
-  it('includes source-only collected reports without claiming the unvisited link is a source', async () => {
+  it('includes extracted collected reports without claiming the unvisited link is a source', async () => {
     mocks.query.mockResolvedValueOnce({ rows: [
-      { source_id: 'report:revision',text: 'Read recap.',name: 'Recaps',external_id: '4',original_url: null,connector_type: 'telegram',source_external_id: '-10044',access: 'restricted',classification: 'relevant' },
+      { source_id: 'mention:revision',text: 'Read recap.',name: 'Recaps',external_id: '4',original_url: null,connector_type: 'telegram',source_external_id: '-10044',access: 'restricted',classification: 'relevant' },
     ] });
     expect((await snapshotFor({ query: mocks.query },story)).sources).toEqual([
       { label: 'Recaps · №4',url: 'https://t.me/c/44/4',primary: false,access: 'restricted',classification: 'relevant' },
     ]);
-    expect(mocks.query.mock.calls[0]?.[0]).toContain('story_link_sources');
+    expect(mocks.query.mock.calls[0]?.[0]).not.toContain('story_link_sources');
   });
 
   it('applies current fetched irrelevance without reviving labels from historical snapshots', async () => {

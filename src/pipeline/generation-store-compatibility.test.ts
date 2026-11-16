@@ -20,7 +20,7 @@ const legacyRow = (role: 'primary' | 'supporting' | 'candidate') => ({
 const oldHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 it('pins the research hash for the primary-source edition policy', () => {
-  expect(generationHash(storyInput(), defaultSettings)).toBe('60ca40e1cade6a55d457c5c528b2721f9220c4198b209b09fb1d25c2a5bfa2cf');
+  expect(generationHash(storyInput(), defaultSettings)).toBe('3ab7a592879b01a341921ffffe6f7fa0522692a34459821430924f6703766ab8');
 });
 
 it.each([

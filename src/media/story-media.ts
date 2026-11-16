@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { evidenceLinkSql } from '../sources/links.js';
 import { db } from '../db.js';
 import type { AppSettings } from '../settings.js';
 import { requireInferenceApproval } from '../pipeline/generation-model.js';
@@ -41,14 +40,6 @@ async function prepare(storyId: string, settings: AppSettings, signal: AbortSign
     JOIN source_items i ON i.id=r.item_id AND (m.story_id<>$1 OR i.current_revision_id=r.id)
     JOIN sources s ON s.id=i.source_id
     WHERE m.story_id IN(SELECT id FROM generation_story_ids)
-      AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
-      AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
-    UNION SELECT r.id AS revision_id,r.metadata,s.metadata AS source_metadata,s.access,
-      r.id IN(SELECT id FROM single_event_sources) AS own_media
-    FROM story_link_sources sl JOIN item_links l ON l.id=sl.link_id
-    JOIN item_revisions r ON r.id=l.revision_id
-    JOIN source_items i ON i.id=r.item_id AND (sl.story_id<>$1 OR i.current_revision_id=r.id)
-    JOIN sources s ON s.id=i.source_id WHERE sl.story_id IN(SELECT id FROM generation_story_ids) AND sl.classification='relevant' AND ${evidenceLinkSql}
       AND r.metadata->>'pipelineFailure' IS DISTINCT FROM 'true'
       AND NOT EXISTS(SELECT 1 FROM operational_state o WHERE o.key='pipeline_failed_item:'||i.id::text)
     UNION SELECT e.id AS revision_id,e.metadata,'{}'::jsonb AS source_metadata,e.access,false AS own_media

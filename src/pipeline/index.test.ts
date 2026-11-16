@@ -12,16 +12,13 @@ vi.mock('../publishing/index.js', () => ({ publishDigest: mocks.publish }));
 vi.mock('./stories.js', () => ({ refreshDigest: mocks.refresh }));
 vi.mock('./judgments.js', () => ({ Judgments: class { async close() {} } }));
 vi.mock('./batches.js', () => ({ processBatch: vi.fn() }));
-vi.mock('./source-links.js', () => ({ associateSourceLinks: vi.fn() }));
 vi.mock('./vectors.js', () => ({ reembedPending: vi.fn() }));
 import { reembedPending } from './vectors.js';
 import { createPipeline } from './index.js';
-import { associateSourceLinks } from './source-links.js';
 import { ProcessingYield } from './processing-slice.js';
 
 beforeEach(() => {
   mocks.held.length = 0;
-  vi.mocked(associateSourceLinks).mockReset().mockResolvedValue(undefined);
   mocks.query.mockReset().mockResolvedValue({ rows: [] });
   mocks.publish.mockReset().mockResolvedValue(undefined);
   mocks.refresh.mockReset().mockResolvedValue({ completedStories: 1, failedStories: 0, skippedStories: 0 });
@@ -38,7 +35,7 @@ it('defers new selection when an unscheduled sweep finds the processor lease bus
   expect(states().at(-1)).toMatchObject({ phase: 'waiting', attempt: 0 });
 });
 it('defers new selection after an unscheduled sweep checkpoint', async () => {
-  vi.mocked(associateSourceLinks).mockRejectedValueOnce(new ProcessingYield());
+  mocks.refresh.mockRejectedValueOnce(new ProcessingYield());
   mocks.held.push(true,true);
   await (await createPipeline()).runDigest();
   expect(mocks.refresh).toHaveBeenCalledOnce();

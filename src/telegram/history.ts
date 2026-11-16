@@ -29,7 +29,9 @@ function peer(source: TelegramSource): Api.InputPeerChannel {
 }
 
 export function messageItem(message: Api.Message, source: TelegramSource): CollectedItem | null {
-  if (!message.message?.trim()) return null;
+  const text = message.message ?? '';
+  const media = messageMedia(message, source);
+  if (!text.trim() && !media.some(attachment => attachment.type === 'image')) return null;
   const entities: UrlEntity[] = [];
   for (const entity of message.entities ?? []) {
     if (entity instanceof Api.MessageEntityUrl) {
@@ -46,13 +48,13 @@ export function messageItem(message: Api.Message, source: TelegramSource): Colle
     ? "https://t.me/c/" + channelId + "/" + message.id : null;
   return {
     externalId: String(message.id),
-    originalText: message.message,
-    normalizedText: normalizeText(message.message),
+    originalText: text,
+    normalizedText: normalizeText(text),
     publishedAt: new Date(message.date * 1000),
     editedAt: message.editDate ? new Date(message.editDate * 1000) : null,
     originalUrl: publicUrl ?? privateUrl,
-    links: extractLinks(message.message, entities),
-    metadata: { messageId: message.id, access: publicUrl ? "public" : "restricted", hasMedia: !!message.media, media: messageMedia(message, source),
+    links: extractLinks(text, entities),
+    metadata: { messageId: message.id, access: publicUrl ? "public" : "restricted", hasMedia: !!message.media, media,
       ...(message.groupedId ? { groupedId: message.groupedId.toString() } : {}) },
   };
 }
@@ -74,7 +76,14 @@ export class TelegramHistory implements HistoryReader {
       if (!group) return [];
       const entries = group.entries;
       const media = group.media.sort((a, b) => a.telegramMessageId - b.telegramMessageId);
-      for (const entry of entries) if (entry.item) entry.item.metadata.media = media;
+      const eligible = entries.filter(entry => entry.item && (!entry.editedAt || entry.editedAt <= cutoff));
+      const captions = eligible.filter(entry => entry.item?.originalText.trim());
+      // Keep existing caption anchors. A captionless album gets one stable, oldest image anchor.
+      const anchors = new Set(captions.length ? captions : [...eligible].sort((a, b) => a.sequence - b.sequence).slice(0, 1));
+      for (const entry of entries) {
+        if (!anchors.has(entry)) entry.item = null;
+        else if (entry.item) entry.item.metadata.media = media;
+      }
       group = null;
       return entries;
     }

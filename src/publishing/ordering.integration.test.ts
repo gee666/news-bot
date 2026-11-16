@@ -58,11 +58,13 @@ describe.skipIf(!url)('chronological new publications with PostgreSQL', () => {
     const fallback = await story('Вторая новость', '00000000-0000-4000-8000-000000000003', '2026-09-29');
     const linked = await story('Третья новость', '00000000-0000-4000-8000-000000000002', '2026-09-28');
     const latest = await story('Четвертая новость', '00000000-0000-4000-8000-000000000001', '2026-09-27');
-    await source(old, '2026-09-20', '2026-09-30');
-    const unknown = await source(fallback, null, '2026-09-21');
-    await database.db.query("UPDATE source_items SET collected_at='2026-09-30' WHERE id=$1", [unknown.item]); // Refetch cannot move first collection.
-    await source(linked, '2026-09-22', '2026-09-30', 'relevant');
-    await source(latest, '2026-09-23', '2026-09-30');
+    const ago = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    await source(old, ago(30), ago(1));
+    const unknown = await source(fallback, null, ago(25));
+    await database.db.query("UPDATE source_items SET collected_at=now() WHERE id=$1", [unknown.item]); // Refetch cannot move first collection.
+    await source(linked, ago(20), ago(1));
+    await source(latest, '2019-01-01', '2026-09-30', 'relevant');
+    await source(latest, ago(15), ago(1));
     await source(latest, '2020-01-01', '2026-09-30', 'irrelevant');
     const obsolete = await source(latest, '2021-01-01', '2026-09-30');
     await database.db.query('UPDATE source_items SET current_revision_id=NULL WHERE id=$1', [obsolete.item]);
@@ -71,7 +73,7 @@ describe.skipIf(!url)('chronological new publications with PostgreSQL', () => {
     await acceptFixtureStories(settings);
     await prepareDigest(settings, '-100123');
     // Preparation in one transaction gives equal created_at; send order must not depend on it or random publication IDs.
-    await database.db.query("UPDATE publications SET created_at='2025-01-01'");
+    await database.db.query("UPDATE publications SET created_at=now()-interval '1 minute'");
     await (await import('./digest.js')).publishDigest(settings);
     expect(sent).toHaveLength(4);
     for (const [index, title] of ['Первая новость', 'Вторая новость', 'Третья новость', 'Четвертая новость'].entries()) {

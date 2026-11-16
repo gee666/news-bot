@@ -5,6 +5,7 @@ import { messageItem, TelegramHistory, type HistoryClient } from './history.js';
 import { collectSource, type CollectionStore } from './collector.js';
 import { messageMedia } from './media.js';
 import { source } from './test-fixtures.js';
+import { revisionHash } from '../sources/links.js';
 
 function id(value = '1234') {
   const parsed = parseID(value);
@@ -13,8 +14,8 @@ function id(value = '1234') {
 }
 const cutoff = new Date('2025-09-29T12:00:00Z');
 const since = new Date('2025-09-27T12:00:00Z');
-function photo(): Api.MessageMediaPhoto {
-  return new Api.MessageMediaPhoto({ photo: new Api.Photo({ id: id(), accessHash: id('5678'),
+function photo(photoId = '1234'): Api.MessageMediaPhoto {
+  return new Api.MessageMediaPhoto({ photo: new Api.Photo({ id: id(photoId), accessHash: id('5678'),
     fileReference: Buffer.alloc(0), date: 1759143600, sizes: [], dcId: 2 }) });
 }
 function document(mimeType: string, attributes: Api.TypeDocumentAttribute[] = []): Api.MessageMediaDocument {
@@ -33,10 +34,41 @@ function reader(messages: Api.Message[]): TelegramHistory {
 
 describe('Telegram media references', () => {
   it('records public and private photos using stable marked peer IDs, not usernames or expiring file references', () => {
-    const expected = [{ type: 'image', telegramMessageId: 42, telegramPeer: '-1001234' }];
+    const expected = [{ type: 'image', telegramMediaId: 'photo:1234', telegramMessageId: 42, telegramPeer: '-1001234' }];
     expect(messageItem(message(42, 'caption', photo()), source())?.metadata.media).toEqual(expected);
     expect(messageItem(message(42, 'caption', photo()), source({ metadata: { username: 'public', channelId: '1234' } }))?.metadata.media)
       .toEqual(expected);
+  });
+
+  it('collects captionless still images but not empty text, video-only posts or stickers', () => {
+    expect(messageItem(message(42, '', photo()), source())).toMatchObject({ originalText: '', normalizedText: '', links: [] });
+    expect(messageItem(message(42, '', document('image/png')), source())?.metadata.media).toHaveLength(1);
+    expect(messageItem(message(42, '', document('video/mp4')), source())).toBeNull();
+    expect(messageItem(message(42, ''), source())).toBeNull();
+  });
+
+  it.each(['', 'Same caption'])('makes attachment replacements new revisions without volatile file references: %s', caption => {
+    const first = messageItem(message(42, caption, photo('1234')), source());
+    const changed = messageItem(message(42, caption, photo('9999')), source());
+    const renewedPhoto = photo('1234');
+    if (!(renewedPhoto.photo instanceof Api.Photo)) throw new Error('Invalid fixture');
+    renewedPhoto.photo.fileReference = Buffer.from('renewed secret reference');
+    const renewed = messageItem(message(42, caption, renewedPhoto), source());
+    if (!first || !changed || !renewed) throw new Error('Missing image fixture');
+    expect(revisionHash(first)).not.toBe(revisionHash(changed));
+    expect(revisionHash(first)).toBe(revisionHash(renewed));
+    expect(JSON.stringify(renewed.metadata.media)).not.toContain('secret');
+  });
+
+  it('collects a captionless album once with stable oldest image anchor and every attachment', async () => {
+    const messages = [message(44, '', photo(), '100'), message(43, '', document('video/mp4'), '100'), message(42, '', photo(), '100')];
+    const commitSource = vi.fn<CollectionStore['commitSource']>().mockResolvedValue(1);
+    await collectSource(reader(messages), { commitSource }, 'batch', source(), cutoff);
+    const items = commitSource.mock.calls[0]?.[2];
+    expect(items).toHaveLength(1);
+    expect(items?.[0]).toMatchObject({ externalId: '42', originalText: '', normalizedText: '' });
+    expect(items?.[0]?.metadata.media).toHaveLength(3);
+    expect(commitSource.mock.calls[0]?.[3].lastMessageId).toBe(44);
   });
 
   it('recognizes videos by MIME or video attributes and images sent as documents', () => {
@@ -66,9 +98,9 @@ describe('Telegram media references', () => {
     const items = commitSource.mock.calls[0]?.[2];
     expect(items).toHaveLength(1);
     expect(items?.[0]?.metadata.media).toEqual([
-      { type: 'image', telegramMessageId: 42, telegramPeer: '-1001234', groupedId },
-      { type: 'video', telegramMessageId: 43, telegramPeer: '-1001234', groupedId },
-      { type: 'image', telegramMessageId: 44, telegramPeer: '-1001234', groupedId },
+      { type: 'image', telegramMediaId: 'photo:1234', telegramMessageId: 42, telegramPeer: '-1001234', groupedId },
+      { type: 'video', telegramMediaId: 'document:1234', telegramMessageId: 43, telegramPeer: '-1001234', groupedId },
+      { type: 'image', telegramMediaId: 'photo:1234', telegramMessageId: 44, telegramPeer: '-1001234', groupedId },
     ]);
     expect(commitSource.mock.calls[0]?.[3].lastMessageId).toBe(44);
   });
@@ -80,9 +112,9 @@ describe('Telegram media references', () => {
     for await (const entry of reader([future, message(45, 'first', photo(), '100'),
       message(44, 'second', document('video/mp4'), '99'), message(43, 'plain')]).recent(source(), since, cutoff)) entries.push(entry);
     expect(entries.find(entry => entry.sequence === 45)?.item?.metadata.media)
-      .toEqual([{ type: 'image', telegramMessageId: 45, telegramPeer: '-1001234', groupedId: '100' }]);
+      .toEqual([{ type: 'image', telegramMediaId: 'photo:1234', telegramMessageId: 45, telegramPeer: '-1001234', groupedId: '100' }]);
     expect(entries.find(entry => entry.sequence === 44)?.item?.metadata.media)
-      .toEqual([{ type: 'video', telegramMessageId: 44, telegramPeer: '-1001234', groupedId: '99' }]);
+      .toEqual([{ type: 'video', telegramMediaId: 'document:1234', telegramMessageId: 44, telegramPeer: '-1001234', groupedId: '99' }]);
     expect(entries.at(-1)?.item?.metadata.media).toEqual([]);
   });
 });

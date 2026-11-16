@@ -8,7 +8,9 @@ Source settings allow 1 to 50 article attempts, 1 to 1000 backlog entries and a 
 
 ## Processing
 
-Extraction uses one model call and validates exact ranges, overlap and full source coverage locally. Successful extraction belongs to the immutable revision, including confirmed-empty output. Restarts and profile changes do not repeat it.
+Extraction uses one model call and validates exact ranges, overlap and full source coverage locally. Successful extraction belongs to the immutable revision, including confirmed-empty output. Restarts and profile changes do not repeat it. Empty extraction stops without source-only link matching or later catalogue reclassification.
+
+Link assessment compares a revision's links only with its own extracted news. A link needs a specific association with the reported event. Shared vendor, category or domain alone does not qualify. Channel footers, subscription links, navigation and links for another news item are irrelevant. Unseen page contents cannot supply a missing connection. Digest refresh does not scan empty posts for links.
 
 Grouping selects the 20 nearest retained eligible groups using embeddings and lexical overlap, plus all shared-link, same-source and prior-revision groups. JEV classifies each candidate as `same`, `related` or `unrelated`, using complete reports without truncation. This avoids thousands of serial comparisons per report as retained history grows. Pair decisions are cached and survive checkpoints and candidate reordering. No Pi fallback or verification request runs. Only the highest-ranked `same` candidate receives the report. Extra `same` matches do not create inferred `related` links. Each stored relation retains only its pair's candidate fingerprints, not a duplicate of the entire catalogue. Related stories stay separate from generation input.
 

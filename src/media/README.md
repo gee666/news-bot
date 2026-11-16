@@ -1,6 +1,6 @@
 # Cumulative publication media
 
-`publicationMedia(storyId, settings)` returns every retained, distinct attachment from the draft and its complete accepted same-event group, including joined publication branches. It uses `generationThread` from `pipeline/generation-context.ts`. RELATED events, quarantined legacy relations and unverified legacy edges do not contribute attachments. Retained mention and supplementary-source revisions from earlier editions may be historical. Draft revisions must still be current.
+`publicationMedia(storyId, settings)` returns every retained, distinct attachment from the draft and its complete accepted same-event group, including joined publication branches. It uses `generationThread` from `pipeline/generation-context.ts`. RELATED events, quarantined legacy relations and unverified legacy edges do not contribute attachments. Retained extracted-report revisions from earlier editions may be historical. Source-only associations never supply attachments. Draft revisions must still be current.
 
 Retained source metadata has no extra seven-day collection cutoff. Pipeline-failure checks still apply. Supplementary sources must remain relevant and evidence-eligible. Research attachments must be public, relevant and unsuperseded. Current-draft research must also be unexpired; retained ancestor research is historical event evidence even after its fetch TTL expires. Inference approval runs before any selection-cache lookup or download, including when ancestor source access changes.
 

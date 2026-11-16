@@ -31,33 +31,9 @@ describe('generation database boundary', () => {
       expect(query[0]).toMatch(/^WITH RECURSIVE /u);
     }
     expect(mocks.query.mock.calls[2]?.[0]).toContain("ml.classification <> 'irrelevant'");
-    expect(mocks.query.mock.calls[2]?.[0]).toContain("sl.classification='relevant'");
-    expect(mocks.query.mock.calls[2]?.[0]).toContain("story_link_sources");
+    expect(mocks.query.mock.calls.every(([sql]) => !sql.includes("story_link_sources"))).toBe(true);
     expect(mocks.query.mock.calls[2]?.[0]).not.toContain("LIMIT 100");
     expect(mocks.query.mock.calls.every(call => call[1]?.[0] === storyId)).toBe(true);
-  });
-
-  it('loads approved current source-only report text once and excludes mentioned or quarantined revisions', async () => {
-    const input = storyInput();
-    const report = { source_id: secondId, revision_id: evidenceId, text: 'Pro $200 now 10x Plus, previously 20x; $500 25x.',
-      source_name: 'ForgetMe', original_url: 'https://t.me/forgetmeai/6403', access: 'public',
-      published_at: new Date('2026-09-29T21:58:00Z'), collected_at: new Date('2026-09-30T08:00:00Z') };
-    mocks.query.mockResolvedValueOnce({ rows: [input.story] }).mockResolvedValueOnce({ rows: input.mentions })
-      .mockResolvedValueOnce({ rows: input.links }).mockResolvedValueOnce({ rows: [report] });
-    const loaded = await loadStory(storyId);
-    expect(loaded.supplementary_reports).toEqual([{ ...report,
-      published_at: report.published_at.toISOString(), collected_at: report.collected_at.toISOString() }]);
-    const sql = String(mocks.query.mock.calls[3]?.[0]);
-    expect(sql).toContain("SELECT DISTINCT");
-    expect(sql).toContain("sl.classification='relevant'");
-    expect(sql).toContain('i.current_revision_id=r.id');
-    expect(sql).toContain('m.story_id IN(SELECT id FROM generation_story_ids) AND m.revision_id=r.id');
-    expect(sql).toContain("pipelineFailure");
-    expect(sql).toContain("pipeline_failed_item:");
-    expect(sql).not.toContain('INSERT');
-    const hash = generationHash(loaded, defaultSettings);
-    loaded.supplementary_reports![0]!.text += ' changed tail';
-    expect(generationHash(loaded, defaultSettings)).not.toBe(hash);
   });
 
   it('normalizes source publication/collection dates and fingerprints their chronology', async () => {

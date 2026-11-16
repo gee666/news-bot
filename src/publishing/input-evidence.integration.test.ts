@@ -118,12 +118,39 @@ describe.skipIf(!url)('story-scoped collected publication evidence', () => {
     await replace('Alpha released', 'Alpha released', null, [{ url: primaryUrl, target: 'alpha' }]);
     expect(compare(await current(), before)).toEqual({ allowed: true });
   });
-  it('source-only coverage never uses unrelated parent text changes as publication input', async () => {
+  it('excludes legacy source-only associations entirely, including genuinely new URLs', async () => {
     await replace('Alpha released. Beta costs 10.', null, 'Beta costs 10', [{ url: primaryUrl, target: 'source-only' }]);
     const before = await current();
-    expect(before.inputs.map(input => input.payload)).toEqual([{ kind: 'url', url: primaryUrl }]);
-    await replace('Alpha released. Beta costs 20.', null, 'Beta costs 20', [{ url: primaryUrl, target: 'source-only' }]);
+    expect(before.inputs).toEqual([]);
+    await replace('Alpha released. Beta costs 20.', null, 'Beta costs 20', [{ url: `${primaryUrl}/new`, target: 'source-only' }]);
+    expect((await current()).inputs).toEqual([]);
     expect(compare(await current(), before)).toEqual({ allowed: false, reason: 'no_new_source_input' });
+  });
+  it.each(['', 'Look at this'])('admits persisted visual reports with caption %j, not later model rewordings', async caption => {
+    const { imageEvidenceText, imageEvidenceSchema } = await import('../pipeline/extraction-evidence.js');
+    const imageEvidence = [imageEvidenceSchema.parse({ text: 'Acme released model weights', images: [{ id: 'i0',
+      descriptor: { type: 'image', url: 'https://example.org/news.jpg' },
+      sourceSha256: 'a'.repeat(64), modelSha256: 'b'.repeat(64) }] })];
+    await replace(caption, imageEvidenceText(imageEvidence), null, []);
+    await database.db.query('UPDATE source_items SET published_at=now() WHERE id=$1', [item]);
+    async function persist() {
+      await database.db.query(`UPDATE item_revisions SET metadata=jsonb_build_object('pipelineExtraction',$2::jsonb)
+        WHERE id=(SELECT current_revision_id FROM source_items WHERE id=$1)`,
+      [item, JSON.stringify([{ kind: 'image', parts: [], context: [], imageEvidence }])]);
+      await database.db.query(`UPDATE story_mentions SET text=$2,metadata=jsonb_build_object('imageEvidence',$3::jsonb)
+        WHERE story_id=$1`, [alpha, imageEvidenceText(imageEvidence), JSON.stringify(imageEvidence)]);
+    }
+    await persist();
+    const first = await current();
+    expect(first.inputs.map(input => input.payload.kind)).toEqual(['image']);
+    expect(admission.admitPublicationInputs(first, { version: 'publication-input-v2', inputs: [] }, false, true, 48))
+      .toEqual({ allowed: true });
+    const fact = imageEvidence[0]; if (!fact) throw new Error('Missing visual fixture');
+    fact.text = 'Acme has now made its artificial intelligence model weights available';
+    await persist();
+    expect(compare(await current(), first)).toEqual({ allowed: false, reason: 'no_new_source_input' });
+    expect((await database.db.query('SELECT normalized_text FROM item_revisions WHERE item_id=$1', [item])).rows)
+      .toEqual([{ normalized_text: caption }]);
   });
   it('does not let unrelated collected additions authorize re-extracted existing event content', async () => {
     await replace('Alpha released. Beta costs 10.', 'Alpha released', 'Beta costs 10', []);

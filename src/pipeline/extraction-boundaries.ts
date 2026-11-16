@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ValidationCode } from '../models/structured-diagnostics.js';
 import { validSpans, eventSpans, type Span, type ExtractedEvent } from './extraction-store.js';
+import type { ImageProvenance } from './extraction-evidence.js';
 
 export interface SourceUnit extends Span { id: string; text: string }
 export function sourceUnits(text: string): SourceUnit[] {
@@ -32,11 +33,23 @@ export function sourceSelectionSchema(units: readonly SourceUnit[]) {
     : z.string().regex(new RegExp(`^(?:${ids.map(value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|')})$`, 'u'));
   return selectionSchemaWithIds(id);
 }
+/** Image claims are observations, never ranges in the caption. Every input image needs a decision. */
+export function imageSourceSelectionSchema(units: readonly SourceUnit[], imageIds: string[]) {
+  const text = sourceSelectionSchema(units);
+  const id = z.enum(imageIds);
+  const event = text.shape.events.element;
+  return text.extend({ events: z.array(event.extend({ parts: z.array(event.shape.parts.element),
+    image_facts: z.array(z.object({ text: z.string().trim().min(1).max(12_000), image_ids: z.array(id).min(1).max(10) }).strict()),
+  }).strict()), omitted_images: z.array(z.object({ id,
+    reason: z.enum(['non_news', 'profile_excluded', 'meme_satire', 'unreadable', 'duplicate']),
+  }).strict()) }).strict();
+}
 interface Range { first: string; last: string; excerpt?: string | null }
 interface Omission { id: string; last?: string | null; excerpt?: string | null; reason: string }
 export interface EventSelection {
-  events: { parts: Range[]; context: Range[] }[];
+  events: { parts: Range[]; context: Range[]; image_facts?: { text: string; image_ids: string[] }[] }[];
   omitted: Omission[];
+  omitted_images?: { id: string; reason: string }[];
 }
 export function resolveRange(text: string, units: SourceUnit[], range: Range): Span | null {
   const first = units.findIndex(unit => unit.id === range.first);
@@ -71,8 +84,10 @@ function coverage(text: string, units: SourceUnit[], spans: Span[], omitted: Omi
   return true;
 }
 interface SelectionFailure { code: ValidationCode; feedback: string }
-function selectionFailure(text: string, units: SourceUnit[], selection: EventSelection): SelectionFailure | null {
-  if (selectedEvents(text, units, selection) !== null) return null;
+function selectionFailure(text: string, units: SourceUnit[], selection: EventSelection, images: readonly ImageProvenance[]): SelectionFailure | null {
+  if (selectedEvents(text, units, selection, images) !== null) return null;
+  if (!validImageSelection(selection, images)) return { code: 'extraction_partition',
+    feedback: 'Each image must support a nonempty image_facts report or appear exactly once in omitted_images, never both. Use only supplied image IDs. Each event needs text parts or image facts. Unreadable images are unresolved inputs, not a confirmed no-news result. Read the image if possible; never invent its contents.' };
   const assigned: { span: Span; label: string; kind: 'parts' | 'context' | 'omitted'; event: number }[] = [];
   for (const [eventIndex, event] of selection.events.entries()) for (const kind of ['parts', 'context'] as const) {
     for (const [index, range] of event[kind].entries()) {
@@ -115,16 +130,36 @@ function selectionFailure(text: string, units: SourceUnit[], selection: EventSel
   return missing.length ? { code: 'extraction_coverage', feedback: `Uncovered source text: ${missing.join('; ')}. Include conjunctions in an adjacent exact excerpt or explicitly omit them as non_news. Preserve all factual details.` }
     : { code: 'extraction_partition', feedback: 'Overlapping, reused primary parts or inconsistent context ranges. Only shared context may overlap between events.' };
 }
-export function selectionFeedback(text: string, units: SourceUnit[], selection: EventSelection): string {
-  const failure = selectionFailure(text, units, selection);
+export function selectionFeedback(text: string, units: SourceUnit[], selection: EventSelection, images: readonly ImageProvenance[] = []): string {
+  const failure = selectionFailure(text, units, selection, images);
   return failure?.feedback ?? (selection.events.length ? ''
     : 'Empty proposal. Review every omission against the whole source.');
 }
-export function selectionValidationCodes(text: string, units: SourceUnit[], selection: EventSelection): ValidationCode[] {
-  const failure = selectionFailure(text, units, selection);
+export function selectionValidationCodes(text: string, units: SourceUnit[], selection: EventSelection, images: readonly ImageProvenance[] = []): ValidationCode[] {
+  const failure = selectionFailure(text, units, selection, images);
   return failure ? [failure.code] : [];
 }
-export function selectedEvents(text: string, units: SourceUnit[], selection: EventSelection): ExtractedEvent[] | null {
+function validImageSelection(selection: EventSelection, images: readonly ImageProvenance[]): boolean {
+  const known = new Set(images.map(image => image.id));
+  if (known.size !== images.length) return false;
+  const used = new Set<string>();
+  for (const event of selection.events) {
+    if (!event.parts.length && !event.image_facts?.length) return false;
+    for (const fact of event.image_facts ?? []) {
+      if (!fact.text.trim() || !fact.image_ids.length || new Set(fact.image_ids).size !== fact.image_ids.length) return false;
+      for (const id of fact.image_ids) { if (!known.has(id)) return false; used.add(id); }
+    }
+  }
+  const omitted = new Set<string>();
+  for (const image of selection.omitted_images ?? []) {
+    if (image.reason === 'unreadable' || !known.has(image.id) || used.has(image.id) || omitted.has(image.id)) return false;
+    omitted.add(image.id);
+  }
+  return [...known].every(id => used.has(id) || omitted.has(id));
+}
+export function selectedEvents(text: string, units: SourceUnit[], selection: EventSelection,
+  images: readonly ImageProvenance[] = []): ExtractedEvent[] | null {
+  if (!validImageSelection(selection, images)) return null;
   const events: ExtractedEvent[] = [];
   const parts: Span[] = [];
   const contexts = new Map<string, Span>();
@@ -138,7 +173,10 @@ export function selectedEvents(text: string, units: SourceUnit[], selection: Eve
       else contexts.set(`${span.start}:${span.end}`, span);
     }
     if (!validSpans(text, eventSpans(event))) return null;
-    events.push(event);
+    const facts = selected.image_facts ?? [];
+    events.push(facts.length ? { ...event, kind: 'image', imageEvidence: facts.map(fact => ({ text: fact.text,
+      images: images.filter(image => fact.image_ids.includes(image.id)),
+    })) } : event);
   }
   const mergedContext: Span[] = [];
   for (const span of [...contexts.values()].sort((a, b) => a.start - b.start)) {

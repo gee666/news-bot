@@ -23,7 +23,7 @@ function client(options: { receipt?: object; primary?: string[]; referenced?: st
   const query = vi.fn().mockImplementation(async (sql: string) => {
     if (sql.includes("p.delivery_kind='album'")) return { rows: (options.blockedNavigation ?? []).map(url => ({ url })) };
     if (sql.includes('SELECT DISTINCT e.id,coalesce')) return { rows: options.reads ?? [] };
-    if (sql.includes('WITH source_assignments')) return { rows: [origin, { ...origin, source_id: 'mention:other',
+    if (sql.includes('WITH source_revisions')) return { rows: [origin, { ...origin, source_id: 'mention:other',
       name: 'Другой канал', original_url: otherUrl, external_id: '1' }] };
     if (sql.includes('SELECT e.title')) return { rows: [{ id: 'evidence', title: 'Отчёт OpenAI', content: 'Actual research findings.',
       url: reportUrl, primary: true, metadata: {} }] };
@@ -127,7 +127,7 @@ describe('generation source selection', () => {
     const referenceQuery = db.query.mock.calls.find(([sql]) => sql.includes('SELECT DISTINCT l.url'));
     expect(referenceQuery?.[0]).toContain("i.current_revision_id=l.revision_id");
     expect(referenceQuery?.[0]).toContain("ml.classification='relevant'");
-    expect(referenceQuery?.[0]).toContain("sl.classification='relevant'");
+    expect(referenceQuery?.[0]).not.toContain("story_link_sources");
     expect(db.query).toHaveBeenCalledWith(expect.stringContaining('SELECT DISTINCT l.url'),
       [story.id,[reportUrl,secondary,stale]]);
     expect(render(snapshot).links.map(link => link.url)).toContain(secondary);

@@ -2,12 +2,15 @@ import { Api } from 'telegram';
 import { parseID } from 'telegram/Utils.js';
 import { z } from 'zod';
 import { withUserClient } from '../telegram/client.js';
+import { telegramMediaIdentity } from '../telegram/media.js';
 import { fetchPublicMedia } from '../pipeline/research-fetch.js';
 import type { MediaCandidate } from './comparison.js';
 import { abortable } from './deadline.js';
 
 export const mediaDescriptor = z.object({ type: z.enum(['image', 'video']), url: z.string().optional(),
-  telegramMessageId: z.number().int().positive().optional() });
+  telegramMessageId: z.number().int().positive().optional(),
+  telegramPeer: z.string().regex(/^-100\d+$/u).optional(), groupedId: z.string().regex(/^-?\d+$/u).optional(),
+  telegramMediaId: z.string().regex(/^(?:photo|document):-?\d+$/u).optional() });
 export type MediaDescriptor = z.infer<typeof mediaDescriptor>;
 export interface MediaSource { metadata: Record<string, unknown> }
 
@@ -26,6 +29,7 @@ export async function downloadMedia(descriptor: MediaDescriptor, source: MediaSo
   const channel = z.object({ channelId: z.string().regex(/^\d+$/u), accessHash: z.string().regex(/^-?\d+$/u) }).parse(source.metadata);
   const channelId = parseID(channel.channelId); const accessHash = parseID(channel.accessHash);
   if (!channelId || !accessHash) throw new Error('Invalid Telegram media peer');
+  if (descriptor.telegramPeer && descriptor.telegramPeer !== `-100${channel.channelId}`) throw new Error('Telegram media peer does not match source');
   return abortable(signal, () => withUserClient(async client => {
     signal?.throwIfAborted();
     // GramJS has no AbortSignal argument. Disconnect this download's dedicated
@@ -38,6 +42,9 @@ export async function downloadMedia(descriptor: MediaDescriptor, source: MediaSo
       signal?.throwIfAborted();
       const message = messages[0];
       if (!message?.media) throw new Error('Telegram source media is no longer available');
+      if (descriptor.telegramMediaId && descriptor.telegramMediaId !== telegramMediaIdentity(message.media)) {
+        throw new Error('Telegram attachment changed since this revision was collected');
+      }
       if (message.media instanceof Api.MessageMediaDocument && message.media.document instanceof Api.Document
         && Number(message.media.document.size.toString()) > maxBytes) throw new Error('Media exceeds upload size limit');
       const data = await client.downloadMedia(message, { progressCallback: async (received, total) => {

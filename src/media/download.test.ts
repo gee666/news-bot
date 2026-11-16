@@ -1,5 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-import { downloadMedia } from './download.js';
+import { downloadMedia, mediaDescriptor } from './download.js';
+import { Api } from 'telegram';
+import { parseID } from 'telegram/Utils.js';
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), client: vi.fn(), messages: vi.fn(), download: vi.fn(), disconnect: vi.fn() }));
 vi.mock('../pipeline/research-fetch.js', () => ({ fetchPublicMedia: mocks.fetch }));
@@ -8,6 +10,27 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.disconnect.mockResolvedValue(undefined);
   mocks.client.mockImplementation(async run => run({ getMessages: mocks.messages, downloadMedia: mocks.download, disconnect: mocks.disconnect }));
+});
+
+it('preserves stable Telegram attachment provenance through descriptor validation', () => {
+  const descriptor = { type: 'image', telegramMessageId: 42, telegramPeer: '-100123', groupedId: '99', telegramMediaId: 'photo:1234' };
+  expect(mediaDescriptor.parse(descriptor)).toEqual(descriptor);
+});
+
+it('refuses to download a replacement Telegram attachment into an older revision', async () => {
+  const id = parseID('9999');
+  if (!id) throw new Error('Invalid fixture');
+  mocks.messages.mockResolvedValue([{ media: new Api.MessageMediaPhoto({ photo: new Api.Photo({ id, accessHash: id,
+    fileReference: Buffer.alloc(0), date: 1, sizes: [], dcId: 2 }) }) }]);
+  await expect(downloadMedia({ type: 'image', telegramMessageId: 42, telegramMediaId: 'photo:1234' },
+    { metadata: { channelId: '123', accessHash: '456' } })).rejects.toThrow('attachment changed');
+  expect(mocks.download).not.toHaveBeenCalled();
+});
+
+it('rejects a Telegram peer mismatch before opening a client', async () => {
+  await expect(downloadMedia({ type: 'image', telegramMessageId: 42, telegramPeer: '-100999' },
+    { metadata: { channelId: '123', accessHash: '456' } })).rejects.toThrow('peer does not match');
+  expect(mocks.client).not.toHaveBeenCalled();
 });
 
 it('passes the cancellation signal through public-media fetches', async () => {

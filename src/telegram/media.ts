@@ -6,6 +6,14 @@ export interface TelegramMedia {
   telegramMessageId: number;
   telegramPeer: string;
   groupedId?: string;
+  telegramMediaId?: string;
+}
+
+/** Stable attachment identity, never expiring file references or access credentials. */
+export function telegramMediaIdentity(media: Api.TypeMessageMedia | undefined): string | undefined {
+  if (media instanceof Api.MessageMediaPhoto && media.photo instanceof Api.Photo) return `photo:${media.photo.id.toString()}`;
+  if (media instanceof Api.MessageMediaDocument && media.document instanceof Api.Document) return `document:${media.document.id.toString()}`;
+  return undefined;
 }
 
 export function messageMedia(message: Api.Message, source: TelegramSource): TelegramMedia[] {
@@ -22,6 +30,7 @@ export function messageMedia(message: Api.Message, source: TelegramSource): Tele
       || document.attributes.some(attribute => attribute instanceof Api.DocumentAttributeVideo)) type = 'video';
     else if (/^image\//iu.test(document.mimeType)) type = 'image';
   }
-  return type ? [{ type, telegramMessageId: message.id, telegramPeer: source.externalId,
+  const telegramMediaId = telegramMediaIdentity(media);
+  return type && telegramMediaId ? [{ type, telegramMessageId: message.id, telegramPeer: source.externalId, telegramMediaId,
     ...(message.groupedId ? { groupedId: message.groupedId.toString() } : {}) }] : [];
 }

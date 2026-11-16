@@ -57,24 +57,14 @@ export const jevTemplates = {
       criteria: counts,
     } },
   },
-  source_link_role: {
-    version: "source-link-role-v1",
-    questions: { role: {
-      type: "choice", instructions: untrusted +
-        "Classify the function of this whole source message and its supplied links, independently of whether it contains extractable standalone news. source_only means a reference to an identifiable news event, product announcement, article, report or release recap that can supply sources for existing stories. For example 'Все релизы с DevDay: https://openai.com/ru-RU/index/devday-2026-recap/' is a source-only release recap, not an event-registration promotion and not a separate news story. Distinguish retrospective release coverage from invitations to attend a course, webinar or conference. Exclude pure ads, paid courses, webinars, recruitment, conference registration, unrelated navigation and subscriptions even when they include links or AI company names. A general homepage without identifiable news context is not a source-only contribution. If the text itself reports a standalone event rather than pointing to coverage, use other and leave extraction to the normal pipeline. Do not infer unseen page contents; judge supplied message meaning, not URL keyword blacklists.",
-      criteria: { source_only: "A source reference for an identifiable existing news event or release recap, not separate news.",
-        excluded: "Advertising, instruction, registration promotion, subscription or unrelated navigation.",
-        other: "Standalone news or insufficient context to identify a source contribution." },
-    } },
-  },
   link_relevance: {
-    version: "link-relevance-v3",
+    version: "link-relevance-v4",
     questions: { relevance: {
       type: "choice", instructions: untrusted +
-        "Judge whether link, anchor and surroundingText support this specific story. A self-link, product page, article or same-event release recap can be relevant without fetched confirmation or verified primary status. One recap may support several distinct products at the named event; do not merge those stories. Match the actual vendor, complete product name or same-event context, not isolated category words. Shared generic words such as Cloud, API, AI, agent, security or infrastructure are NO evidence of relevance. When the surrounding text explicitly describes one vendor's named infrastructure products but the story concerns a differently named cloud product not mentioned there, return irrelevant, NOT uncertain: absence of an explicit connection plus this mismatch establishes a different subject. Do not guess that Cloud-branded products share a platform or vendor. A broad release recap need not list every covered product in its short link caption; it can support individual releases from that same event. Match the named organizer, product and event scope. A recap explicitly about one company's event is irrelevant to another company's unrelated release or acquisition, not uncertain merely because page contents are unseen. Use uncertain when the story-to-source attachment itself is ambiguous. Do not infer an unstated issuer or unrelated product's participation at that event. Promotional wording or domain alone is not a rejection rule. Do not fetch the link.",
-      criteria: { relevant: "A product, vendor or same-event context match makes this source useful for this story.",
-        irrelevant: "Different named product/vendor/event, generic-topic overlap only, unrelated advertising or navigation. A shared category word is insufficient.",
-        uncertain: "The supplied context is genuinely ambiguous; no established subject mismatch. Not for two differently named products sharing only a generic word." },
+        "Judge whether the supplied link, anchor and surrounding text explicitly associate the link with the specific reported event in this story. Require a concrete event association, such as a release announcement, article, report, product page or self-link identified as a source for that development. Shared vendor, product family, category, domain or broad topic alone is insufficient. A vendor homepage does not support every event involving that vendor. Channel footers, subscription links, social profiles, menus and other navigation are irrelevant, even when their vendor or topic matches the story. In a multi-news message, a link attached to another item is irrelevant to this target; presence in the same message is not evidence. A release recap can be relevant only when the supplied text explicitly connects this story's development to that same identifiable event. Do not assume every product from an organizer appears in its recap. Keep complete product names, versions, vendors and event identities distinct; generic words such as Cloud, API, AI, agent, security or infrastructure do not establish a connection. Different named products, vendors or events without an explicit connection are irrelevant, not uncertain. Use uncertain only when a specific story-to-link attachment has genuine ambiguity, never for missing event evidence or broad vendor/category overlap. Promotional wording or domain alone is not a rejection rule. Relevance does not prove primary authority or factual verification. Judge supplied context only; do not fetch the link or infer unseen page contents.",
+      criteria: { relevant: "Supplied context specifically associates this link with the event reported in this story.",
+        irrelevant: "No specific reported event association, another news item, channel footer/navigation, or only broad vendor/category/topic overlap.",
+        uncertain: "A specific event-to-link attachment exists but is genuinely ambiguous; not missing evidence or broad overlap." },
     } },
   },
   event_group_integrity: {

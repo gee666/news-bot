@@ -12,7 +12,6 @@ import { recordProcessingDiagnostic } from './processing-diagnostics.js';
 import { reembedPending } from './vectors.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 import { withLease } from './lease.js';
-import { associateSourceLinks } from './source-links.js';
 import { runNow, type RunNowJob, type RunNowOutcome } from './run-now.js';
 
 export interface Pipeline {
@@ -78,11 +77,7 @@ export async function createPipeline(): Promise<Pipeline> {
             }
             return result;
           };
-          const report = await refresh(async () => {
-            const report = await refreshDigest(settings, judgments);
-            await associateSourceLinks(settings);
-            return report;
-          });
+          const report = await refresh(() => refreshDigest(settings, judgments));
           // Scheduled ticks can send ready stories; recovery waits for a complete sweep.
           if (scheduled || !partial) await publishDigest(settings);
           if (partial) throw new OperationalDeferred('Partial digest sweep. Saved work will resume after the checkpoint.');

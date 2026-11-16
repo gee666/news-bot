@@ -72,7 +72,13 @@ describe.skipIf(!databaseUrl)('PostgreSQL schema integration', () => {
       await client.query(`SET LOCAL search_path=${legacy},public`);
       const directory = new URL('../migrations/',import.meta.url);
       const names = (await readdir(directory)).filter(name => /^\d+_[a-z_]+\.sql$/u.test(name) && name < '207_').sort();
-      for (const name of names) await client.query(await readFile(new URL(name,directory),'utf8'));
+      // Raw migration replay needs the same ledger that migrate() creates and advances.
+      await client.query(`CREATE TABLE schema_migrations (
+        name text PRIMARY KEY,checksum text NOT NULL,applied_at timestamptz NOT NULL DEFAULT now())`);
+      for (const name of names) {
+        await client.query(await readFile(new URL(name,directory),'utf8'));
+        await client.query("INSERT INTO schema_migrations(name,checksum) VALUES($1,'fixture')", [name]);
+      }
       const snapshot = (await client.query<{id:string}>(`INSERT INTO publication_snapshots(content)
         VALUES('{"headline":"News","score":8,"details":"Facts","detailsKind":"summary","sources":[]}') RETURNING id`)).rows[0];
       if (!snapshot) throw new Error('Missing migration fixture');

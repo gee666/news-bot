@@ -3,7 +3,8 @@
 - Collect immutable source revisions into durable batches.
 - Extract exact source passages in one structured model call.
   Local validation checks coordinates, overlap and complete coverage.
-  Save successful extraction once, including empty results.
+  Save successful extraction once, including empty results. Empty extraction stops
+  news and link assessment for that revision; it never supplies links to the catalogue.
 - Shortlist the 20 nearest retained eligible event groups using existing
   embeddings and lexical overlap. Always include shared-link, same-source and
   prior-revision groups, even beyond that limit. Compare the incoming report once
@@ -15,8 +16,13 @@
   model negatives, but cannot override an explicit user-defined event boundary.
   Related stories stay separate and never contribute generation material.
   Previously quarantined or unclassified legacy links are not restored automatically.
-- Classify item links together, then read and assess relevant documents.
-  Link relevance and primary origin do not prove factual verification.
+- Classify item links only against that revision's extracted reports, then read and
+  assess relevant documents. Require a specific reported event association; channel
+  footers, navigation and broad vendor/category overlap are irrelevant. Empty posts
+  are not reclassified when the catalogue changes. Legacy source-only rows do not
+  supply generation reports, attachments, publication sources or policy decisions.
+  Link relevance and primary origin
+  do not prove factual verification.
 - Check story coherence, select a representative, assess eligibility,
   rank interest and refresh embeddings. JEV context overflow uses Pi
   with the same criteria and complete input.

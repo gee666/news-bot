@@ -46,14 +46,12 @@ vi.mock('./batches.js', () => ({ processBatch: mocks.process }));
 vi.mock('./stories.js', () => ({ refreshDigest: mocks.refresh }));
 vi.mock('./judgments.js', () => ({ Judgments: class { async close() {} } }));
 vi.mock('./consolidation.js', () => ({ consolidateStories: vi.fn() }));
-vi.mock('./source-links.js', () => ({ associateSourceLinks: vi.fn(), SOURCE_MESSAGES_PER_PASS: 50 }));
 vi.mock('./vectors.js', () => ({ reembedPending: vi.fn() }));
 vi.mock('./processing-diagnostics.js', () => ({ recordProcessingDiagnostic: mocks.diagnostic }));
 vi.mock('./scheduled-intake.js', () => ({ requestScheduledIntake: mocks.request, requestLatestScheduledIntake:vi.fn(async()=>{}), drainScheduledIntake: mocks.drain }));
 
 import { createPipeline, type Pipeline } from './index.js';
 import { defaultSettings } from '../settings.js';
-import { associateSourceLinks } from './source-links.js';
 import { checkProcessingSlice } from './processing-slice.js';
 
 let pipeline: Pipeline | undefined;
@@ -78,7 +76,6 @@ beforeEach(() => {
   mocks.leases.clear(); mocks.leaseAttempts.length = 0; mocks.turns.length = 0;
   mocks.operations.clear(); mocks.scheduled.clear(); mocks.pendingSlots.length = 0; mocks.collectedSlots.length = 0;
   mocks.alwaysDue = false;
-  vi.mocked(associateSourceLinks).mockReset();
   mocks.diagnostic.mockReset().mockResolvedValue(undefined);
   mocks.destroy.mockReset().mockResolvedValue(undefined);
   mocks.publish.mockReset().mockResolvedValue(undefined);
@@ -164,9 +161,9 @@ describe('automatic recovery fairness', () => {
     expect(mocks.leases.size).toBe(0);
   });
 
-  it('defers new publication during partial recovery, then publishes when the source-link sweep finishes', async () => {
+  it('defers new publication during partial recovery, then publishes when story refresh finishes', async () => {
     vi.stubEnv('PROCESSING_SLICE_MS', '1000'); mocks.alwaysDue = true;
-    vi.mocked(associateSourceLinks).mockImplementation(async () => {
+    mocks.refresh.mockImplementation(async () => {
       for (let index = 0; index < 50; index++) { checkProcessingSlice(); await delay(500); }
       return;
     });
@@ -176,7 +173,7 @@ describe('automatic recovery fairness', () => {
     expect(mocks.refresh).toHaveBeenCalledTimes(2);
     expect(mocks.publish).not.toHaveBeenCalled();
     mocks.alwaysDue = false;
-    vi.mocked(associateSourceLinks).mockResolvedValue(undefined);
+    mocks.refresh.mockResolvedValue({ completedStories: 1, failedStories: 0, skippedStories: 0 });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(mocks.publish).toHaveBeenCalledOnce();
     expect(mocks.operations.get('pipeline_digest')).toMatchObject({ phase: 'completed', attempt: 0 });
@@ -186,7 +183,7 @@ describe('automatic recovery fairness', () => {
 
   it('selects ready stories on a scheduled cron tick even when the sweep checkpoints', async () => {
     await start();
-    vi.mocked(associateSourceLinks).mockImplementationOnce(async () => {
+    mocks.refresh.mockImplementationOnce(async () => {
       const { ProcessingYield } = await import('./processing-slice.js');
       throw new ProcessingYield();
     });

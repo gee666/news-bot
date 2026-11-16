@@ -243,7 +243,8 @@ describe.skipIf(!url)('automatic processing and restart', () => {
     await withProcessingSlice(() => extractBatch(batchId,settings));
     expect(mocks.empty).toHaveBeenCalledOnce();
     expect((await database.db.query('SELECT status,attempts,output FROM stage_state WHERE batch_id=$1 AND stage=$2',
-      [batchId,'extract:events-v6'])).rows).toEqual([{ status: 'completed', attempts: 0, output: [] }]);
+      [batchId,`extract:${(await import('./extraction-store.js')).EXTRACTION_VERSION}`])).rows)
+      .toEqual([{ status: 'completed', attempts: 0, output: [] }]);
     expect((await database.db.query('SELECT status FROM batch_items WHERE batch_id=$1 AND revision_id=$2', [batchId,revision])).rows)
       .toEqual([{ status: 'rejected' }]);
     vi.restoreAllMocks(); vi.stubEnv('PROCESSING_SLICE_MS', '120000');
