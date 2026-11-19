@@ -30,7 +30,7 @@ export async function textNavigationSources(client: Pick<PoolClient,'query'>, so
   return sources.filter(source=>!isNavigationSource(source) || !blocked.has(source.url));
 }
 
-const verifiedSameEdges = `edges(a,b) AS (
+export const verifiedSameEdges = `edges(a,b) AS (
   SELECT story_id,previous_story_id FROM publication_thread_edges
   UNION SELECT lower_story_id,upper_story_id FROM story_relations
     WHERE relation='same' AND provenance->>'quarantined' IS DISTINCT FROM 'true'

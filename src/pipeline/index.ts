@@ -13,6 +13,8 @@ import { reembedPending } from './vectors.js';
 import { ProcessingYield, withProcessingSlice } from './processing-slice.js';
 import { withLease } from './lease.js';
 import { runNow, type RunNowJob, type RunNowOutcome } from './run-now.js';
+import { unpublished } from './generation-store.js';
+import { blockedStoriesCte, manualStoryWork } from './item-failures.js';
 
 export interface Pipeline {
   start(): Promise<void>;
@@ -24,10 +26,26 @@ export interface Pipeline {
   status(): Promise<unknown>;
 }
 export { withLease } from './lease.js';
+
+export async function digestRecoveryDue(): Promise<boolean> {
+  const due = await db.query(`WITH ${blockedStoriesCte} SELECT 1 FROM operational_state o WHERE
+    (key='pipeline_digest' AND (value->>'phase'='running' OR (value->>'next')::timestamptz<=now()))
+    OR (key LIKE 'pipeline_failed_story:%' AND (value->>'next')::timestamptz<=now() AND EXISTS(
+      SELECT 1 FROM stories s WHERE o.value->>'storyId'=s.id::text AND ${unpublished('s')}
+        AND s.status IN ('pending','processing','completed','failed')
+        AND s.id::text NOT IN(SELECT id FROM blocked_stories) AND NOT (${manualStoryWork('s')})
+        AND EXISTS(SELECT 1 FROM story_mentions m JOIN source_items i ON i.current_revision_id=m.revision_id
+          WHERE m.story_id=s.id)))
+    OR key LIKE 'digest_refresh:%'
+    LIMIT 1`);
+  return due.rows.length > 0;
+}
+
 export async function createPipeline(): Promise<Pipeline> {
   let running = false;
   let refreshing = false;
   let recovering = false;
+  let recoveringDigest = false;
   let scheduleKey = '';
   let tasks: ScheduledTask[] = [];
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -58,7 +76,7 @@ export async function createPipeline(): Promise<Pipeline> {
         attempt => reembedPending(settings, attempt));
     });
   };
-  const digest = async (manual = false, scheduled = false) => {
+  const digest = async (manual = false, scheduled = false, onRefreshed?: () => void) => {
     await withLease('news-bot-digest-refresh', async () => {
       const settings = await getSettings();
 
@@ -78,6 +96,8 @@ export async function createPipeline(): Promise<Pipeline> {
             return result;
           };
           const report = await refresh(() => refreshDigest(settings, judgments));
+          // Publication doesn't use the processor lease and must not hold up collection recovery.
+          onRefreshed?.();
           // Scheduled ticks can send ready stories; recovery waits for a complete sweep.
           if (scheduled || !partial) await publishDigest(settings);
           if (partial) throw new OperationalDeferred('Partial digest sweep. Saved work will resume after the checkpoint.');
@@ -90,20 +110,19 @@ export async function createPipeline(): Promise<Pipeline> {
   const recover = async () => {
     if (!running || recovering) return;
     recovering = true;
+    let released = false;
+    const releaseCollection = () => { recovering = false; released = true; };
     try {
-      // Competing callbacks on the same cadence let even idle collection inspections starve digest.
-      // One turn each per sweep prevents that race without giving digest permanent priority.
+      // Alternate collection and model refresh under the processor lease, but don't wait for sending.
       await background(() => collection(false, true));
-      if (!running) return;
-      await background(async () => {
-        const due = await db.query(`SELECT 1 FROM operational_state WHERE
-          (key='pipeline_digest' AND (value->>'phase'='running' OR (value->>'next')::timestamptz<=now()))
-          OR (key LIKE 'pipeline_failed_story:%' AND (value->>'next')::timestamptz<=now())
-          OR key LIKE 'digest_refresh:%'
-          LIMIT 1`);
-        if (due.rows.length) await digest();
-      });
-    } finally { recovering = false; }
+      if (!running || recoveringDigest) return;
+      recoveringDigest = true;
+      try {
+        await background(async () => {
+          if (await digestRecoveryDue() && running) await digest(false, false, releaseCollection);
+        });
+      } finally { recoveringDigest = false; }
+    } finally { if (!released) releaseCollection(); }
   };
   async function configure(): Promise<void> {
     if (refreshing) return;

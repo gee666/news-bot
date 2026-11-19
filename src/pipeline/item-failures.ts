@@ -15,6 +15,12 @@ export const blockedStoriesCte = `blocked_stories(id) AS (
       AND NOT (r.metadata @> '{"pipelineFailure":true}'::jsonb))
 )`;
 
+// A manual operation owns these stories until its batch finishes.
+export const manualStoryWork = (story: string): string => `EXISTS(SELECT 1 FROM processing_batches batch
+  WHERE batch.completed_at IS NULL AND batch.manual_operation_id IS NOT NULL AND (
+    EXISTS(SELECT 1 FROM stage_state st WHERE st.batch_id=batch.id AND st.story_id=${story}.id)
+    OR EXISTS(SELECT 1 FROM story_mentions m JOIN batch_items b ON b.revision_id=m.revision_id WHERE b.batch_id=batch.id AND m.story_id=${story}.id)))`;
+
 /** SQL identifiers/placeholders are fixed by callers, never external input. */
 export function dueBatchItems(batchIdSql:string):string {
   return `EXISTS(SELECT 1 FROM batch_items i WHERE i.batch_id=${batchIdSql} AND i.status IN ('pending','processing')

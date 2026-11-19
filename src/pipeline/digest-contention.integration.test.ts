@@ -28,14 +28,34 @@ describe.skipIf(!url)('digest history lock contention with PostgreSQL', () => {
     const story = await one("INSERT INTO stories(status,interest_stale) VALUES('failed',true) RETURNING id");
     snapshotId = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id', [story, JSON.stringify(content)]);
     const desired = await one('INSERT INTO publication_snapshots(story_id,content) VALUES($1,$2) RETURNING id', [story, JSON.stringify({ ...content, headline: 'Непроверенная правка' })]);
-    publicationId = await one(`INSERT INTO publications(story_id,snapshot_id,pending_snapshot_id,destination_id,message_id,status)
-      VALUES($1,$2,$3,'-100123','1','published') RETURNING id`, [story, snapshotId, desired]);
+    publicationId = await one(`INSERT INTO publications(story_id,snapshot_id,pending_snapshot_id,destination_id,message_id,status,published_at)
+      VALUES($1,$2,$3,'-100123','1','published',now()) RETURNING id`, [story, snapshotId, desired]);
   });
   afterAll(async () => {
     if (database) await database.db.end();
     if (admin) { await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); }
     vi.unstubAllEnvs();
   });
+  it('ignores due retries for published or missing stories but keeps actionable retries', async () => {
+    const { digestRecoveryDue } = await import('./index.js');
+    const published = await one('SELECT story_id AS id FROM publications WHERE id=$1', [publicationId]);
+    const missing = randomUUID();
+    const draft = await one("INSERT INTO stories(status) VALUES('failed') RETURNING id");
+    const source = await one("INSERT INTO sources(connector_type,external_id,name,access) VALUES('telegram','12345','Fixture','public') RETURNING id");
+    const item = await one("INSERT INTO source_items(source_id,external_id,retention_at) VALUES($1,'1',now()) RETURNING id", [source]);
+    const revision = await one("INSERT INTO item_revisions(item_id,revision_number,original_text,normalized_text,content_hash) VALUES($1,1,'News','News','hash') RETURNING id", [item]);
+    await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1', [item, revision]);
+    for (const id of [published, missing, draft]) {
+      await database.db.query('INSERT INTO operational_state(key,value) VALUES($1,$2)',
+        [`pipeline_failed_story:${id}`, { storyId: id, next: '2020-01-01T00:00:00Z' }]);
+    }
+    await database.db.query("INSERT INTO story_mentions(story_id,revision_id,text,ordinal) VALUES($1,$2,'News',0)", [published, revision]);
+    expect(await digestRecoveryDue()).toBe(false);
+    await database.db.query("INSERT INTO story_mentions(story_id,revision_id,text,ordinal) VALUES($1,$2,'News',1)", [draft, revision]);
+    expect(await digestRecoveryDue()).toBe(true);
+    await database.db.query("DELETE FROM operational_state WHERE key LIKE 'pipeline_failed_story:%'");
+  });
+
   it('does not hold a session history lease across model work or publisher preparation on another client', async () => {
     const blocker = await database.db.connect();
     const { createPipeline } = await import('./index.js');

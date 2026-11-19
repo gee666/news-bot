@@ -47,12 +47,19 @@ it('does not treat a missing pinned receipt as deletion coverage', async () => {
 });
 
 it('does not stage an identity-only replacement before a combined successor is published', async () => {
-  mocks.query.mockResolvedValueOnce({ rows: [{ id: 'old-post', story_id: first }] })
-    .mockResolvedValueOnce({ rows: [{ id: 'existing-branch', snapshot_id: 'branch-snapshot' }] })
-    .mockResolvedValueOnce({ rows: [{ coverage: null, required_story_ids: [first], ancestor_story_ids: [second] }] });
+  mocks.query.mockResolvedValueOnce({ rows: [{ publication_id: 'existing-branch', blocked_by: null }] })
+    .mockResolvedValueOnce({ rows: [{ effective_story_id: second, story_id: second, snapshot_id: 'branch-snapshot', coverage: [] }] });
+  expect(mocks.same).not.toHaveBeenCalled();
   await prepareReplacements(client, '-100123');
   expect(mocks.supersede).not.toHaveBeenCalled();
   expect(mocks.query.mock.calls.some(([sql]) => sql.includes('INSERT INTO publication_replacements'))).toBe(false);
+});
+
+it('does not look up any publication or relation with an empty event queue', async () => {
+  mocks.query.mockResolvedValueOnce({ rows: [] });
+  await prepareReplacements(client, '-100123');
+  expect(mocks.query).toHaveBeenCalledTimes(1);
+  expect(mocks.same).not.toHaveBeenCalled();
 });
 
 it.each([false, true])('rechecks coverage at deletion even for an already staged proof, covered: %s', async covered => {

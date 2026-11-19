@@ -19,11 +19,14 @@ const cachedDecisionSchema = z.object({
   relation: relationSchema, probabilities: z.record(z.string(), probability), confidence: probability,
   model: z.string().min(1), promptVersion: z.string().min(1), inputHash: z.string().min(1),
 });
-type Classifier = Pick<JevClient, 'judge'>;
+interface GroupingOptions {
+  classifier?: Pick<JevClient, 'judge'>;
+  stopOnSame?: boolean;
+}
 
 /** One JEV classification per uncached pair. No generation, repair or fallback call. */
 export async function groupReport(incoming: EventInput, candidates: readonly EventInput[], settings: AppSettings,
-  context: StageContext, classifier?: Classifier): Promise<StoryRelationDecision[]> {
+  context: StageContext, { classifier, stopOnSame }: GroupingOptions = {}): Promise<StoryRelationDecision[]> {
   if (!candidates.length) return [];
   const modelKey = `${settings.jevUrl}/${settings.jevModel}/${settings.modelVersion}`;
   const cacheVersion = `${CACHE_VERSION}:prefix-${Number(settings.prefixCacheEnabled)}`;
@@ -72,6 +75,7 @@ export async function groupReport(incoming: EventInput, candidates: readonly Eve
       }
       decisions.push({ storyId: candidate.id, relation,
         ...(relation === 'related' ? { relatedPromptVersion: jevTemplates.duplicate.version } : {}) });
+      if (stopOnSame && relation === 'same') break;
     }
     return decisions;
   } finally { await ownedClient?.close(); }

@@ -6,7 +6,6 @@ import { hash, stage, type StageContext } from './state.js';
 import type { Vectors } from './vectors.js';
 import { mentionInput, type EventInput, type HistoricalEventRef } from './consolidation-input.js';
 import { GROUPING_VERSION, groupReport } from './grouping-model.js';
-import { mergeStories } from './consolidation-store.js';
 import { historicalEventInput } from './historical-input.js';
 import { publishedStory, unpublished } from './generation-store.js';
 import { latestThreadStory } from './publication-thread.js';
@@ -18,9 +17,17 @@ import { currentMatchingInput, groupEventInput, matchingInputStoryIds } from './
 export interface Mention { id: string; revision_id: string; text: string; story_id: string | null }
 interface ClassifiedCandidate extends StoryRelationDecision { candidate: Candidate }
 interface Candidate { id: string; text: string; previous_revision_id: string | null; input?: EventInput; history?: HistoricalEventRef }
-// Bound serial model calls as history grows, but never discard source/link/revision anchors.
+// Keep the nearest few even with weak evidence (e.g. translations or embedding model drift).
+const alwaysCompareNearest = 3;
+const weakCosineDistance = 0.5;
 async function candidates(mention: Mention, vector: number[], vectors: Vectors, settings: AppSettings, batchId: string): Promise<Candidate[]> {
-  const result = await db.query<Candidate>(`WITH RECURSIVE current_mentions AS MATERIALIZED (
+  const result = await transaction(async client => {
+    // This short-lived query costs more to JIT-compile than to run. Do not change pooled sessions.
+    await client.query('SET LOCAL jit = off');
+    return client.query<Candidate>(`WITH RECURSIVE incoming_lexemes AS MATERIALIZED (
+    SELECT lexeme FROM unnest(tsvector_to_array(to_tsvector('simple',$7))) AS lexemes(lexeme)
+    WHERE length(lexeme)>=4 AND to_tsvector('english',lexeme)<>''::tsvector AND to_tsvector('russian',lexeme)<>''::tsvector
+  ), current_mentions AS MATERIALIZED (
     SELECT m.*,i.original_url,e.embedding FROM story_mentions m
     JOIN item_revisions r ON r.id=m.revision_id JOIN source_items i ON i.current_revision_id=r.id
     LEFT JOIN embeddings e ON e.mention_id=m.id AND e.config_id=$4
@@ -29,7 +36,7 @@ async function candidates(mention: Mention, vector: number[], vectors: Vectors, 
     SELECT s.id,string_agg(DISTINCT cm.text,E'\\n\\n' ORDER BY cm.text) AS text,
       min(cm.embedding <=> $1::vector) AS distance,
       max(cardinality(ARRAY(SELECT unnest(tsvector_to_array(to_tsvector('simple',cm.text)))
-        INTERSECT SELECT unnest(tsvector_to_array(to_tsvector('simple',$7)))))) AS lexical,
+        INTERSECT SELECT lexeme FROM incoming_lexemes))) AS lexical,
       EXISTS(SELECT 1 FROM story_mentions other JOIN mention_links oml ON oml.mention_id=other.id
         JOIN item_links ol ON ol.id=oml.link_id JOIN item_links il ON il.url=ol.url
         JOIN mention_links iml ON iml.link_id=il.id
@@ -78,10 +85,12 @@ async function candidates(mention: Mention, vector: number[], vectors: Vectors, 
     ), ranked AS (
       SELECT *,row_number() OVER(ORDER BY distance ASC NULLS LAST,lexical DESC,id) AS similarity_rank FROM permitted
     ) SELECT id,text,previous_revision_id FROM ranked
-    WHERE priority=0 OR shared_link OR same_source OR similarity_rank<=20
-    ORDER BY priority,shared_link DESC,distance ASC NULLS LAST,lexical DESC,same_source DESC,id`,
-  [JSON.stringify(vector), mention.id, mention.revision_id, vectors.config.id, settings.retentionDays, batchId,
-    mention.text, mention.story_id, process.env.ALLOW_PRIVATE_INFERENCE==='true']);
+    WHERE priority=0 OR shared_link OR same_source OR (similarity_rank<=20 AND
+      (similarity_rank<=$10 OR distance IS NULL OR distance='NaN'::float8 OR distance<=$11 OR lexical>=2))
+    ORDER BY priority,shared_link DESC,same_source DESC,distance ASC NULLS LAST,lexical DESC,id`,
+    [JSON.stringify(vector), mention.id, mention.revision_id, vectors.config.id, settings.retentionDays, batchId,
+      mention.text, mention.story_id, process.env.ALLOW_PRIVATE_INFERENCE==='true', alwaysCompareNearest, weakCosineDistance]);
+  });
   // A prior extraction's text is only a fallback when that group has no current mentions.
   for (const candidate of result.rows) {
     const current = await groupEventInput(candidate.id, settings);
@@ -151,21 +160,15 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
           if (!candidate.input) throw new Error('Story has no matching input');
           return candidate.input;
         });
-        const decisions = await groupReport(incoming, inputs, settings, context);
+        const byId = new Map(available.map(candidate => [candidate.id, candidate]));
+        const decisions = await groupReport(incoming, inputs, settings, context, { stopOnSame: true });
         const classified: ClassifiedCandidate[] = decisions.map(decision => {
-          const candidate = available.find(candidate => candidate.id === decision.storyId);
+          const candidate = byId.get(decision.storyId);
           if (!candidate) throw new Error('Grouping target changed');
           return { ...decision, candidate };
         });
-        const matches = decisions.filter(decision => decision.relation === 'same');
-        // Reuse a matching draft before considering a separate post.
-        const posted = new Map<string, Awaited<ReturnType<typeof publishedStory>>>();
-        for (const match of matches) posted.set(match.storyId, await publishedStory(match.storyId));
-        const drafts = matches.filter(match => !posted.get(match.storyId));
-        const selected = drafts.length ? drafts : matches;
-        const matched = available.find(candidate => candidate.id === selected[0]?.storyId);
-        const relation = 'same';
-        const previous = matched ? posted.get(matched.id) : null;
+        const matched = classified.find(decision => decision.relation === 'same')?.candidate;
+        const previous = matched ? await publishedStory(matched.id) : null;
         if (previous) {
           const latest = await latestThreadStory(previous.storyId);
           const latestInput = await groupEventInput(latest, settings);
@@ -173,9 +176,9 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
             ? { id: latest, text: latestInput.text, previous_revision_id: null, input: latestInput } : matched;
           // Grouping already established event identity. Every published match gets a new post,
           // including repeated coverage, without mutating the old story or its sources.
-          return attach(mention, incoming, vector, settings, target, relation, vectors, context, classified, latest, true);
+          return attach(mention, incoming, vector, target, vectors, context, classified, latest);
         }
-        return attach(mention, incoming, vector, settings, matched, relation, vectors, context, classified, undefined, false, drafts.map(match => match.storyId));
+        return attach(mention, incoming, vector, matched, vectors, context, classified);
       });
     } catch (error) {
       if (error instanceof ProcessingYield) throw error;
@@ -187,8 +190,8 @@ export async function matchBatch(batchId: string, settings: AppSettings, vectors
   }
 }
 
-async function attach(mention: Mention, incoming: EventInput, vector: number[], settings: AppSettings, matched: Candidate | undefined, relation: string,
-  vectors: Vectors, context: StageContext, decisions: readonly ClassifiedCandidate[], previousStoryId?: string, judgedPublication=false, draftIds: readonly string[] = []): Promise<string> {
+async function attach(mention: Mention, incoming: EventInput, vector: number[], matched: Candidate | undefined,
+  vectors: Vectors, context: StageContext, decisions: readonly ClassifiedCandidate[], previousStoryId?: string): Promise<string> {
   return transaction(async client => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
     // Keep collection edits from retiring either source while committing a model decision.
@@ -214,25 +217,7 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
     if (matched) await client.query('SELECT id FROM stories WHERE id=$1 FOR UPDATE', [matched.id]);
     const posted = matched ? await publishedStory(matched.id,client.query.bind(client)) : null;
     // Publication may have finished while grouping was in flight. Retry with its posted context.
-    if (posted && !judgedPublication) throw new Error('Story published during matching');
-    // Validate the original compared groups first, then keep every draft merge and
-    // the incoming attachment under the same history/source locks. Only draft
-    // owners move reports; published branches retain their original ownership.
-    for (const id of draftIds) {
-      if (await publishedStory(id, client.query.bind(client))) throw new Error('Story published during matching');
-    }
-    for (const id of draftIds) {
-      if (!matched || id === matched.id) continue;
-      const right = decisions.find(decision => decision.storyId === id)?.candidate;
-      if (!matched.input || !right?.input) throw new Error('Grouping target changed');
-      const merged = await mergeStories(matched.input, right.input, 'same', {
-        ...(matched.history ? { left: matched.history } : {}), ...(right.history ? { right: right.history } : {}),
-      }, { client, unpublishedOnly: true });
-      if (!merged) throw new Error('Grouping target changed');
-      const input = await groupEventInput(merged.canonicalId, settings, client);
-      if (!input) throw new Error('Merged story has no reports');
-      matched = { id: merged.canonicalId, text: input.text, input, previous_revision_id: null };
-    }
+    if (posted && !previousStoryId) throw new Error('Story published during matching');
     let storyId = previousStoryId ? undefined : matched?.id;
     if (!storyId) {
       const created = await client.query<{ id: string }>(`INSERT INTO stories(status,chosen_excerpt,meaningful_hash)
@@ -259,7 +244,7 @@ async function attach(mention: Mention, incoming: EventInput, vector: number[], 
         candidates: sameDecisions.map(({ storyId, candidate }) => ({ storyId, fingerprint: candidate.input?.fingerprint })) }, client);
     if (accepted.length !== sameDecisions.length) throw new Error('Conflicting event identity during matching');
     await client.query('UPDATE story_mentions SET story_id=$2,metadata=metadata || $3::jsonb WHERE id=$1',
-      [mention.id, storyId, JSON.stringify({ ...(matched ? { relation } : {}), batchId: context.batchId, ...(previousStoryId ? { previous_story_id:previousStoryId } : {}) })]);
+      [mention.id, storyId, JSON.stringify({ ...(matched ? { relation: 'same' } : {}), batchId: context.batchId, ...(previousStoryId ? { previous_story_id:previousStoryId } : {}) })]);
     await client.query(`UPDATE stories SET status='processing',interest_stale=true,updated_at=now()
       WHERE id=$1 AND status='rejected' AND ${unpublished('stories')}`, [storyId]);
     await client.query(`INSERT INTO consolidation_intake(revision_id,item_id,text_fingerprint,urls)

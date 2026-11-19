@@ -7,7 +7,19 @@ import type { StoryRelationDecision } from './story-relations.js';
 
 const model = vi.hoisted(() => ({ group: vi.fn<(incoming: EventInput, candidates: EventInput[]) => Promise<StoryRelationDecision[]>>()
   .mockResolvedValue([]) }));
-vi.mock('./grouping-model.js', () => ({ GROUPING_VERSION: 'candidate-test', groupReport: model.group }));
+vi.mock('./grouping-model.js', () => ({ GROUPING_VERSION: 'candidate-test',
+  async groupReport(incoming: EventInput, candidates: EventInput[], _settings: AppSettings, _context: unknown,
+    options: { stopOnSame: boolean }) {
+    const fixture = await model.group(incoming, candidates);
+    const classified: StoryRelationDecision[] = [];
+    for (const candidate of candidates) {
+      const decision = fixture.find(value => value.storyId === candidate.id);
+      if (decision) classified.push(decision);
+      if (options.stopOnSame && decision?.relation === 'same') break;
+    }
+    return classified;
+  },
+}));
 vi.mock('../models/embedding.js', () => ({ EmbeddingClient: class {
   async embed() { return { vectors: [[1, 2, 3]] }; }
   async close() {}
@@ -66,6 +78,10 @@ async function classify(batchId?: string, revisionId?: string, mentionId?: strin
 }
 async function retainedIds(): Promise<string[]> {
   return (await (await import('./matching.js')).retainedStories(settings)).map(input => input.id).sort();
+}
+async function sourceAnchor(incoming: Awaited<ReturnType<typeof report>>, ...anchors: Awaited<ReturnType<typeof report>>[]) {
+  await database.db.query(`UPDATE source_items SET original_url=(SELECT original_url FROM source_items WHERE id=$1)
+    WHERE id=ANY($2::uuid[])`, [incoming.item, anchors.map(anchor => anchor.item)]);
 }
 
 describe.skipIf(!url)('canonical matching candidate selection', () => {
@@ -237,24 +253,46 @@ describe.skipIf(!url)('canonical matching candidate selection', () => {
     expect(afterMembership?.reports).toEqual(beforeMembership?.reports);
     expect(afterMembership?.fingerprint).not.toBe(beforeMembership?.fingerprint);
   });
-  it('physically consolidates matching drafts before attaching and compares their combined group next time', async () => {
-    const a = await story('First group.', 3); const b = await story('Second group.', 2);
-    const c = await story('Third group.', 4);
-    model.group.mockImplementation(async (_incoming, candidates) => candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' })));
-    await classify();
-    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation='same'")).rows).toHaveLength(2);
-    expect((await database.db.query('SELECT * FROM story_merges')).rows).toHaveLength(2);
-    expect(await retainedIds()).toHaveLength(1);
-    const { groupEventInput } = await import('./matching-group-input.js');
-    const aggregate = await groupEventInput(a.id, settings);
-    expect(aggregate?.storyIds.sort()).toEqual([a.id, b.id, c.id].sort());
-    expect(aggregate?.reports.map(report => report.text).sort()).toEqual(['First group.', 'Second group.', 'Third group.', 'Incoming C.'].sort());
-    model.group.mockClear();
-    expect(await classify()).toHaveLength(1);
+  it('skips weak ordinary pairs outside the nearest three without meaningful lexical overlap', async () => {
+    const closest = await story('Paraphrase.', 0, 'public', [1, 2, 3]);
+    const second = await story('Alternative.', 0, 'public', [1, 1, 0]);
+    const fallback = await story('Translation.', 0, 'public', [2, -1, 0]);
+    const weak = await story('Unconnected.', 0, 'public', [-1, -2, -3]);
+    const lexical = await story('Incoming hardware update.', 0, 'public', [-1, -2, -3]);
+    const genericOverlap = await story('About these offers.', 0, 'public', [-1, -2, -3]);
+    const oneLexeme = await story('Hardware discussion.', 0, 'public', [-1, -2, -3]);
+    const unknown = await story('Unembedded.');
+    await database.db.query('DELETE FROM embeddings WHERE mention_id=$1', [unknown.mention]);
+    const source = await story('Syndication.', 0, 'public', [-1, -2, -3]);
+    const incoming = await report('Incoming hardware report about these changes.', null);
+    await sourceAnchor(incoming, source);
+    const ids = (await classify(await batch(), incoming.revision, incoming.mention)).map(input => input.id);
+    expect(ids).toEqual([source.id, closest.id, second.id, fallback.id, lexical.id, unknown.id]);
+    for (const skipped of [weak, genericOverlap, oneLexeme]) expect(ids).not.toContain(skipped.id);
   });
-  it('rejects a changed non-representative report before merging any same drafts', async () => {
+  it('attaches to the strongest ordinary same match without recording skipped verdicts', async () => {
+    const strongest = await story('Closest.', 0, 'public', [1, 2, 3]);
+    const weaker = await story('Another draft.', 0, 'public', [1, 1, 0]);
+    model.group.mockImplementation(async (_incoming, candidates) => candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' })));
+    expect((await classify()).map(input => input.id)).toEqual([strongest.id, weaker.id]);
+    expect((await database.db.query("SELECT story_id FROM story_mentions WHERE text='Incoming C.'")).rows).toEqual([{ story_id: strongest.id }]);
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
+    expect((await database.db.query('SELECT * FROM story_relations')).rows).toEqual([]);
+  });
+  it('checks a weak source anchor first and stops on its same verdict before other candidates', async () => {
+    const anchor = await story('Source anchor.', 3, 'public', [-1, -2, -3]);
+    const ordinary = await story('Nearest draft.', 2);
+    const incoming = await report('Incoming C.', null);
+    await sourceAnchor(incoming, anchor);
+    model.group.mockImplementation(async (_incoming, candidates) => candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' })));
+    expect((await classify(await batch(), incoming.revision, incoming.mention)).map(input => input.id)).toEqual([anchor.id, ordinary.id]);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE id=$1', [incoming.mention])).rows).toEqual([{ story_id: anchor.id }]);
+    expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
+    expect((await database.db.query('SELECT * FROM story_relations')).rows).toEqual([]);
+  });
+  it('rejects a changed non-representative report before attaching to its group', async () => {
     const a = await story('Ancestor report.', 4); const b = await story('Representative report.', 3);
-    await same(a.id, b.id); await story('Other matching draft.', 2);
+    await same(a.id, b.id); await story('Other matching draft.', 2, 'public', [1, 1, 0]);
     model.group.mockImplementation(async (_incoming, candidates) => {
       await database.db.query("UPDATE story_mentions SET text='Changed while matching.' WHERE id=$1", [a.mention]);
       return candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' }));
@@ -263,8 +301,8 @@ describe.skipIf(!url)('canonical matching candidate selection', () => {
     expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
     expect((await database.db.query("SELECT story_id FROM story_mentions WHERE text='Incoming C.'")).rows).toEqual([{ story_id: null }]);
   });
-  it('bridges every published same group without physically merging or changing their owners', async () => {
-    const a = await story('Published A.', 3); const b = await story('Published B.', 2);
+  it('links to the strongest published match without bridging another same anchor or changing either owner', async () => {
+    const a = await story('Published A.', 3); const b = await story('Published B.', 2, 'public', [1, 1, 0]);
     for (const id of [a.id, b.id]) {
       const snapshot = await one(`INSERT INTO publication_snapshots(story_id,content)
         VALUES($1,'{"headline":"Published","score":7,"details":"Original","detailsKind":"excerpt","sources":[]}') RETURNING id`, [id]);
@@ -272,14 +310,16 @@ describe.skipIf(!url)('canonical matching candidate selection', () => {
         VALUES($1,$2,'fixture',$3,$4,'published',now())`, [id, snapshot, randomUUID(), randomUUID()]);
     }
     const before = (await database.db.query('SELECT * FROM stories ORDER BY id')).rows;
+    const incoming = await report('Incoming C.', null);
+    await sourceAnchor(incoming, a, b);
     model.group.mockImplementation(async (_incoming, candidates) => candidates.map(candidate => ({ storyId: candidate.id, relation: 'same' })));
-    await classify();
+    await classify(await batch(), incoming.revision, incoming.mention);
     expect((await database.db.query('SELECT * FROM stories WHERE id=ANY($1::uuid[]) ORDER BY id', [[a.id, b.id]])).rows).toEqual(before);
     expect((await database.db.query('SELECT * FROM story_merges')).rows).toEqual([]);
-    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation='same'")).rows).toHaveLength(2);
-    expect(await retainedIds()).toHaveLength(1);
+    expect((await database.db.query("SELECT relation FROM story_relations WHERE relation='same'")).rows).toHaveLength(1);
+    expect(await retainedIds()).toHaveLength(2);
     const { groupEventInput } = await import('./matching-group-input.js');
     expect((await groupEventInput(a.id, settings))?.reports.map(report => report.text).sort())
-      .toEqual(['Published A.', 'Published B.', 'Incoming C.'].sort());
+      .toEqual(['Published A.', 'Incoming C.'].sort());
   });
 });

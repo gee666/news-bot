@@ -123,6 +123,22 @@ it('retains completed pairs after failure and candidate insertion or reranking',
   ]);
   expect(mocks.judge).toHaveBeenCalledTimes(4);
 });
+it('stops issuing requests after a fresh or cached same verdict when the caller opts in', async () => {
+  const incoming = report('Incoming');
+  const candidates = Array.from({ length: 20 }, (_, i) => report(`Ranked ${i}`));
+  const options = { stopOnSame: true };
+  mocks.judge.mockResolvedValueOnce(result('related')).mockResolvedValueOnce(result('same'));
+  const expected = [
+    { storyId: candidates[0]?.id, relation: 'related', relatedPromptVersion: jevTemplates.duplicate.version },
+    { storyId: candidates[1]?.id, relation: 'same' },
+  ];
+  expect(await groupReport(incoming, candidates, defaultSettings, context, options)).toEqual(expected);
+  expect(mocks.judge).toHaveBeenCalledTimes(2);
+  expect(mocks.cache.size).toBe(2);
+  expect(approveRemoteInput).toHaveBeenCalledTimes(4);
+  expect(await groupReport(incoming, candidates, defaultSettings, context, options)).toEqual(expected);
+  expect(mocks.judge).toHaveBeenCalledTimes(2);
+});
 it('returns every same group so one incoming report can bridge their identity', async () => {
   const incoming = report('New'); const candidates = [report('One'), report('Two'), report('Three')];
   mocks.judge.mockResolvedValue(result('same'));

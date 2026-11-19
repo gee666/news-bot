@@ -12,7 +12,7 @@ import { hash, StoryCompletionError, type StoryCompletionChecks, type StageConte
 import { Vectors } from './vectors.js';
 import { assessEligibility, currentDecision } from './eligibility.js';
 import { jevTemplates } from '../models/templates.js';
-import { blockedStoriesCte } from './item-failures.js';
+import { blockedStoriesCte, manualStoryWork } from './item-failures.js';
 import { eventInput } from './consolidation-input.js';
 import { StoryIntegrityError } from './event-integrity-error.js';
 import { checkProcessingSlice } from './processing-slice.js';
@@ -197,10 +197,7 @@ export async function refreshDigest(settings: AppSettings, judgments: Judgments,
     WHERE ${unpublished('s')}
     AND s.id::text NOT IN(SELECT id FROM blocked_stories)
     AND ($3::uuid[] IS NULL OR s.id=ANY($3))
-    AND ($3::uuid[] IS NOT NULL OR NOT EXISTS(SELECT 1 FROM processing_batches batch
-      WHERE batch.completed_at IS NULL AND batch.manual_operation_id IS NOT NULL AND (
-        EXISTS(SELECT 1 FROM stage_state st WHERE st.batch_id=batch.id AND st.story_id=s.id)
-        OR EXISTS(SELECT 1 FROM story_mentions m JOIN batch_items b ON b.revision_id=m.revision_id WHERE b.batch_id=batch.id AND m.story_id=s.id))))
+    AND ($3::uuid[] IS NOT NULL OR NOT (${manualStoryWork('s')}))
     AND (s.status IN ('pending','processing','completed','failed')
       OR EXISTS(SELECT 1 FROM operational_state o WHERE o.key='digest_refresh:'||s.id::text)
       OR (s.status='rejected' AND NOT EXISTS(${currentDecision})))

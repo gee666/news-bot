@@ -5,6 +5,7 @@ import { getSettings, type AppSettings } from '../settings.js';
 import { BotApi } from './bot-api.js';
 import { reconcile, sendPrepared } from './delivery.js';
 import { prepareThreadUpdates } from './thread-updates.js';
+import { hasThreadEvents } from './thread-events.js';
 import { retryEdits } from './updates.js';
 import { prepareReadyStories } from './ready.js';
 import { retryReplacements } from './repair.js';
@@ -49,9 +50,8 @@ async function dispatch(settings: AppSettings, selectNewStories: boolean): Promi
   await recoverSends(destinationId);
   await recoverEdits(destinationId);
   await recoverPublicationMedia(destinationId);
-  await prepareThreadUpdates(destinationId);
   if (await rateLimited()) return;
-  if (!selectNewStories) {
+  if (!selectNewStories && !await hasThreadEvents(destinationId)) {
     const row = (await db.query<{ pending: boolean }>(`SELECT EXISTS(SELECT 1 FROM publication_destination_reservations WHERE destination_id=$1)
       OR EXISTS(SELECT 1 FROM publications p WHERE p.destination_id=$1
       AND ${due} AND ((p.status='prepared' AND (p.story_id IS NOT NULL

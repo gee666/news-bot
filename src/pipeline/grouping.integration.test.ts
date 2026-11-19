@@ -5,7 +5,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import type { AppSettings } from '../settings.js';
 import { BotApi } from '../publishing/bot-api.js';
 import { jevTemplates } from '../models/templates.js';
-import { expectFollowupMarker } from './grouping.test-helpers.js';
 import { ModelRequestError, failureMetadata, RequestFault } from '../models/errors.js';
 
 const model = vi.hoisted(() => ({ groupingCalls: 0, extractionCalls: 0, linksCalls: 0, relation: '' }));
@@ -377,7 +376,7 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
     expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[revision])).rows).toEqual([{story_id:canonical}]);
     expect(BotApi.prototype.send).toHaveBeenCalledOnce();
   });
-  it('reuses a matching draft and links it to the historical published group without changing that owner', async () => {
+  it('stops at a published revision anchor without checking the matching draft or changing either owner', async () => {
     const first=await intake(['Acme выпустила Compiler 2.']); await processIntake(first); await publish();
     const original=await one('SELECT revision_id AS id FROM batch_items WHERE batch_id=$1',[first]);
     const item=await one('SELECT item_id AS id FROM item_revisions WHERE id=$1',[original]);
@@ -394,18 +393,20 @@ describe.skipIf(!url)('grouping through Telegram delivery', { timeout: 60_000 },
       VALUES($1,2,$2,$3,$3) RETURNING id`,[item,randomUUID(),text]);
     await database.db.query('UPDATE source_items SET current_revision_id=$2 WHERE id=$1',[item,edited]);
     await database.db.query('INSERT INTO batch_items(batch_id,revision_id) VALUES($1,$2)',[update,edited]);
-    await processIntake(update); await publish();
-    const attached=(await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1',[edited])).rows[0]?.story_id;
-    expect(attached).toBe(duplicate);
+    const callsBefore = model.groupingCalls;
+    await processIntake(update);
+    expect(model.groupingCalls - callsBefore).toBe(1);
+    const attached = await one('SELECT story_id AS id FROM story_mentions WHERE revision_id=$1', [edited]);
+    expect(attached).not.toBe(duplicate);
     expect(attached).not.toBe(canonical);
-    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:null}]);
+    expect((await database.db.query('SELECT story_id FROM story_mentions WHERE revision_id=$1', [liveRevision])).rows).toEqual([{story_id:duplicate}]);
+    expect((await database.db.query("SELECT metadata->>'previous_story_id' AS previous FROM story_mentions WHERE revision_id=$1",[edited])).rows).toEqual([{previous:canonical}]);
     expect((await database.db.query(`SELECT relation FROM story_relations
       WHERE lower_story_id=least($1::uuid,$2::uuid) AND upper_story_id=greatest($1::uuid,$2::uuid)`,[attached,canonical])).rows)
       .toEqual([{relation:'same'}]);
     expect((await database.db.query("SELECT id FROM judgments WHERE stage='published_update'")).rows).toEqual([]);
-    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(2);
+    expect((await database.db.query('SELECT id FROM stories')).rows).toHaveLength(3);
     expect((await database.db.query('SELECT headline FROM stories WHERE id=$1',[canonical])).rows[0]?.headline).not.toBeNull();
-    expect(BotApi.prototype.send).toHaveBeenCalledTimes(2); vi.mocked(BotApi.prototype.edit).mock.calls.forEach(call => expectFollowupMarker(call[2]));
     expect((await database.db.query('SELECT status FROM processing_batches WHERE id=$1',[update])).rows).toEqual([{status:'completed'}]);
   });
   it('parks one grouping failure while a healthy sibling is generated and published', async () => {

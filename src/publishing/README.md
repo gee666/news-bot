@@ -28,7 +28,10 @@ A newer confirmed post for the same verified event replaces older posts by
 deleting them, not by adding UPD edits. `replacements.ts` stages durable
 `publication_replacements` records only after the successor's canonical text
 receipt is stored. It requires the same bot and destination. Related events
-and unclassified legacy thread links do not authorize deletion.
+and unclassified legacy thread links do not authorize deletion. Discovery starts
+from changed, confirmed survivors and only considers the old story IDs named in
+their pinned generation receipt (or verified directed ancestry for legacy receipts).
+The history lock is not used to rediscover candidates on idle ticks.
 
 New snapshots retain inherited factual sources, but contain no `earlier`
 summary or previous-publication links. Frozen legacy snapshots remain readable
@@ -50,6 +53,28 @@ old media receipts require review. Unknown deletes, including interrupted runnin
 attempts after restart, are terminal and never blindly resent. Manual runs only
 delete predecessors of their selected posts. There is no operator repair or
 approval entry point.
+
+### Maintenance rollout checks
+
+Migration `212_publication_thread_events.sql` seeds one bounded-drain backlog for
+existing navigation repairs and already-covered successors. Delivery, snapshot,
+visibility, and relevant relation changes write subsequent work in the transaction
+that recorded the change. Monitor the backlog after migration and after a restart:
+
+```sql
+SELECT kind, destination_id, blocked_by IS NOT NULL AS deferred,
+       count(*), now() - min(queued_at) AS oldest
+FROM publication_thread_events
+GROUP BY 1, 2, 3 ORDER BY 1, 2, 3;
+```
+
+Unblocked rows for the active destination and global graph rows should drain as
+maintenance runs. Rows for inactive destinations or with unresolved media/edit
+receipts can remain. Also watch `publication_replacements` counts by status and
+`error_code`, and compare `news-bot-history` lock waits and maintenance tick time
+before and after rollout. If backlog age grows, inspect the first failed maintenance
+tick and settings before intervening; do not clear queued events or replay unknown
+Telegram operations.
 
 Permanent edit admission denials retire the pending snapshot. Per-snapshot settlement records prevent staging unchanged navigation or source repairs again. Unknown edits get at most `requestMaxAttempts` read-only reconciliation attempts, with backoff. Exhaustion preserves a terminal ambiguity marker, so recovery cannot blindly resend the same attempted snapshot. Different desired content can get its own edit budget. Ambiguous duplicate edit attempts stop immediately for review.
 

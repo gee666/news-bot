@@ -161,6 +161,19 @@ describe('automatic recovery fairness', () => {
     expect(mocks.leases.size).toBe(0);
   });
 
+  it('keeps processing while digest publication is slow without starting another digest', async () => {
+    const send = deferred();
+    mocks.alwaysDue = true;
+    mocks.publish.mockImplementationOnce(async () => { await send.promise; });
+    try {
+      await start();
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(mocks.turns).toEqual(['collection', 'digest', 'collection', 'collection', 'collection']);
+      expect(mocks.refresh).toHaveBeenCalledOnce();
+      expect(mocks.publish).toHaveBeenCalledOnce();
+    } finally { send.release(); }
+  });
+
   it('defers new publication during partial recovery, then publishes when story refresh finishes', async () => {
     vi.stubEnv('PROCESSING_SLICE_MS', '1000'); mocks.alwaysDue = true;
     mocks.refresh.mockImplementation(async () => {

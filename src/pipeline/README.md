@@ -51,8 +51,13 @@ deadlines and a shared endpoint/model cooldown. Authentication and malformed
 requests still need correction. Checkpoints and successful calls do not consume attempts.
 Healthy siblings continue while failed units wait or exhaust their budget.
 
-Grouping uses JEV directly, once per uncached shortlisted pair, with full
-reports, source URLs and publication times. Cached decisions retain the selected
+Grouping uses JEV directly, with full reports, source URLs and publication times.
+Ingestion compares revision, shared-link and same-source anchors first. Within the
+20 nearest groups it keeps the nearest three and any pair with at least two
+shared non-stopword terms, cosine similarity of at least 0.5, or no usable
+distance. These signals only shortlist; they never set a relation. Ingestion
+stops at the first JEV `same`, even for a published or anchored match.
+Consolidation remains exhaustive. Cached decisions retain the selected
 relation, probabilities, confidence, model and prompt version. Completed pairs survive checkpoints
 and candidate reordering. JEV context limits fail without truncation or a Pi fallback.
 Private inference requires approval or `ALLOW_PRIVATE_INFERENCE=true`.

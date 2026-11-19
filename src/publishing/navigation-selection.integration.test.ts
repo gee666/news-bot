@@ -32,8 +32,64 @@ describe.skipIf(!url)('verified bounded navigation selection',()=>{
     vi.stubEnv('DATABASE_URL',scoped.toString()); database=await import('../db.js'); await database.migrate();
     navigation=await import('./navigation.js'); relations=await import('../pipeline/story-relations.js');
   });
-  beforeEach(async()=>{await database.db.query('TRUNCATE publications,publication_snapshots,stories CASCADE');});
+  beforeEach(async()=>{await database.db.query('TRUNCATE publication_thread_events,publications,publication_snapshots,stories CASCADE');});
   afterAll(async()=>{await database?.db.end(); if(admin){await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);await admin.end();}vi.unstubAllEnvs();});
+
+  it('does not queue isolated negative comparisons, but invalidates links excluded through a same edition', async () => {
+    const own = await fixture('100',0), edition = await fixture('101',1), target = await fixture('200',2);
+    const {prepareThreadUpdates} = await import('./thread-updates.js');
+    const graphCount = async () => (await database.db.query(`SELECT count(*)::int n FROM publication_thread_events WHERE kind='graph'`)).rows[0]?.n;
+    await prepareThreadUpdates('-100123');
+    await classify(own.story_id,target.story_id,'unrelated');
+    expect(await graphCount()).toBe(0);
+    await database.db.query('DELETE FROM story_relations');
+    expect(await graphCount()).toBe(0);
+    await classify(own.story_id,edition.story_id,'same');
+    await classify(edition.story_id,target.story_id,'related');
+    await prepareThreadUpdates('-100123');
+    await database.db.query('UPDATE publications SET snapshot_id=pending_snapshot_id,pending_snapshot_id=NULL WHERE pending_snapshot_id IS NOT NULL');
+    await prepareThreadUpdates('-100123');
+    expect(await graphCount()).toBe(0);
+    expect(await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123')).toHaveLength(1);
+    await classify(own.story_id,target.story_id,'unrelated');
+    expect(await graphCount()).toBe(2);
+    await prepareThreadUpdates('-100123');
+    expect(await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123')).toEqual([]);
+    expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE id=$1',[own.id])).rows[0]?.pending_snapshot_id).toBeTruthy();
+  });
+
+  it('invalidates both endpoints when a usable same edge is quarantined', async () => {
+    const own = await fixture('100',0), edition = await fixture('101',1), target = await fixture('200',2);
+    const {prepareThreadUpdates} = await import('./thread-updates.js');
+    await classify(own.story_id,edition.story_id,'same');
+    await classify(edition.story_id,target.story_id,'related');
+    await prepareThreadUpdates('-100123');
+    await database.db.query('UPDATE publications SET snapshot_id=pending_snapshot_id,pending_snapshot_id=NULL WHERE pending_snapshot_id IS NOT NULL');
+    await prepareThreadUpdates('-100123');
+    await database.db.query(`UPDATE story_relations SET provenance=provenance||'{"quarantined":true}'::jsonb WHERE relation='same'`);
+    const roots = (await database.db.query<{ story_id: string }>(`SELECT story_id FROM publication_thread_events WHERE kind='graph'`)).rows;
+    expect(new Set(roots.map(row => row.story_id))).toEqual(new Set([own.story_id,edition.story_id]));
+    await prepareThreadUpdates('-100123');
+    expect(await navigation.relatedPublicationSources(database.db,own.story_id,'-100123','123')).toEqual([]);
+    expect((await database.db.query('SELECT pending_snapshot_id FROM publications WHERE id=$1',[own.id])).rows[0]?.pending_snapshot_id).toBeTruthy();
+  });
+
+  it('does not wait on the history lock once events have drained', async () => {
+    await fixture('100',0);
+    const {prepareThreadUpdates} = await import('./thread-updates.js');
+    await prepareThreadUpdates('-100123');
+    expect((await database.db.query('SELECT id FROM publication_thread_events')).rows).toEqual([]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await database.transaction(async client => {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('news-bot-history'))");
+        await Promise.race([
+          prepareThreadUpdates('-100123'),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Idle maintenance waited on history lock')), 3000); }),
+        ]);
+      });
+    } finally { clearTimeout(timer); }
+  });
 
   it('selects recent useful five after eligibility and same-component deduplication, deterministically',async()=>{
     const own=await fixture('100',100);
