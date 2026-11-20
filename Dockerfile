@@ -16,7 +16,7 @@ RUN npm ci --omit=dev && npm cache clean --force \
     && mkdir -p /data/pi /data/telegram /app/tmp/media-pair-cache && chown -R node:node /data /app/tmp \
     && chmod 700 /data/pi /data/telegram /app/tmp /app/tmp/media-pair-cache
 COPY --from=build /app/dist ./dist
-COPY migrations ./migrations
+COPY --chmod=0644 migrations/*.sql ./migrations/
 COPY model-data ./model-data
 USER node
 EXPOSE 3000
